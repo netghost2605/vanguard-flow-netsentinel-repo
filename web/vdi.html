@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>VDI Sessions</title>
+<meta name="theme-color" content="#050d1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+ :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+   padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px);min-height:100vh;max-width:600px;margin:0 auto;-webkit-font-smoothing:antialiased;}
+ header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
+ header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
+ header h1{font-size:16px;font-weight:650;}
+ header .dot{margin-left:auto;width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
+ header .dot.live{background:#39ff14;box-shadow:0 0 8px #39ff14;}
+ .sub{font-size:11.5px;color:var(--tick);padding:0 2px 14px;}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:15px;margin-bottom:11px;}
+ .top{display:flex;align-items:center;gap:9px;margin-bottom:12px;}
+ .badge{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:7px;letter-spacing:.4px;}
+ .flow{flex:1;font-family:'SF Mono',ui-monospace,monospace;font-size:12px;color:var(--tick);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+ .hpill{font-size:10.5px;font-weight:700;padding:3px 10px;border-radius:20px;text-transform:uppercase;letter-spacing:.5px;}
+ .metrics{display:flex;gap:10px;}
+ .metrics .m{flex:1;text-align:center;background:#0c1a2c;border-radius:10px;padding:10px 6px;}
+ .metrics .v{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1;}
+ .metrics .l{font-size:9.5px;color:var(--tick);text-transform:uppercase;letter-spacing:.5px;margin-top:4px;}
+ .empty{color:var(--tick);text-align:center;padding:60px 22px;font-size:13px;line-height:1.8;}
+ .empty b{color:var(--text);}
+ footer{text-align:center;color:var(--tick);font-size:11px;margin-top:16px;opacity:.65;line-height:1.6;}
+</style>
+</head>
+<body>
+<header><a class="back" href="/">&#8592;</a><h1>VDI Sessions</h1><div class="dot" id="dot"></div></header>
+<div class="sub" id="sub">Loading&#8230;</div>
+<div id="content"></div>
+<footer>Blast Extreme, PCoIP &amp; RDP sessions detected from active connections. Latency is network RTT to the host.</footer>
+<script>
+var $=function(i){return document.getElementById(i);};
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function bw(v){if(v==null)return '\u2013';v*=8;if(v>=1e6)return (v/1e6).toFixed(1)+' Mbps';if(v>=1e3)return (v/1e3).toFixed(0)+' kbps';return (v|0)+' bps';}
+var PB={'RDP':'#38b8f0','PCoIP':'#c084fc','Blast Extreme':'#39ff14','Blast (UAG)':'#39ff14'};
+function pbadge(p){return PB[p]||'#6a9ab8';}
+function render(d){
+  if(!d.ok){$('content').innerHTML='<div class="empty">'+(esc(d.error)||'Unavailable')+'</div>';return;}
+  var s=d.sessions||[];
+  if(!s.length){$('content').innerHTML='<div class="empty">No active <b>VDI sessions</b>.<br>Connect a Blast, PCoIP or RDP session and it will appear here within ~15s.</div>';
+    $('sub').textContent='0 sessions';return;}
+  $('sub').textContent=s.length+' active session'+(s.length>1?'s':'');
+  var h='';
+  s.forEach(function(x){
+    var col=x.color||'#6a9ab8',pc=pbadge(x.proto);
+    h+='<div class="card"><div class="top">'
+      +'<span class="badge" style="background:'+pc+'22;color:'+pc+';border:1px solid '+pc+'55">'+esc(x.proto)+'</span>'
+      +'<span class="flow">'+esc(x.client)+' &#8594; '+esc(x.host)+'</span>'
+      +'<span class="hpill" style="background:'+col+'22;color:'+col+'">'+esc(x.health)+'</span></div>'
+      +'<div class="metrics">'
+      +'<div class="m"><div class="v" style="color:'+col+'">'+(x.rtt!=null?Math.round(x.rtt):'\u2013')+'</div><div class="l">RTT ms</div></div>'
+      +'<div class="m"><div class="v" style="color:'+((x.loss||0)>=1?"#ff9f43":"#c8dff0")+'">'+(x.loss!=null?Math.round(x.loss):'\u2013')+'</div><div class="l">% loss</div></div>'
+      +'<div class="m"><div class="v" style="color:#c8dff0">'+bw(x.bw)+'</div><div class="l">bandwidth</div></div></div></div>';
+  });
+  $('content').innerHTML=h;
+}
+async function refresh(){
+  try{var r=await fetch('/api/vdi',{cache:'no-store'});var d=await r.json();
+    $('dot').classList.add('live');render(d);
+  }catch(e){$('sub').textContent='Desktop app unreachable \u2014 same Wi\u2011Fi?';$('dot').classList.remove('live');}
+}
+refresh(); setInterval(refresh,8000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)refresh();});
+</script>
+</body>
+</html>

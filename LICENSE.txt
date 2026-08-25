@@ -1,0 +1,37 @@
+PROPRIETARY SOFTWARE LICENSE AGREEMENT
+Copyright (c) 2026 All Rights Reserved.
+NOTICE TO ALL USERS:
+This software, including all associated code, graphics, documentation, and digital assets 
+(collectively referred to as the "Software"), is the strictly confidential and proprietary 
+property of the Copyright Holder.
+RESTRICTIONS ON USE, COPYING, AND DISTRIBUTION:
+1. ABSOLUTE PROHIBITION ON COPYING:
+   No part of this Software may be copied, reproduced, duplicated, mirrored, cached, or 
+   stored in a retrieval system, in any form or by any means, electronic, mechanical, 
+   photocopying, recording, or otherwise, without the prior express written permission 
+   of the Copyright Holder.
+2. ABSOLUTE PROHIBITION ON DISTRIBUTION:
+   No part of this Software may be distributed, resold, sublicensed, leased, rented, 
+   loaned, transferred, broadcast, or transmitted to any third party under any 
+   circumstances, whether for commercial or non-commercial purposes, without the prior 
+   express written permission of the Copyright Holder.
+3. NO REVERSE ENGINEERING:
+   You shall not reverse engineer, decompile, disassemble, decipher, or otherwise attempt 
+   to derive the source code, underlying algorithms, structure, or organization of the 
+   Software.
+4. NO MODIFICATION:
+   You shall not modify, adapt, translate, alter, or create derivative works based upon 
+   this Software or any portion thereof.
+RESERVATION OF RIGHTS:
+All rights, titles, and interests in and to the Software, including all related 
+intellectual property rights (patents, copyrights, trade secrets, trademarks, etc.), 
+remain exclusively with the Copyright Holder. Unauthorised copying, distribution, or 
+use of this Software constitutes copyright infringement and will be prosecuted to the 
+maximum extent permitted by law.
+DISCLAIMER OF WARRANTY:
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, 
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR 
+PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY 
+CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, 
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN 
+THE SOFTWARE.

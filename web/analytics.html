@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Analytics</title>
+<meta name="theme-color" content="#050d1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+ :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+   padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px);min-height:100vh;max-width:600px;margin:0 auto;-webkit-font-smoothing:antialiased;}
+ header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
+ header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
+ header h1{font-size:16px;font-weight:650;}
+ header .dot{margin-left:auto;width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
+ header .dot.live{background:#39ff14;box-shadow:0 0 8px #39ff14;}
+ .sub{font-size:11.5px;color:var(--tick);padding:0 2px 12px;}
+ .sec{font-size:11px;color:var(--tick);text-transform:uppercase;letter-spacing:.8px;margin:16px 2px 9px;}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:10px;}
+ .stat3{display:flex;gap:10px;}
+ .stat3 .s{flex:1;text-align:center;}
+ .stat3 .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;}
+ .stat3 .l{font-size:10px;color:var(--tick);text-transform:uppercase;letter-spacing:.5px;margin-top:2px;}
+ .spark{width:100%;height:46px;display:block;margin-top:12px;}
+ .row{display:flex;align-items:center;gap:10px;font-size:13px;padding:7px 0;}
+ .row .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+ .row .b{flex:none;color:var(--tick);font-variant-numeric:tabular-nums;}
+ .track{height:7px;background:#0c1a2c;border-radius:4px;overflow:hidden;margin-top:4px;}
+ .fill{height:100%;background:#38b8f0;border-radius:4px;}
+ .brief{white-space:pre-wrap;line-height:1.7;font-size:13.5px;color:#e0c0ff;}
+ .btn{width:100%;padding:12px;border-radius:11px;border:1px solid #3a1a5e;background:#0d0620;color:#e0c0ff;font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;margin-top:10px;}
+ .empty{color:var(--tick);text-align:center;padding:14px;font-size:12.5px;}
+</style>
+</head>
+<body>
+<header><a class="back" href="/">&#8592;</a><h1>Analytics</h1><div class="dot" id="dot"></div></header>
+<div class="sub" id="sub">Loading&#8230;</div>
+<div id="content"></div>
+<script>
+var $=function(i){return document.getElementById(i);};
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function human(b){b=b||0;if(b>=1e9)return (b/1e9).toFixed(1)+' GB';if(b>=1e6)return (b/1e6).toFixed(1)+' MB';if(b>=1e3)return (b/1e3).toFixed(0)+' KB';return (b|0)+' B';}
+function ago(ts){if(!ts)return '';var s=Math.max(0,Date.now()/1000-ts);if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
+function spark(a,col){a=(a||[]).filter(function(x){return x!=null;});if(!a.length)return '';
+  var mx=Math.max.apply(null,a.concat([1])),mn=Math.min.apply(null,a.concat([0])),rng=(mx-mn)||1;
+  var pts=a.map(function(v,i){var x=(i/((a.length-1)||1))*300;var y=44-((v-mn)/rng)*42;return x.toFixed(1)+','+y.toFixed(1);}).join(' ');
+  return '<svg class="spark" viewBox="0 0 300 46" preserveAspectRatio="none"><polyline fill="none" stroke="'+col+'" stroke-width="2" points="'+pts+'"/></svg>';}
+function f0(v){return (v==null||isNaN(v))?'\u2013':Math.round(v);}
+function renderAnalytics(a){
+  if(!a.ok){$('content').innerHTML='<div class="empty">'+(esc(a.error)||'Unavailable')+'</div>';return;}
+  var sp=a.speed||{},dl=sp.download||{},ul=sp.upload||{},pg=sp.ping||{};
+  var h='<div class="sec">Speed (recent history)</div><div class="card">'
+    +'<div class="stat3"><div class="s"><div class="v" style="color:#38b8f0">'+f0(dl.avg)+'</div><div class="l">Avg Mbps &#8595;</div></div>'
+    +'<div class="s"><div class="v" style="color:#39ff14">'+f0(ul.avg)+'</div><div class="l">Avg Mbps &#8593;</div></div>'
+    +'<div class="s"><div class="v" style="color:#ff9f43">'+f0(pg.avg)+'</div><div class="l">Avg ping</div></div></div>'
+    +spark(sp.download_series,'#38b8f0')
+    +'<div class="sub" style="padding:8px 0 0;text-align:center">min '+f0(dl.min)+' &#183; max '+f0(dl.max)+' Mbps &#183; '+((dl.count)||0)+' readings</div></div>';
+  if(a.uptime!=null){var uc=a.uptime>=99?'#39ff14':(a.uptime>=95?'#ff9f43':'#ff5b5b');
+    h+='<div class="sec">Gateway uptime (24h)</div><div class="card"><div class="stat3"><div class="s"><div class="v" style="color:'+uc+'">'+a.uptime.toFixed(1)+'%</div><div class="l">reachable</div></div></div></div>';}
+  var lat=a.latency||{},lk=Object.keys(lat);
+  if(lk.length){h+='<div class="sec">Latency</div><div class="card">';
+    lk.forEach(function(k){var v=lat[k];h+='<div class="row"><span class="n">'+esc(k)+'</span><span class="b">'+f0(v.rtt)+' ms &#183; '+f0(v.loss)+'% loss</span></div>';});h+='</div>';}
+  var td=a.top_devices||[];
+  if(td.length){var mx=Math.max.apply(null,td.map(function(d){return d.bytes;}).concat([1]));
+    h+='<div class="sec">Top local talkers (24h)</div><div class="card">';
+    td.forEach(function(d){h+='<div style="margin-bottom:9px"><div class="row" style="padding:0"><span class="n">'+esc(d.name)+'</span><span class="b">'+human(d.bytes)+'</span></div>'
+      +'<div class="track"><div class="fill" style="width:'+Math.max(3,(d.bytes/mx)*100).toFixed(0)+'%"></div></div></div>';});h+='</div>';}
+  h+='<div id="briefwrap"></div>';
+  $('content').innerHTML=h;
+  loadBriefing();
+}
+async function loadBriefing(){
+  var el=$('briefwrap');
+  el.innerHTML='<div class="sec">AI daily briefing</div><div class="card"><div class="empty">Loading briefing\u2026</div></div>';
+  try{var r=await fetch('/api/briefing',{cache:'no-store'});var d=await r.json();var b=d.briefing;
+    el.innerHTML='<div class="sec">AI daily briefing</div><div class="card">'
+      +(b?('<div class="brief">'+esc(b.text)+'</div><div class="sub" style="padding:10px 0 0">generated '+ago(b.ts)+'</div>'):'<div class="empty">No briefing yet. Generate one below (needs Ollama running).</div>')
+      +'<button class="btn" id="genBtn" onclick="genBrief()">Generate now</button></div>';
+  }catch(e){el.innerHTML='<div class="card"><div class="empty">Briefing unavailable.</div></div>';}
+}
+async function genBrief(){var b=$('genBtn');b.disabled=true;b.textContent='Thinking\u2026 (up to a minute)';
+  try{var r=await fetch('/api/briefing_now',{method:'POST'});var d=await r.json();}catch(e){}
+  loadBriefing();
+}
+async function refresh(){
+  try{var r=await fetch('/api/analytics',{cache:'no-store'});var a=await r.json();
+    $('dot').classList.add('live');$('sub').textContent='Trends from your speed, latency and traffic history';
+    renderAnalytics(a);
+  }catch(e){$('sub').textContent='Desktop app unreachable \u2014 same Wi\u2011Fi?';$('dot').classList.remove('live');}
+}
+refresh(); setInterval(refresh,15000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)refresh();});
+</script>
+</body>
+</html>

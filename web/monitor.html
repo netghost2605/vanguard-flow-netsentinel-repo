@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Alerts &amp; Devices</title>
+<meta name="theme-color" content="#050d1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+ :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+   padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px);min-height:100vh;max-width:600px;margin:0 auto;
+   -webkit-font-smoothing:antialiased;}
+ header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
+ header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
+ header h1{font-size:16px;font-weight:650;}
+ header .dot{margin-left:auto;width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
+ header .dot.live{background:#39ff14;box-shadow:0 0 8px #39ff14;}
+ .sub{font-size:11.5px;color:var(--tick);padding:0 2px 12px;}
+ .tabs{display:flex;gap:8px;margin-bottom:14px;}
+ .tab{flex:1;padding:10px;border-radius:11px;border:1px solid var(--line);background:var(--panel);
+   color:var(--tick);font-size:13px;font-weight:600;font-family:inherit;cursor:pointer;position:relative;}
+ .tab.active{color:#eaf6ff;border-color:#1e5f9e;background:linear-gradient(135deg,#0d2540,#123a5e);}
+ .badge{background:#ff5b5b;color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:1px 6px;margin-left:5px;}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:12px 13px;margin-bottom:9px;}
+ .row{display:flex;align-items:center;gap:10px;}
+ .row i.d{width:9px;height:9px;border-radius:50%;flex:none;}
+ .row .main{flex:1;overflow:hidden;}
+ .row .t1{font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+ .row .t2{font-size:11px;color:var(--tick);margin-top:2px;font-family:'SF Mono',ui-monospace,monospace;}
+ .row .r{flex:none;text-align:right;color:var(--tick);font-size:11px;font-variant-numeric:tabular-nums;}
+ .sev-warn{color:#ff9f43;} .sev-info{color:#38b8f0;} .sev-crit{color:#ff5b5b;}
+ .clr{width:100%;padding:11px;border-radius:11px;border:1px solid var(--line);background:var(--panel);
+   color:var(--tick);font-size:13px;font-weight:600;font-family:inherit;margin-bottom:12px;cursor:pointer;}
+ .lat .big{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1;}
+ .lat .u{font-size:12px;color:var(--tick);}
+ .lat svg{width:100%;height:40px;display:block;margin-top:8px;}
+ .empty{color:var(--tick);text-align:center;padding:40px 20px;font-size:13px;line-height:1.7;}
+ .sl{display:block;font-size:11px;color:var(--tick);margin:11px 0 4px;text-transform:uppercase;letter-spacing:.5px;}
+ .si{width:100%;padding:10px;border-radius:9px;border:1px solid var(--line);background:#0c1a2c;color:var(--text);font-size:13px;font-family:inherit;}
+ .sg{display:none;}
+</style>
+</head>
+<body>
+<header><a class="back" href="/">&#8592;</a><h1>Alerts &amp; Devices</h1><div class="dot" id="dot"></div></header>
+<div class="sub" id="sub">Loading&#8230;</div>
+<div class="tabs">
+  <button class="tab active" data-t="alerts">Alerts<span class="badge" id="abadge" style="display:none"></span></button>
+  <button class="tab" data-t="devices">Devices</button>
+  <button class="tab" data-t="latency">Latency</button>
+  <button class="tab" data-t="settings">Notify</button>
+</div>
+<div id="p-alerts" class="panel"></div>
+<div id="p-devices" class="panel" style="display:none"></div>
+<div id="p-latency" class="panel" style="display:none"></div>
+<div id="p-settings" class="panel" style="display:none"></div>
+<script>
+var $=function(i){return document.getElementById(i);};
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function ago(ts){if(!ts)return '';var s=Math.max(0,Date.now()/1000-ts);
+  if(s<60)return Math.floor(s)+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';
+  if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago';}
+var threatInfo=null;
+var showCleared=false;
+var tab='alerts';
+document.querySelectorAll('.tab').forEach(function(b){b.addEventListener('click',function(){
+  tab=b.dataset.t;
+  document.querySelectorAll('.tab').forEach(function(x){x.classList.toggle('active',x===b);});
+  ['alerts','devices','latency','settings'].forEach(function(t){$('p-'+t).style.display=(t===tab?'block':'none');});
+});});
+
+function toggleCleared(){showCleared=!showCleared;refresh();}
+function threatCard(){
+  var t=(threatInfo&&threatInfo.threat)||{};
+  var ips=t.ips||0,ranges=t.ranges||0,cc=(threatInfo&&threatInfo.countries)||0;
+  var loaded=(ips+ranges)>0;
+  return '<div class="card"><div class="row"><i class="d" style="background:'+(loaded?'#39ff14':'#3a4a5a')+'"></i>'
+    +'<div class="main"><div class="t1">Threat intel '+(loaded?'active':'loading\u2026')+'</div>'
+    +'<div class="t2">'+ips.toLocaleString()+' bad IPs \u00b7 '+ranges.toLocaleString()+' ranges \u00b7 '+cc+' countries seen</div></div>'
+    +'<div class="r">'+(t.refreshed?ago(t.refreshed):'')+'</div></div></div>';
+}
+function ipFromMsg(m){
+  var ips=(String(m||'').match(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g))||[];
+  if(!ips.length)return '';
+  for(var i=0;i<ips.length;i++){var p=ips[i];
+    if(!/^(10\.|127\.|169\.254\.|0\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(p))return p;}
+  return ips[0];
+}
+function closeModal(){var m=document.getElementById('nmModal');if(m)m.remove();}
+function showModal(title,body){
+  closeModal();
+  var m=document.createElement('div');m.id='nmModal';
+  m.style.cssText='position:fixed;inset:0;background:rgba(0,8,16,.82);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+  m.innerHTML='<div style="background:#08131f;border:1px solid #1c3a4e;border-radius:12px;max-width:560px;width:100%;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #12293a">'
+    +'<div style="color:#38b8f0;font-weight:bold;font-size:14px">'+title+'</div>'
+    +'<button onclick="closeModal()" style="background:none;border:none;color:#6a9ab8;font-size:22px;line-height:1;cursor:pointer">&times;</button></div>'
+    +'<div style="padding:14px;overflow:auto">'+body+'</div></div>';
+  m.addEventListener('click',function(e){if(e.target===m)closeModal();});
+  document.body.appendChild(m);
+}
+async function doWhois(ip){
+  showModal('WHOIS '+esc(ip),'<div style="color:#6a9ab8">Looking up\u2026</div>');
+  try{
+    var r=await fetch('/api/whois?ip='+encodeURIComponent(ip),{cache:'no-store'});
+    var d=await r.json();var s=d.summary||{};var head='';
+    if(s.note){head='<div style="color:#c8a24a;margin-bottom:8px">'+esc(s.note)+'</div>';}
+    else if(s.error){head='<div style="color:#ff6a6a;margin-bottom:8px">'+esc(s.error)+'</div>';}
+    else{var rows=[['Org',s.org],['Netname',s.netname],['Range',s.range||s.cidr],['Country',s.country],['Descr',s.descr]];
+      head='<table style="width:100%;font-size:12px;margin-bottom:10px;border-collapse:collapse">';
+      rows.forEach(function(rw){if(rw[1])head+='<tr><td style="color:#6a9ab8;padding:2px 10px 2px 0;white-space:nowrap;vertical-align:top">'+rw[0]+'</td><td style="color:#c8dff0">'+esc(rw[1])+'</td></tr>';});
+      head+='</table>';}
+    var raw=d.raw?('<pre style="white-space:pre-wrap;word-break:break-word;font-size:10.5px;color:#7fa8c0;background:#04101a;padding:10px;border-radius:6px;max-height:40vh;overflow:auto;margin:0">'+esc(d.raw)+'</pre>'):'';
+    var blk='<button onclick="blockIp(\''+ip+'\')" style="margin-top:10px;width:100%;padding:9px;border:1px solid #5a2a2a;background:#2a0e0e;color:#ff6a6a;border-radius:6px;font-size:13px">\uD83D\uDEAB Block '+esc(ip)+'</button>';
+    showModal('WHOIS '+esc(ip),head+raw+blk);
+  }catch(e){showModal('WHOIS '+esc(ip),'<div style="color:#ff6a6a">Lookup failed \u2014 check connectivity</div>');}
+}
+async function blockIp(ip){
+  if(!confirm('Block '+ip+' in Windows Firewall (inbound + outbound)?'))return;
+  try{
+    var r=await fetch('/api/block',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({ip:ip})});
+    var d=await r.json();
+    if(d.ok){closeModal();refresh();}else{alert('Block failed: '+(d.error||'unknown'));}
+  }catch(e){alert('Block failed');}
+}
+function renderAlerts(d){
+  var el=$('p-alerts');
+  if(!d.ok){el.innerHTML='<div class="empty">'+(esc(d.error)||'Unavailable')+'</div>';return;}
+  var un=d.unacked||0;
+  if(un>0){$('abadge').style.display='inline-block';$('abadge').textContent=un;}else{$('abadge').style.display='none';}
+  var a=d.alerts||[];
+  var tc=threatCard();
+  var bar='<div style="display:flex;gap:8px;margin-bottom:10px">';
+  if(!showCleared){bar+='<button class="clr" style="margin:0;flex:1" onclick="clearAlerts()">Clear all</button>';}
+  bar+='<button class="clr" style="margin:0;flex:1" onclick="toggleCleared()">'+(showCleared?'Active only':'Show cleared')+'</button></div>';
+  if(!a.length){el.innerHTML=tc+bar+'<div class="empty">'+(showCleared?'No alerts in history.':'No active alerts. All quiet.')+'</div>';return;}
+  var h=tc+bar;
+  a.forEach(function(x){
+    var sc=x.sev==='crit'?'sev-crit':(x.sev==='info'?'sev-info':'sev-warn');
+    var ip=ipFromMsg(x.msg);
+    var msgHtml=esc(x.msg);
+    if(ip){msgHtml=msgHtml.replace(ip,'<span onclick="doWhois(\''+ip+'\')" style="color:#38b8f0;text-decoration:underline;cursor:pointer">'+ip+'</span>');}
+    var acts=ip?('<div style="display:flex;gap:8px;margin-top:8px">'
+      +'<button onclick="doWhois(\''+ip+'\')" style="flex:1;padding:7px;border:1px solid #2a4a5a;background:#0e2230;color:#38b8f0;border-radius:6px;font-size:12px">\uD83D\uDD0D WHOIS</button>'
+      +'<button onclick="blockIp(\''+ip+'\')" style="flex:1;padding:7px;border:1px solid #5a2a2a;background:#2a0e0e;color:#ff6a6a;border-radius:6px;font-size:12px">\uD83D\uDEAB Block '+esc(ip)+'</button></div>'):'';
+    h+='<div class="card" style="opacity:'+(x.ack?0.5:1)+'"><div class="row">'
+      +'<i class="d '+sc+'" style="background:currentColor"></i>'
+      +'<div class="main"><div class="t1 '+sc+'">'+msgHtml+'</div>'
+      +'<div class="t2">'+esc(x.kind)+'</div></div>'
+      +'<div class="r">'+ago(x.ts)+'</div></div>'+acts+'</div>';
+  });
+  el.innerHTML=h;
+}
+function renderDevices(d){
+  var el=$('p-devices');
+  if(!d.ok){el.innerHTML='<div class="empty">'+(esc(d.error)||'Unavailable')+'</div>';return;}
+  var dv=d.devices||[];
+  if(!dv.length){el.innerHTML='<div class="empty">No devices seen yet.<br>Discovery runs every 30s via ARP.</div>';return;}
+  var on=dv.filter(function(x){return x.online;}).length;
+  var h='';
+  dv.forEach(function(x){
+    var nm=x.name||x.hostname||x.vendor||x.ip;
+    h+='<div class="card" onclick="rename(\''+esc(x.ip)+'\')"><div class="row">'
+      +'<i class="d" style="background:'+(x.online?'#39ff14':'#3a4a5a')+'"></i>'
+      +'<div class="main"><div class="t1">'+esc(nm)+(x.vendor&&(x.name||x.hostname)?' <span style="color:#6a9ab8;font-size:11px">'+esc(x.vendor)+'</span>':'')+'</div>'
+      +'<div class="t2">'+esc(x.ip)+(x.mac?'  &#183;  '+esc(x.mac):'')+'</div></div>'
+      +'<div class="r">'+(x.online?'online':ago(x.last_seen))+'</div></div></div>';
+  });
+  el.innerHTML='<div class="sub" style="padding:0 2px 10px">'+on+' online &#183; '+dv.length+' total &#183; tap to rename</div>'+h;
+}
+function spark(series,el){
+  var a=(series||[]).map(function(p){return p.rtt;});
+  if(!a.length)return '';
+  var mx=Math.max.apply(null,a.concat([1])),mn=Math.min.apply(null,a.concat([0])),rng=(mx-mn)||1;
+  var pts=a.map(function(v,i){var x=(i/((a.length-1)||1))*300;var y=38-((v-mn)/rng)*36;return x.toFixed(1)+','+y.toFixed(1);}).join(' ');
+  return '<svg viewBox="0 0 300 40" preserveAspectRatio="none"><polyline fill="none" stroke="#38b8f0" stroke-width="2" points="'+pts+'"/></svg>';
+}
+function renderLatency(d){
+  var el=$('p-latency');
+  if(!d.ok){el.innerHTML='<div class="empty">'+(esc(d.error)||'Unavailable')+'</div>';return;}
+  var lt=d.latest||{},ser=d.series||{},keys=Object.keys(lt);
+  if(!keys.length){el.innerHTML='<div class="empty">No latency data yet.<br>Probing gateway &amp; DNS every 15s.</div>';return;}
+  var h='';
+  keys.forEach(function(k){
+    var v=lt[k];var lossCol=v.loss>=10?'#ff5b5b':(v.loss>0?'#ff9f43':'#39ff14');
+    h+='<div class="card lat"><div class="row"><div class="main"><div class="t1">'+esc(k)+'</div>'
+      +'<div class="t2" style="color:'+lossCol+'">'+ (v.loss>0?(v.loss.toFixed(0)+'% loss'):'no loss')+'</div></div>'
+      +'<div class="r"><span class="big" style="color:#c8dff0">'+(v.rtt?v.rtt.toFixed(0):'&#8211;')+'</span><span class="u"> ms</span></div></div>'
+      +spark(ser[k],el)+'</div>';
+  });
+  el.innerHTML=h;
+}
+async function clearAlerts(){try{await fetch('/api/ack_alert',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({id:'all'})});refresh();}catch(e){}}
+async function rename(ip){var n=prompt('Name for '+ip+':');if(n==null)return;
+  try{await fetch('/api/rename_device',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({ip:ip,name:n})});refresh();}catch(e){}}
+function opt(v,l,cur){return '<option value="'+v+'"'+(v===cur?' selected':'')+'>'+l+'</option>';}
+function showBackend(){var b=document.getElementById('s-backend').value;
+  ['ntfy','pushover','webhook'].forEach(function(x){var el=document.getElementById('s-'+x);if(el)el.style.display=(b===x?'block':'none');});}
+function scfg(){var g=function(id){var e=document.getElementById(id);return e?e.value.trim():'';};
+  return {backend:g('s-backend'),ntfy_topic:g('s-topic'),ntfy_server:g('s-server'),
+    pushover_token:g('s-ptok'),pushover_user:g('s-puser'),webhook_url:g('s-url'),min_sev:g('s-minsev')};}
+async function saveSettings(){try{await fetch('/api/notify_config',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(scfg())});
+  document.getElementById('s-msg').style.color='#39ff14';document.getElementById('s-msg').textContent='Saved.';}
+  catch(e){document.getElementById('s-msg').textContent='Save failed: '+e.message;}}
+async function testNotify(){var m=document.getElementById('s-msg');m.style.color='#6a9ab8';m.textContent='Sending\u2026';
+  try{await saveSettings();var r=await fetch('/api/notify_test',{method:'POST'});var d=await r.json();
+    m.style.color=d.ok?'#39ff14':'#ff9f43';m.textContent=d.ok?'Sent \u2014 check your phone.':('Failed: '+(d.error||'unknown'));}
+  catch(e){m.style.color='#ff6b6b';m.textContent='Error: '+e.message;}}
+async function loadSettings(){
+  var cfg={};try{var r=await fetch('/api/notify_config',{cache:'no-store'});var d=await r.json();cfg=d.config||{};}catch(e){}
+  var b=cfg.backend||'none';
+  var h='<div class="card"><div class="t2" style="margin-bottom:6px;color:#6a9ab8;line-height:1.6">'
+    +'Push alerts to your phone. <b>ntfy</b> is free: install the ntfy app, subscribe to a topic, then enter the same topic here. '
+    +'(iOS browser push needs HTTPS, so a relay like ntfy is the reliable way over the LAN.)</div>'
+    +'<label class="sl">Provider</label><select id="s-backend" class="si">'
+    +opt('none','Off',b)+opt('ntfy','ntfy (free)',b)+opt('pushover','Pushover',b)+opt('webhook','Webhook',b)+'</select>'
+    +'<div id="s-ntfy" class="sg"><label class="sl">ntfy topic</label>'
+    +'<input id="s-topic" class="si" value="'+esc(cfg.ntfy_topic||'')+'" placeholder="pick-something-unique">'
+    +'<label class="sl">ntfy server</label><input id="s-server" class="si" value="'+esc(cfg.ntfy_server||'https://ntfy.sh')+'"></div>'
+    +'<div id="s-pushover" class="sg"><label class="sl">Pushover API token</label><input id="s-ptok" class="si" value="'+esc(cfg.pushover_token||'')+'">'
+    +'<label class="sl">Pushover user key</label><input id="s-puser" class="si" value="'+esc(cfg.pushover_user||'')+'"></div>'
+    +'<div id="s-webhook" class="sg"><label class="sl">Webhook URL</label><input id="s-url" class="si" value="'+esc(cfg.webhook_url||'')+'"></div>'
+    +'<label class="sl">Notify on</label><select id="s-minsev" class="si">'
+    +opt('info','Info and above',cfg.min_sev||'warn')+opt('warn','Warnings and above',cfg.min_sev||'warn')+opt('crit','Critical only',cfg.min_sev||'warn')+'</select>'
+    +'<div style="display:flex;gap:8px;margin-top:14px">'
+    +'<button class="clr" style="margin:0" onclick="saveSettings()">Save</button>'
+    +'<button class="clr" style="margin:0" onclick="testNotify()">Send test</button></div>'
+    +'<div id="s-msg" style="margin-top:10px;font-size:12px;color:#6a9ab8"></div></div>';
+  $('p-settings').innerHTML=h;
+  var sb=document.getElementById('s-backend');if(sb){sb.addEventListener('change',showBackend);showBackend();}
+}
+loadSettings();
+async function refresh(){
+  try{
+    var res=await Promise.all([fetch('/api/alerts'+(showCleared?'?all=1':''),{cache:'no-store'}),fetch('/api/devices',{cache:'no-store'}),fetch('/api/latency',{cache:'no-store'}),fetch('/api/threat',{cache:'no-store'})]);
+    var a=await res[0].json(),dv=await res[1].json(),lt=await res[2].json();
+    try{threatInfo=await res[3].json();}catch(e){}
+    $('dot').classList.add('live');
+    var un=a.unacked||0,ond=(dv.devices||[]).filter(function(x){return x.online;}).length;
+    $('sub').textContent=ond+' devices online &#183; '+un+' unread alerts';
+    $('sub').innerHTML=ond+' devices online &#183; '+un+' unread alerts';
+    renderAlerts(a);renderDevices(dv);renderLatency(lt);
+  }catch(e){$('sub').textContent='Desktop app unreachable \u2014 same Wi\u2011Fi?';$('dot').classList.remove('live');}
+}
+refresh(); setInterval(refresh,5000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)refresh();});
+</script>
+</body>
+</html>

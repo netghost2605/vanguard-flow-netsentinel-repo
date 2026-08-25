@@ -1,0 +1,3669 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>EtherApe 3D</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#060d1a;color:#a0c4d8;font-family:monospace;overflow:hidden}
+/* 100vw ignores the scrollbar and resolves against the LAYOUT viewport on
+   mobile, so on an iPad the canvas came out wider than the screen and
+   dragged every fixed overlay off the edge with it. Fixed inset:0 fills
+   the visual viewport exactly, with no viewport units involved. */
+#c{display:block;position:fixed;inset:0;width:100%;height:100%;cursor:grab}
+html,body{max-width:100%;overflow-x:hidden}
+#c.drag{cursor:grabbing}
+#hud{position:fixed;top:0;left:0;right:0;padding:7px 14px;
+     background:rgba(6,13,26,.85);font-size:11px;color:#2a5a7a;
+     display:flex;align-items:center;gap:16px;pointer-events:none;z-index:9;
+     border-bottom:1px solid #0a1828}
+#hud b{color:#38b8f0}
+#hud .warn{color:#ff4444}
+#toolbar{position:fixed;top:34px;left:0;right:0;padding:5px 12px;
+         background:rgba(6,13,26,.8);display:flex;align-items:center;gap:8px;
+         border-bottom:1px solid #091520;z-index:9}
+.tbtn{background:#0a1828;border:1px solid #1a3a5a;color:#38b8f0;
+      font:bold 10px monospace;padding:4px 10px;cursor:pointer;border-radius:3px;
+      pointer-events:all}
+.tbtn:hover{background:#152840;color:#74c7ec}
+.tbtn.active{background:#1a3a5a;color:#74c7ec;border-color:#38b8f0}
+#spread-row{display:flex;align-items:center;gap:6px;pointer-events:all}
+#spread-row label{font-size:10px;color:#1a4a6a}
+#spread-sl{width:90px;cursor:pointer}
+#spread-val{font-size:10px;color:#a371f7;min-width:28px}
+#info{position:fixed;bottom:14px;right:14px;width:250px;
+      background:rgba(6,13,26,.92);border:1px solid #1a3a5a;
+      border-radius:5px;padding:10px 12px;font-size:11px;
+      color:#6a9ab8;display:none;z-index:10;pointer-events:none}
+#info .ip{color:#38b8f0;font-size:13px;font-weight:bold;margin-bottom:5px}
+#info .row{display:flex;justify-content:space-between;margin:2px 0}
+#info .key{color:#1a4a6a}
+#info .val{color:#a0c4d8;text-align:right;max-width:150px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#info .blocked-badge{color:#ff4444;font-weight:bold;font-size:10px;margin-top:4px}
+#info .susp-badge{color:#ff9f43;font-weight:bold;font-size:10px;margin-top:2px}
+/* Horizontal legend: a single strip along the bottom, wrapping if the window
+   is narrow. Right edge stops short of #info (250px wide, right:14px).       */
+#legend{position:fixed;bottom:14px;left:14px;right:926px;font-size:10px;color:#5d87a6;
+        z-index:9;background:rgba(4,10,20,.86);padding:7px 10px;border:1px solid #12354f;
+        border-radius:7px;backdrop-filter:blur(3px);
+        display:flex;flex-wrap:wrap;align-items:center;gap:5px 8px;max-height:26vh;overflow:auto}
+/* Kill switch: sits immediately right of the protocols bar */
+#killbtn{position:fixed;bottom:14px;right:288px;z-index:11;width:150px;
+        padding:10px 6px;border-radius:8px;border:1px solid #7a1f1f;cursor:pointer;
+        font-family:inherit;font-size:10px;font-weight:800;letter-spacing:.08em;
+        color:#fff;background:linear-gradient(#c0392b,#7d1414);
+        box-shadow:0 2px 8px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.28);
+        transition:filter .15s}
+#killbtn:hover{filter:brightness(1.18)}
+/* Attack drill button, immediately left of the kill switch */
+#atkbtn{position:fixed;bottom:14px;right:446px;z-index:11;width:150px;
+        padding:10px 6px;border-radius:8px;border:1px solid #7a4a1f;cursor:pointer;
+        font-family:inherit;font-size:10px;font-weight:800;letter-spacing:.08em;
+        color:#fff;background:linear-gradient(#c0662b,#7d3f14);
+        box-shadow:0 2px 8px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.28);
+        transition:filter .15s}
+#atkbtn:hover{filter:brightness(1.18)}
+/* World view button, left of ATTACK SIM in the same bottom-right cluster */
+#worldbtn{position:fixed;bottom:14px;right:604px;z-index:11;width:150px;
+        padding:10px 6px;border-radius:8px;border:1px solid #1f5a7a;cursor:pointer;
+        font-family:inherit;font-size:10px;font-weight:800;letter-spacing:.08em;
+        color:#fff;background:linear-gradient(#2b7fc0,#144a7d);
+        box-shadow:0 2px 8px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.28);
+        transition:filter .15s}
+#worldbtn:hover{filter:brightness(1.18)}
+#fwbtn{position:fixed;bottom:14px;right:762px;z-index:11;width:150px;
+  padding:10px 6px;border-radius:8px;border:1px solid #7a4a1f;cursor:pointer;
+  font-family:inherit;font-size:10px;font-weight:800;letter-spacing:.08em;
+  color:#fff;background:linear-gradient(#c08a2b,#7d5a14);
+  box-shadow:0 2px 8px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.28);
+  transition:filter .15s}
+#fwbtn:hover{filter:brightness(1.18)}
+#worldbtn.on{border-color:#1a8a4a;background:linear-gradient(#27ae60,#116029)}
+#atkbtn.on{border-color:#a01010;background:linear-gradient(#e03b20,#8d1408)}
+#killbtn:disabled{opacity:.55;cursor:default}
+#killbtn.on{border-color:#1a6a2a;background:linear-gradient(#27ae60,#116029)}
+#legend .lgtitle{font-size:9px;letter-spacing:.16em;color:#3d6a8a;font-weight:700;
+        text-transform:uppercase;padding-right:4px;border-right:1px solid #12354f;
+        margin-right:2px;align-self:stretch;display:flex;align-items:center}
+/* NOTE: scoped to DIRECT children — a bare `#legend div` also matches .dot and
+   stretches it into a giant pill. */
+#legend > div.row{display:flex;align-items:center;gap:5px;padding:3px 7px;
+        border-radius:11px;background:rgba(255,255,255,.03);border:1px solid transparent;
+        white-space:nowrap;line-height:1.15}
+#legend > div.row.on{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.10)}
+#legend .dot{width:8px !important;height:8px !important;min-width:0 !important;
+        border-radius:50%;flex-shrink:0;display:block}
+#legend .ptxt{display:flex;flex-direction:column;gap:1px}
+#legend .pname{font-weight:700;letter-spacing:.04em;font-size:10px}
+#legend .pdesc{color:#4a6f8c;font-size:8.5px;letter-spacing:.01em}
+#legend .ppct{font-family:monospace;color:#7fa8c0;font-size:10px;padding-left:2px}
+#crosshair{position:fixed;pointer-events:none;z-index:8;display:none;
+           width:14px;height:14px;border:1px solid #38b8f0;border-radius:50%;
+           transform:translate(-50%,-50%)}
+
+/* Tablet portrait: the fixed bottom-right button cluster needs 768px of width,
+   which overflows an iPad in portrait. Shrink the buttons, drop the legend and
+   let them wrap instead. */
+@media (max-width: 900px){
+  #legend{display:none}
+  #killbtn,#atkbtn,#worldbtn,#fwbtn{width:auto;min-width:96px;font-size:9px;
+    padding:8px 8px;letter-spacing:.04em}
+  #killbtn{right:8px}
+  #atkbtn{right:112px}
+  #worldbtn{right:216px}
+  #fwbtn{right:320px}
+}
+@media (max-width: 560px){
+  #worldbtn{bottom:52px;right:8px}
+  #atkbtn{right:112px}
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="crosshair"></div>
+
+<!-- VPN alert banner -->
+<div id="fwoverlay" style="display:none;position:fixed;left:50%;top:50%;
+  transform:translate(-50%,-50%);z-index:70;width:min(720px,90vw);max-height:80vh;
+  background:rgba(4,12,24,.98);border:1px solid #1f5a7a;border-radius:10px;
+  box-shadow:0 18px 60px rgba(0,0,0,.75);font-family:Consolas,monospace;overflow:hidden">
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+    background:rgba(10,24,40,.95);border-bottom:1px solid #163a52">
+    <span style="color:#ff9f43;font-size:12px;font-weight:bold;letter-spacing:1.5px">&#9940; FIREWALL RULES</span>
+    <span id="fwsub" style="color:#6a9ab8;font-size:11px;flex:1"></span>
+    <button onclick="fwRefresh()" style="background:#0d2235;border:1px solid #1f5a7a;
+      color:#8ab8d0;font-family:inherit;font-size:11px;padding:3px 10px;border-radius:5px;
+      cursor:pointer">&#10227; refresh</button>
+    <button onclick="hideFw()" style="background:#0d2235;border:1px solid #1f5a7a;
+      color:#8ab8d0;font-family:inherit;font-size:11px;padding:3px 10px;border-radius:5px;
+      cursor:pointer">&#10005; close</button>
+  </div>
+  <div id="fwbody" style="padding:12px 14px;color:#c8dff0;font-size:12px;
+    overflow-y:auto;max-height:68vh"></div>
+</div>
+<div id="aioverlay" style="display:none;position:fixed;left:50%;top:50%;
+  transform:translate(-50%,-50%);z-index:60;width:min(680px,86vw);max-height:74vh;
+  background:rgba(4,12,24,0.97);border:1px solid #1f5a7a;border-radius:10px;
+  box-shadow:0 18px 60px rgba(0,0,0,.75);font-family:Consolas,DejaVu Sans Mono,Liberation Mono,Menlo,Courier New,monospace;overflow:hidden">
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+    background:rgba(10,24,40,.95);border-bottom:1px solid #163a52">
+    <span id="aiTitle" style="color:#38b8f0;font-size:12px;font-weight:bold;
+      letter-spacing:1.5px">&#11041; AI ANALYSIS</span>
+    <span id="aiSub" style="color:#6a9ab8;font-size:11px;flex:1"></span>
+    <button onclick="hideAiOverlay()" style="background:#0d2235;border:1px solid #1f5a7a;
+      color:#8ab8d0;font-family:inherit;font-size:11px;padding:3px 10px;border-radius:5px;
+      cursor:pointer">&#10005; close</button>
+  </div>
+  <div id="aiBody" style="padding:14px 16px;color:#c8dff0;font-size:12px;line-height:1.65;
+    white-space:pre-wrap;overflow-y:auto;max-height:62vh"></div>
+</div>
+<div id="vpnbanner" title="" style="position:fixed;top:4px;left:50%;
+  transform:translateX(-50%);z-index:30;padding:2px 9px;border-radius:5px;
+  font-family:monospace;font-size:9px;font-weight:bold;letter-spacing:.8px;
+  pointer-events:none;background:rgba(0,0,0,0);color:#6a9ab8;border:1px solid transparent;
+  transition:background .4s,color .4s;white-space:nowrap;opacity:.92">
+  ○ VPN
+</div>
+
+<!-- Visited hosts overlay -->
+<div id="urlboard" style="position:fixed;top:46px;right:0;width:220px;
+  max-height:calc(100vh - 56px);overflow-y:auto;overflow-x:hidden;z-index:25;
+  background:rgba(4,12,28,0.88);padding:8px;
+  font-family:monospace;border-left:1px solid #0d2a44;
+  pointer-events:auto;backdrop-filter:blur(2px);
+  scrollbar-width:thin;scrollbar-color:#1a4a7a #030b16">
+</div>
+
+<div id="wait" style="position:fixed;inset:0;display:flex;flex-direction:column;
+     align-items:center;justify-content:center;z-index:20;pointer-events:none;
+     background:rgba(6,13,26,.82)">
+  <div style="font-size:28px;margin-bottom:16px">⬡</div>
+  <div style="font-size:14px;color:#38b8f0;font-weight:bold;margin-bottom:8px">EtherApe 3D</div>
+  <div id="wait-msg" style="font-size:12px;color:#74c7ec;margin-bottom:20px">Connecting…</div>
+  <div style="font-size:10px;color:#2a5a7a;max-width:340px;text-align:center;line-height:1.8;border:1px solid #0d2030;padding:10px 14px;border-radius:4px">
+    Open <b style="color:#a371f7">◎ TOPOLOGY</b> in the main dashboard and start a capture.<br>
+    Nodes appear automatically as traffic is detected.
+  </div>
+</div>
+<div id="hud">
+  <a href="/" style="text-decoration:none;color:#39ff14;font-weight:bold;font-size:12px;padding:4px 11px;margin-right:8px;border:1px solid #1a4a2a;border-radius:6px;background:rgba(57,255,20,0.10);white-space:nowrap;pointer-events:auto;-webkit-tap-highlight-color:transparent" title="Back to dashboard">&#8592; Back</a>
+  <button id="bloomBtn" onclick="_cycleBloom(1)" oncontextmenu="_cycleBloom(-1);return false;" style="color:#3ec6ff;font-weight:bold;font-size:12px;padding:4px 11px;margin-right:8px;border:1px solid #1d5b80;border-radius:6px;background:rgba(62,198,255,0.10);cursor:pointer;white-space:nowrap;pointer-events:auto;-webkit-tap-highlight-color:transparent" title="Click to cycle bloom intensity (right-click to go back)">&#10022; Bloom: Normal</button>
+  <span>EtherApe <b>3D</b></span>
+  <span>nodes <b id="hn">0</b></span>
+  <span>flows <b id="hf">0</b></span>
+  <span>pkts/s <b id="hp">0</b></span>
+  <span id="hblocked" class="warn" style="display:none">⛔ <b id="hbn">0</b> blocked</span>
+  <span style="margin-left:auto;color:#1a3a5a;font-size:10px">drag·scroll·shift+drag pan · hover node for info</span>
+</div>
+<div id="toolbar">
+  <button class="tbtn" id="btnSpread" onclick="toggleSpread()">⊛ SPREAD</button>
+  <div id="spread-row" style="display:none">
+    <label>spread</label>
+    <input id="spread-sl" type="range" min="1" max="5" step="0.1" value="1"
+           oninput="onSpread(this.value)">
+    <span id="spread-val">1.0×</span>
+  </div>
+  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
+  <button class="tbtn" id="btnBlocked" onclick="toggleShowBlocked()"
+          title="highlight blocked flows">⛔ BLOCKED</button>
+  <button class="tbtn" id="btnLabels" onclick="toggleLabels()">🏷 LABELS</button>
+  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
+  <button class="tbtn" onclick="resetCamera()">⌖ RESET</button>
+  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
+  <button class="tbtn" id="btnFS" onclick="toggleFullscreen()" title="fullscreen">⛶ FULLSCREEN</button>
+  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
+  <div style="display:flex;align-items:center;gap:6px;padding:0 4px" title="Limit visible nodes to top N by traffic">
+    <span style="font-family:monospace;font-size:9px;color:#1a3a5a;letter-spacing:1px">TOP</span>
+    <input id="topN-sl" type="range" min="5" max="500" step="5" value="500"
+           style="width:100px;accent-color:#39ff14;cursor:pointer"
+           oninput="onTopN(this.value)">
+    <span id="topN-val" style="font-family:monospace;font-size:10px;color:#39ff14;min-width:36px">ALL</span>
+  </div>
+  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
+  <button class="tbtn" id="btnTalkers" onclick="toggleTalkers()">▦ TOP TALKERS</button>
+</div>
+
+<!-- Top Flow Talkers overlay -->
+<div id="talkersOverlay" style="display:none;position:fixed;inset:36px 0 0 0;z-index:40;
+  background:rgba(4,10,24,0.96);backdrop-filter:blur(4px);overflow:hidden;flex-direction:column">
+  <div style="display:flex;align-items:center;padding:8px 14px;gap:10px;flex-shrink:0">
+    <span style="font-family:monospace;font-size:12px;color:#4cc9f0;font-weight:bold;letter-spacing:1px">▦ TOP FLOW TALKERS</span>
+    <span style="font-family:monospace;font-size:11px;color:#2a5a7a;flex:1" id="talkersSubtitle"></span>
+    <button class="tbtn" id="btnAiScan" onclick="_runTalkersAiScan()" title="AI threat scan of current flows">⚠ AI SCAN</button>
+    <button class="tbtn" id="btnIncoming" onclick="_toggleIncoming()" title="Show/hide incoming flows">↙ INCOMING</button>
+    <button class="tbtn active" id="btnSonarSnd" onclick="_toggleSonarSound()" title="Sonar ping when a new connection appears">🔊 SONAR</button>
+    <button class="tbtn" id="btnRadarMap" style="opacity:0.45" onclick="_toggleRadarMap()" title="World map backdrop on the radar">🌍 MAP</button>
+    <button class="tbtn" id="btnAttack" style="opacity:0.5" onclick="_toggleAttack()" title="Simulated hostile sources — drill only, no real traffic">☠ ATTACK SIM</button>
+    <button class="tbtn" id="btn3DTalkers" onclick="_toggle3DTalkers()" title="Switch to 3D view">⬡ 3D</button>
+    <button class="tbtn" onclick="toggleTalkers()" style="padding:2px 10px">✕ CLOSE</button>
+  </div>
+  <div style="display:flex;align-items:center;padding:4px 14px 5px;gap:14px;flex-shrink:0;
+    border-bottom:1px solid #0a1e30;flex-wrap:wrap;row-gap:4px">
+    <span style="font-family:monospace;font-size:9px;color:#2a5a7a;letter-spacing:1px;text-transform:uppercase;margin-right:2px">Protocol</span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#00c8ff;margin-right:4px;vertical-align:middle"></span>TCP</span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff6b35;margin-right:4px;vertical-align:middle"></span>UDP</span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#bf5af2;margin-right:4px;vertical-align:middle"></span>TLS</span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#39ff14;margin-right:4px;vertical-align:middle"></span>HTTP</span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ffd700;margin-right:4px;vertical-align:middle"></span>DNS</span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff4444;margin-right:4px;vertical-align:middle"></span>ICMP</span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4dffff;margin-right:4px;vertical-align:middle"></span>Other</span>
+    <span style="width:1px;height:12px;background:#0d2030;flex-shrink:0"></span>
+    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:24px;height:4px;background:linear-gradient(90deg,#2a5a7a,#4cc9f0);border-radius:2px;margin-right:4px;vertical-align:middle"></span>Band width = traffic volume</span>
+    <span style="width:1px;height:12px;background:#0d2030;flex-shrink:0"></span>
+    <span style="font-family:monospace;font-size:10px;color:#4cc9f0">↗ Outgoing</span>
+    <span style="font-family:monospace;font-size:10px;color:#a371f7">↙ Incoming</span>
+    <span style="width:1px;height:12px;background:#0d2030;flex-shrink:0"></span>
+    <span style="font-family:monospace;font-size:10px;color:#ff4444">⛔ Blocked</span>
+    <span style="font-family:monospace;font-size:10px;color:#2a5a7a;margin-left:auto">click band for details</span>
+  </div>
+  <div style="display:flex;flex:1;min-height:0;overflow:hidden;position:relative">
+    <canvas id="talkersCanvas" style="flex:1;display:block;min-width:0;min-height:0;align-self:stretch;cursor:pointer;will-change:transform"></canvas>
+    <canvas id="talkersCanvas3d" style="display:none;position:absolute;top:0;left:0;width:100%;height:100%;cursor:grab"></canvas>
+    <div id="talkersPopup" style="display:none;position:fixed;z-index:99;
+      min-width:220px;max-width:300px;
+      background:rgba(4,12,28,0.97);border:1px solid #1a4a7a;border-radius:6px;
+      padding:12px 14px;font-family:monospace;font-size:12px;color:#c8dff0;
+      box-shadow:0 4px 24px rgba(0,0,0,0.7)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span id="tpDir" style="font-size:10px;letter-spacing:1px;opacity:0.7"></span>
+        <button onclick="document.getElementById('talkersPopup').style.display='none'"
+          style="background:none;border:none;color:#4a7a9a;font-size:14px;cursor:pointer;padding:0 2px">&#x2715;</button>
+      </div>
+      <div id="tpName" style="font-weight:bold;font-size:13px;word-break:break-all;margin-bottom:4px"></div>
+      <div id="tpIP"   style="color:#4a7a9a;font-size:11px;margin-bottom:8px"></div>
+      <div style="display:flex;gap:16px;margin-bottom:10px">
+        <div><div style="color:#4a7a9a;font-size:9px;text-transform:uppercase;margin-bottom:2px">Volume</div><div id="tpBytes"></div></div>
+        <div><div style="color:#4a7a9a;font-size:9px;text-transform:uppercase;margin-bottom:2px">Protocol</div><div id="tpProto"></div></div>
+      </div>
+      <div id="tpBlockedBadge" style="display:none;color:#ff4444;font-size:11px;margin-bottom:8px">&#x26D4; BLOCKED</div>
+      <button id="tpBlockBtn" style="width:100%;background:#1a0808;color:#ff4444;border:1px solid #8b0000;
+        padding:6px;font-family:monospace;font-size:11px;cursor:pointer;border-radius:3px;letter-spacing:1px;margin-bottom:4px">&#x26D4; BLOCK THIS IP</button>
+      <div style="display:flex;gap:4px;margin-top:2px">
+        <button id="tpWhoisBtn" style="flex:1;background:#0a1220;color:#38b8f0;border:1px solid #1a4a7a;
+          padding:5px;font-family:monospace;font-size:10px;cursor:pointer;border-radius:3px">&#x1F50D; WHOIS</button>
+        <button id="tpRangeBtn" style="flex:1;background:#0a1220;color:#ff9f43;border:1px solid #7a4a00;
+          padding:5px;font-family:monospace;font-size:10px;cursor:pointer;border-radius:3px">&#x26D4; BLOCK RANGE</button>
+      </div>
+      <div id="tpWhoisResult" style="display:none;margin-top:6px;padding:6px;background:rgba(0,0,0,0.4);
+        border-radius:3px;font-size:10px;color:#8ab8d0;max-height:120px;overflow-y:auto;
+        white-space:pre-wrap;border:1px solid #0d2a44"></div>
+      <div id="tpRangeInput" style="display:none;margin-top:6px">
+        <input id="tpRangeVal" type="text" placeholder="e.g. 185.220.0.0/16"
+          style="width:100%;background:#0a1220;color:#ff9f43;border:1px solid #7a4a00;
+          padding:4px 6px;font-family:monospace;font-size:10px;border-radius:3px;box-sizing:border-box;margin-bottom:4px">
+        <button id="tpRangeConfirm" style="width:100%;background:#1a0800;color:#ff9f43;border:1px solid #7a4a00;
+          padding:5px;font-family:monospace;font-size:10px;cursor:pointer;border-radius:3px">&#x26D4; BLOCK THIS RANGE</button>
+      </div>
+    </div>
+    <!-- AI Threat Scan results panel -->
+    <div id="talkersAiPanel" style="display:none;position:fixed;z-index:100;
+      min-width:320px;max-width:440px;max-height:60vh;overflow-y:auto;
+      background:rgba(4,8,20,0.97);border:1px solid #ff4444;border-radius:6px;
+      padding:12px 14px;font-family:monospace;font-size:11px;color:#c8dff0;
+      box-shadow:0 4px 32px rgba(255,0,0,0.3);bottom:20px;left:20px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="color:#ff4444;font-weight:bold;font-size:12px;letter-spacing:1px">⚠ AI THREAT SCAN</span>
+        <button onclick="document.getElementById('talkersAiPanel').style.display='none'"
+          style="background:none;border:none;color:#4a7a9a;font-size:14px;cursor:pointer">&#x2715;</button>
+      </div>
+      <div id="talkersAiResult" style="line-height:1.7;white-space:pre-wrap"></div>
+    </div>
+  </div>
+</div>
+<div id="info">
+  <div class="ip" id="iIP"></div>
+  <div id="iBlocked" class="blocked-badge" style="display:none">⛔ BLOCKED BY FIREWALL</div>
+  <div id="iSusp" class="susp-badge" style="display:none">⚠ IDS SUSPICIOUS</div>
+  <div class="row"><span class="key">rDNS</span><span class="val" id="iDNS">—</span></div>
+  <div class="row"><span class="key">location</span><span class="val" id="iGeo">—</span></div>
+  <div class="row"><span class="key">org</span><span class="val" id="iOrg">—</span></div>
+  <div class="row"><span class="key">proto</span><span class="val" id="iProto">—</span></div>
+  <div class="row"><span class="key">bytes</span><span class="val" id="iBytes">—</span></div>
+  <div class="row"><span class="key">packets</span><span class="val" id="iPkts">—</span></div>
+  <div style="border-top:1px solid #0d2030;margin-top:6px;padding-top:6px;font-size:10px;color:#1a4a6a">
+    Active flows:
+  </div>
+  <div id="iFlows" style="font-size:10px;max-height:90px;overflow:hidden;margin-top:3px"></div>
+</div>
+<button id="fwbtn" onclick="showFw()" title="Firewall rules written by this app">&#9940;&nbsp; FIREWALL</button>
+<button id="worldbtn" onclick="toggleWorld()" title="Place hosts on a rotating globe by real location">&#127760;&nbsp; WORLD VIEW</button>
+<button id="atkbtn" onclick="toggleAttackMain()">&#9760;&nbsp; ATTACK SIM</button>
+<button id="killbtn" onclick="toggleKill()">&#9211;&nbsp; KILL CONNECTION</button>
+<div id="legend">
+  <div><div class="dot" style="background:#2bff5c"></div>HTTP</div>
+  <div><div class="dot" style="background:#b4ff1a"></div>HTTP/2</div>
+  <div><div class="dot" style="background:#00ffa3"></div>TLS</div>
+  <div><div class="dot" style="background:#12d47a"></div>SSL</div>
+  <div><div class="dot" style="background:#ffb300"></div>DNS</div>
+  <div><div class="dot" style="background:#ff3ec8"></div>mDNS</div>
+  <div><div class="dot" style="background:#ffe600"></div>DHCP</div>
+  <div><div class="dot" style="background:#ff2d55"></div>ICMP</div>
+  <div><div class="dot" style="background:#00b3ff"></div>TCP</div>
+  <div><div class="dot" style="background:#9b4dff"></div>UDP</div>
+  <div><div class="dot" style="background:#00e5e0"></div>ARP</div>
+  <div><div class="dot" style="background:#ff1744"></div>BLOCKED</div>
+  <div><div class="dot" style="background:#7f9fbf"></div>other</div>
+</div>
+<script src="/vendor/three.min.js"></script>
+<!-- post-processing addons (cached locally; page degrades gracefully if absent) -->
+<script src="/vendor/CopyShader.js"></script>
+<script src="/vendor/LuminosityHighPassShader.js"></script>
+<script src="/vendor/EffectComposer.js"></script>
+<script src="/vendor/RenderPass.js"></script>
+<script src="/vendor/ShaderPass.js"></script>
+<script src="/vendor/UnrealBloomPass.js"></script>
+<script>
+
+// ── auth token shim (auto-attaches ?token= to /api/ calls) ──
+(function(){if(window.__nmFetchPatched)return;window.__nmFetchPatched=true;var _t='';try{_t=new URLSearchParams(location.search).get('token')||'';}catch(e){}window.__NM_TOKEN=_t;var _f=window.fetch;window.fetch=function(u,o){o=o||{};try{var s=(typeof u==='string')?u:(u&&u.url)||'';if(_t&&s.indexOf('/api/')!==-1){o.headers=Object.assign({},o.headers||{},{'X-Auth-Token':_t});}}catch(e){}return _f.call(this,u,o);};})();
+/* Every tag _proto_tag() can emit gets its own colour. Previously http2, ssl,
+   dhcp, dhcpv6 and icmpv6 had no entry and all fell through to grey "other",
+   which is why most traffic looked the same. Grouped by hue family:
+   greens = web/encrypted, yellows = naming/config, reds = control,
+   blues = transport, purple = UDP.                                          */
+const COLORS={
+  http:0x2bff5c, http2:0xb4ff1a, tls:0x00ffa3, ssl:0x12d47a,   // web / encrypted
+  dns:0xffb300, dhcp:0xffe600, dhcpv6:0xff8c1a,                // naming / config
+  mdns:0xff3ec8,                                               // discovery
+  icmp:0xff2d55, icmpv6:0xff7043,                              // control
+  tcp:0x00b3ff, arp:0x00e5e0,                                  // transport / link
+  udp:0x9b4dff,
+  other:0x7f9fbf, blocked:0xff1744, suspicious:0xff9100};
+
+function fmtBytes(b){if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'K';return(b/1048576).toFixed(1)+'M';}
+
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});
+renderer.setPixelRatio(1);  // No DPI scaling — keeps buffer size == CSS size, avoids mismatch
+renderer.setClearColor(0x060d1a,1);
+
+const scene=new THREE.Scene();
+
+/* ── Backdrop ───────────────────────────────────────────────────────────────
+   A flat clear-colour makes the scene feel like a box. Instead: a large
+   inverted sphere carrying a vertical gradient (deep space overhead easing
+   into a faint cyan horizon glow), with the fog tinted to the SAME mid tone so
+   distant nodes dissolve into the backdrop instead of hitting a wall of flat
+   colour. Purely decorative — unlit, unfogged, never depth-writes, and drawn
+   first, so it cannot interfere with nodes, links, picking or labels.        */
+const SKY_TOP='#02070f', SKY_MID='#071a2e', SKY_LOW='#0e3350', SKY_GLOW='#12496e';
+const FOG_TINT=0x08203a;
+scene.fog=new THREE.FogExp2(FOG_TINT,0.0125);
+renderer.setClearColor(0x02070f,1);
+
+(function _buildSky(){
+  try{
+    const cv=document.createElement('canvas'); cv.width=8; cv.height=512;
+    const g=cv.getContext('2d');
+    const grd=g.createLinearGradient(0,0,0,512);
+    grd.addColorStop(0.00, SKY_TOP);
+    grd.addColorStop(0.42, SKY_MID);
+    grd.addColorStop(0.78, SKY_LOW);
+    grd.addColorStop(0.93, SKY_GLOW);
+    grd.addColorStop(1.00, SKY_MID);
+    g.fillStyle=grd; g.fillRect(0,0,8,512);
+    const tex=new THREE.CanvasTexture(cv);
+    tex.magFilter=THREE.LinearFilter; tex.minFilter=THREE.LinearFilter;
+    const sky=new THREE.Mesh(
+      new THREE.SphereGeometry(900,32,24),
+      new THREE.MeshBasicMaterial({map:tex,side:THREE.BackSide,
+                                   depthWrite:false,fog:false}));
+    sky.renderOrder=-1;
+    sky.frustumCulled=false;
+    sky.userData.isSky=true;      // keep it out of raycasting/picking
+    scene.add(sky);
+  }catch(e){ /* backdrop is optional — scene still renders without it */ }
+})();
+
+/* ── Starfield ──────────────────────────────────────────────────────────────
+   ~2600 points on a shell just inside the backdrop. Gives the eye a parallax
+   reference so camera moves read as real depth. Deliberately dim: most stars
+   sit BELOW the bloom threshold (0.62) so they stay crisp pinpricks, with only
+   a sprinkling bright enough to glow. Unfogged, no depth-write, excluded from
+   picking — decorative only.                                                */
+let starField=null;
+(function _buildStars(){
+  try{
+    const N=2600, R0=620, R1=880;
+    const pos=new Float32Array(N*3), col=new Float32Array(N*3);
+    for(let i=0;i<N;i++){
+      // even distribution over a sphere shell
+      const u=Math.random()*2-1, th=Math.random()*Math.PI*2, s=Math.sqrt(1-u*u);
+      const r=R0+Math.random()*(R1-R0);
+      pos[i*3]=r*s*Math.cos(th); pos[i*3+1]=r*u*0.72; pos[i*3+2]=r*s*Math.sin(th);
+      // brightness mix: mostly quiet, ~8% bright enough to bloom softly
+      let c;
+      const q=Math.random();
+      if(q>0.94)      c=[0.94,0.97,1.00];              // ~5% bright enough to glow
+      else if(q>0.72) c=[0.56,0.64,0.76];              // pale steel
+      else            c=[0.34+Math.random()*0.18,
+                         0.44+Math.random()*0.18,
+                         0.58+Math.random()*0.20];     // dim blue-grey
+      const dim=0.60+Math.random()*0.35;
+      col[i*3]=c[0]*dim; col[i*3+1]=c[1]*dim; col[i*3+2]=c[2]*dim;
+    }
+    const g=new THREE.BufferGeometry();
+    g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+    g.setAttribute('color',   new THREE.BufferAttribute(col,3));
+    starField=new THREE.Points(g,new THREE.PointsMaterial({
+      size:1.7, vertexColors:true, transparent:true, opacity:0.92,
+      sizeAttenuation:false,   // constant pixel size = proper "far away" look
+      depthWrite:false, fog:false}));
+    starField.renderOrder=-1;
+    starField.frustumCulled=false;
+    starField.userData.isSky=true;
+    scene.add(starField);
+  }catch(e){ starField=null; /* optional */ }
+})();
+
+/* ── Post-processing: UnrealBloom ───────────────────────────────────────────
+   Entirely optional. If the addon scripts didn't load (offline first run,
+   blocked CDN) `composer` stays null and we fall back to renderer.render(),
+   so the view can never be broken by this.                                  */
+let composer=null, bloomPass=null, bloomOn=true;
+function _initBloom(){
+  try{
+    if(!(THREE.EffectComposer && THREE.RenderPass && THREE.UnrealBloomPass)) return false;
+    const w=_getW(), h=_getH();
+    composer=new THREE.EffectComposer(renderer);
+    composer.setSize(w,h);
+    composer.addPass(new THREE.RenderPass(scene,camera));
+    bloomPass=new THREE.UnrealBloomPass(new THREE.Vector2(w,h), 0.85, 0.55, 0.62);
+    /* strength, radius, threshold — tuned so only bright things bloom
+       (node glows, active links) rather than washing the whole scene out. */
+    composer.addPass(bloomPass);
+    return true;
+  }catch(e){ composer=null; bloomPass=null; return false; }
+}
+/* Bloom intensity presets — click the HUD button to cycle.
+   [label, strength, radius, threshold]                                       */
+const BLOOM_LEVELS=[
+  ['Off',    0,    0,    1.0 ],
+  ['Subtle', 0.45, 0.45, 0.78],
+  ['Normal', 0.85, 0.55, 0.62],
+  ['Strong', 1.35, 0.70, 0.48],
+  ['Max',    2.00, 0.85, 0.36]
+];
+let bloomLevel=2;
+function _applyBloom(){
+  const L=BLOOM_LEVELS[bloomLevel];
+  bloomOn = L[1] > 0;
+  if(bloomPass){
+    try{ bloomPass.strength=L[1]; bloomPass.radius=L[2]; bloomPass.threshold=L[3]; }catch(e){}
+  }
+  try{ localStorage.setItem('nm_bloom_level', String(bloomLevel)); }catch(e){}
+  const b=document.getElementById('bloomBtn');
+  if(b){ b.textContent = (bloomOn?'\u2726 ':'\u2727 ')+'Bloom: '+L[0];
+         b.style.opacity = bloomOn ? '1' : '0.55'; }
+}
+function _cycleBloom(dir){
+  bloomLevel = (bloomLevel + (dir||1) + BLOOM_LEVELS.length) % BLOOM_LEVELS.length;
+  _applyBloom();
+}
+/* kept for compatibility with the earlier on/off call */
+function _setBloom(on){ bloomLevel = on ? 2 : 0; _applyBloom(); }
+
+// Canvas is styled 100vw/100vh via CSS — always read from canvas for truth
+function _getW(){ return canvas.clientWidth||window.innerWidth||1; }
+function _getH(){ return canvas.clientHeight||window.innerHeight||1; }
+
+// false = do NOT let Three.js overwrite the canvas CSS (it's handled by 100vw/100vh)
+renderer.setSize(_getW(), _getH(), false);
+const camera=new THREE.PerspectiveCamera(55, _getW()/_getH(), 0.1, 2000);
+camera.position.set(0,6,22);
+camera.lookAt(0,0,0);
+
+// Resize handled by window resize + fullscreenchange listeners
+
+scene.add(new THREE.AmbientLight(0x112244,2));
+const dlight=new THREE.DirectionalLight(0x4488ff,1.2);
+dlight.position.set(5,10,8);scene.add(dlight);
+
+const grid=new THREE.GridHelper(60,60,0x061019,0x03070d);   // near-black floor
+grid.position.y=-6;scene.add(grid);
+
+// Solid floor just beneath the grid lines. The floor is ONLY a line grid, so
+// without this the sky/fog/wall-grids/starfield behind it show THROUGH the cell
+// gaps — and because that background isn't uniform, some cells read darker and
+// bluer than others: the faint "dark squares" scattered on the floor. A matte
+// fill at the base floor colour blocks the bleed-through; the grid lines still
+// read on top, so the look is unchanged except the artifacts are gone.
+(function(){
+  const fill=new THREE.Mesh(
+    new THREE.PlaneGeometry(60,60),
+    new THREE.MeshBasicMaterial({color:0x070f1c})   // matches the near-black floor
+  );
+  fill.rotation.x=-Math.PI/2;
+  fill.position.y=-6.08;            // just below the grid lines at y=-6 (no z-fight)
+  fill.renderOrder=-2;
+  fill.userData.isSky=true;         // decorative — excluded from picking
+  scene.add(fill);
+})();
+
+
+// 4 vertical wall grids — same colour/size as floor, connected at floor edge
+(function(){
+  const W=60,D=60,G=0x061019,G2=0x03070d;   // near-black walls, matches floor
+  const cy=-6+(W/2); // centre Y so bottom aligns with floor
+  // North / South walls (perpendicular to Z)
+  [30,-30].forEach(z=>{
+    const g=new THREE.GridHelper(W,D,G,G2);
+    g.rotation.x=Math.PI/2;
+    g.position.set(0,cy,z);
+    scene.add(g);
+  });
+  // East / West walls (perpendicular to X)
+  [30,-30].forEach(x=>{
+    const g=new THREE.GridHelper(W,D,G,G2);
+    g.rotation.z=Math.PI/2;
+    g.position.set(x,cy,0);
+    scene.add(g);
+  });
+})();
+
+const _WALL_CY = -6 + 30;
+let _vpnActive = false;
+let _firstFit = true;
+
+// ── Background nebula field ─────────────────────────────────────────────────
+(function(){
+  const N=400;
+  const bp=new Float32Array(N*3), bc=new Float32Array(N*3);
+  for(let i=0;i<N;i++){
+    bp[i*3  ]=(Math.random()-0.5)*80;
+    bp[i*3+1]=(Math.random()-0.5)*50;
+    bp[i*3+2]=(Math.random()-0.5)*80;
+    const v=0.04+Math.random()*0.08;
+    bc[i*3]=v*0.4; bc[i*3+1]=v*0.7; bc[i*3+2]=v;
+  }
+  const bg=new THREE.BufferGeometry();
+  bg.setAttribute('position',new THREE.BufferAttribute(bp,3));
+  bg.setAttribute('color',   new THREE.BufferAttribute(bc,3));
+  // A PointsMaterial with no texture draws a hard SQUARE, and these points are
+  // near-black. With normal alpha blending each one darkened whatever was
+  // behind it, so they appeared as black squares drifting over the globe.
+  // A soft round alpha mask plus additive blending fixes both: additive can
+  // only ever add light, never subtract it.
+  const nebCv=document.createElement('canvas'); nebCv.width=nebCv.height=32;
+  const nbx=nebCv.getContext('2d');
+  const ng=nbx.createRadialGradient(16,16,0,16,16,16);
+  ng.addColorStop(0,'rgba(255,255,255,1)');
+  ng.addColorStop(0.5,'rgba(255,255,255,0.35)');
+  ng.addColorStop(1,'rgba(255,255,255,0)');
+  nbx.fillStyle=ng; nbx.fillRect(0,0,32,32);
+  const nebTex=new THREE.CanvasTexture(nebCv);
+  scene.add(new THREE.Points(bg,new THREE.PointsMaterial({
+    size:0.22,vertexColors:true,transparent:true,opacity:0.55,
+    depthWrite:false,sizeAttenuation:true,
+    map:nebTex, alphaMap:nebTex, alphaTest:0.02,
+    blending:THREE.AdditiveBlending
+  })));
+})();
+
+// ── Visited hosts — 2D HTML overlay (right side) ───────────────────────────
+let _visitedUrls = [];
+let _urlboardCollapsed = false;
+
+function _drawUrlBoard(urls){
+  const el = document.getElementById('urlboard');
+  if(!el) return;
+  const _vn = (urls||[]).length;
+  let html = '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+    + '<button id="urlboard-toggle" onclick="toggleUrlBoard()" title="Roll up / down"'
+    + ' style="background:none;border:none;color:#4cc9f0;cursor:pointer;font-size:12px;line-height:1;padding:0 2px">'
+    + (_urlboardCollapsed ? '▸' : '▾') + '</button>'
+    + '<span style="color:#4cc9f0;font-weight:bold;font-size:11px;letter-spacing:1px;flex:1">⬡ VISITED HOSTS</span>'
+    + '<span style="color:#2a5a7a;font-size:10px">' + _vn + '</span></div>';
+  html += '<div id="urlboard-body">';
+  html += '<div style="border-top:1px solid #0d2a44;margin-bottom:4px"></div>';
+  if(!urls || urls.length===0){
+    html += '<div style="color:#1a3a55;font-size:10px;font-style:italic">Waiting for traffic…<br>Enable DNS in EtherApe toolbar to populate.</div>';
+  } else {
+    // Show all, newest first — panel is now scrollable
+    const show = urls.slice().reverse();
+    show.forEach(url=>{
+      let col = '#a8d8ea';
+      if(url.includes('nordvpn')||url.includes('nord.')) col='#ff6b6b';
+      else if(/google|microsoft|apple|amazon/.test(url)) col='#74c7ec';
+      else if(/gov|mil/.test(url.split('.').pop()))       col='#f4a261';
+      const disp = url.length>38 ? '\u2026'+url.slice(-37) : url;
+      // Build href — prepend https:// if not already a URL
+      const href = url.startsWith('http') ? url : 'https://'+url;
+      html += `<div style="line-height:1.7">` +
+        `<a href="${href}" target="_blank" rel="noopener noreferrer" ` +
+        `title="${url}" ` +
+        `style="color:${col};font-size:10px;text-decoration:none;white-space:nowrap;` +
+        `display:block;overflow:hidden;text-overflow:ellipsis;` +
+        `padding:1px 2px;border-radius:2px;transition:background 0.15s"` +
+        ` onmouseover="this.style.background='rgba(56,184,240,0.12)'"` +
+        ` onmouseout="this.style.background=''">${disp}</a></div>`;
+    });
+  }
+  html += '</div>';
+  el.innerHTML = html;
+  const _b = document.getElementById('urlboard-body');
+  if(_b) _b.style.display = _urlboardCollapsed ? 'none' : 'block';
+}
+function toggleUrlBoard(){
+  _urlboardCollapsed = !_urlboardCollapsed;
+  const b = document.getElementById('urlboard-body');
+  if(b) b.style.display = _urlboardCollapsed ? 'none' : 'block';
+  const t = document.getElementById('urlboard-toggle');
+  if(t) t.textContent = _urlboardCollapsed ? '▸' : '▾';
+}
+// Draw empty state immediately on load
+document.addEventListener('DOMContentLoaded', ()=>{ _drawUrlBoard([]); });
+
+// ── geometry budgets ────────────────────────────────────────────────────────
+const MAX_NODES=500, MAX_FLOWS=2000, CPS=20, MAX_PARTS=MAX_FLOWS*2;
+let _topN=500;
+function onTopN(v){_topN=parseInt(v);document.getElementById('topN-val').textContent=_topN>=500?'ALL':_topN+'';}
+
+// ── Flag sphere system ──────────────────────────────────────────────────────
+const _texLoader = new THREE.TextureLoader();
+const _texCache  = {};          // cc → THREE.Texture
+const _nodeMeshes = [];         // active meshes this frame
+const _meshPool   = [];         // reusable mesh pool
+const _fallbackMat = new THREE.MeshStandardMaterial({roughness:0.35,metalness:0.6});
+
+function _getFlagTex(cc){
+  if(!cc) return null;
+  const k = cc.toLowerCase();
+  if(_texCache[k] !== undefined) return _texCache[k];
+  const t = _texLoader.load('/flag/'+k,
+    (tex)=>{ tex.minFilter=THREE.LinearFilter; tex.magFilter=THREE.LinearFilter; tex.needsUpdate=true; },
+    undefined,
+    ()=>{ _texCache[k]=null; });
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  _texCache[k] = t;
+  return t;
+}
+
+function _getNodeMesh(r, cc, col, isBlocked, isLocal){
+  let mesh = _meshPool.pop();
+
+  if(!mesh){
+    // Core sphere
+    const geo = new THREE.SphereGeometry(1, 24, 16);
+    const mat = new THREE.MeshPhongMaterial({shininess:180});
+    mesh = new THREE.Mesh(geo, mat);
+
+    // No glow sub-mesh — emissive channel handles self-illumination
+
+    scene.add(mesh);
+  }
+
+  const hexCol = isBlocked ? 0xff2200 : col;
+  const mat    = mesh.material;
+
+  // Try flag texture — use it IF already loaded, else protocol colour.
+  // Local/LAN nodes have no geo country, so fly the home flag (GB).
+  const flagTex = _getFlagTex(cc || (isLocal ? 'gb' : ''));
+  const flagReady = !!(flagTex && flagTex.image && flagTex.image.width > 0);
+
+  if(flagReady){
+    mat.map   = flagTex;
+    mat.color.set(0xffffff);
+    mat.emissive.set(0x000000);
+    mat.specular.set(0x888888);
+    mat.shininess = 100;
+  } else {
+    mat.map   = null;
+    mat.color.setHex(hexCol);
+    mat.specular.set(0x88aaff);
+    mat.shininess = 180;
+    // Emissive glow matches colour at reduced intensity
+    const ec = new THREE.Color(hexCol);
+    mat.emissive.setRGB(ec.r*0.2, ec.g*0.2, ec.b*0.2);
+  }
+  mat.needsUpdate = true;
+
+
+
+  mesh.scale.setScalar(r);
+  mesh.visible = true;
+  _nodeMeshes.push(mesh);
+  return mesh;
+}
+
+function _returnNodeMeshes(){
+  while(_nodeMeshes.length){
+    const m = _nodeMeshes.pop();
+    m.visible = false;
+    _meshPool.push(m);
+  }
+}
+
+// blocked ring (still instanced, lightweight)
+const ringGeo=new THREE.TorusGeometry(1.4,0.06,6,24);
+const ringMat=new THREE.MeshBasicMaterial({color:0xff3333,transparent:true,opacity:0.8});
+const ringIM=new THREE.InstancedMesh(ringGeo,ringMat,MAX_NODES);
+ringIM.count=0; ringIM.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+scene.add(ringIM);
+
+// raycasting list (updated each rebuildGeometry)
+let _rayTargets = [];
+
+
+// flow lines
+const fPos=new Float32Array(MAX_FLOWS*CPS*2*3);
+const fCol=new Float32Array(MAX_FLOWS*CPS*2*3);
+const flowGeo=new THREE.BufferGeometry();
+flowGeo.setAttribute('position',new THREE.BufferAttribute(fPos,3).setUsage(35048));
+flowGeo.setAttribute('color',   new THREE.BufferAttribute(fCol,3).setUsage(35048));
+const flowLines=new THREE.LineSegments(flowGeo,new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.5,depthWrite:false}));
+scene.add(flowLines);
+
+// particles — 6 layers: main + 5 echo layers via time offset (no ring buffer needed)
+const TRAIL_LAYERS = 5;
+const PARTS_PER_FLOW = 4;
+const MAX_PARTS_TOTAL = MAX_FLOWS * PARTS_PER_FLOW;
+
+// Build glow texture
+const _pGlowCv=document.createElement('canvas'); _pGlowCv.width=64; _pGlowCv.height=64;
+(function(cv){
+  const ctx=cv.getContext('2d');
+  const gr=ctx.createRadialGradient(32,32,0,32,32,32);
+  gr.addColorStop(0,'rgba(255,255,255,1)');
+  gr.addColorStop(0.25,'rgba(255,255,255,0.85)');
+  gr.addColorStop(0.6,'rgba(255,255,255,0.3)');
+  gr.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=gr; ctx.fillRect(0,0,64,64);
+})(_pGlowCv);
+const _pTex=new THREE.CanvasTexture(_pGlowCv);
+
+// Each layer is a slightly earlier time offset — trail without ring buffers
+window._partLayers=[];
+for(let L=0;L<=TRAIL_LAYERS;L++){
+  const pos=new Float32Array(MAX_PARTS_TOTAL*3);
+  const col=new Float32Array(MAX_PARTS_TOTAL*3);
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3).setUsage(35048));
+  geo.setAttribute('color',   new THREE.BufferAttribute(col,3).setUsage(35048));
+  const frac=L/(TRAIL_LAYERS+1);
+  const opacity = L===0 ? 0.95 : 0.55*(1-frac);
+  const size    = L===0 ? 0.23 : 0.18*(1-frac*0.6);
+  const pts=new THREE.Points(geo,new THREE.PointsMaterial({
+    size, vertexColors:true, transparent:true, opacity,
+    depthWrite:false, sizeAttenuation:true,
+    alphaMap:_pTex, alphaTest:0.01,
+    blending:THREE.AdditiveBlending,
+  }));
+  scene.add(pts);
+  window._partLayers.push({geo,pos,col,pts,tOffset:L*0.018});
+}
+const parts  = window._partLayers[0].pts;
+const pPos   = window._partLayers[0].pos;
+const pCol   = window._partLayers[0].col;
+const partGeo= window._partLayers[0].geo;
+
+// sprite labels
+const labelSprites=[];
+function makeSprite(text,hex){
+  const cv=document.createElement('canvas'); cv.width=256; cv.height=36;
+  const ctx=cv.getContext('2d');
+  const c=new THREE.Color(hex);
+  ctx.font='500 13px monospace';
+  ctx.fillStyle=`rgb(${(c.r*255)|0},${(c.g*255)|0},${(c.b*255)|0})`;
+  ctx.fillText(text,2,24);
+  const tex=new THREE.CanvasTexture(cv);
+  const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false});
+  const sp=new THREE.Sprite(mat);
+  sp.scale.set(2.6,0.42,1);
+  return sp;
+}
+
+/* ── Protocol bar graph ─────────────────────────────────────────────────────
+   One bar per protocol, each occupying exactly one grid square of the cube
+   floor (GridHelper(60,60), so 1 unit == 1 square). The bars lie FLAT and grow
+   HORIZONTALLY across the floor with each protocol's share of traffic — a
+   dominant protocol stretches away from the row rather than shooting up as a
+   skyscraper. Purely decorative: not in _rayTargets, so it can never
+   intercept a click.                                                        */
+const PROTO_BARS=['http','http2','tls','ssl','dns','mdns','dhcp','dhcpv6',
+                  'icmp','icmpv6','tcp','udp','arp','other','blocked','suspicious'];
+const BAR_LABEL={http:'HTTP',http2:'HTTP2',tls:'TLS',ssl:'SSL',dns:'DNS',mdns:'mDNS',
+                 dhcp:'DHCP',dhcpv6:'DHCPv6',icmp:'ICMP',icmpv6:'ICMPv6',tcp:'TCP',
+                 udp:'UDP',arp:'ARP',other:'OTHER',blocked:'BLOCKED',suspicious:'SUSPECT'};
+/* One grid square each: the floor is GridHelper(60,60) spanning -30..30, so
+   grid lines land on integers and square CENTRES on half-integers. 16 bars
+   at 1.0 spacing centred on 0 gives centres -7.5 .. +7.5 (exactly square
+   centres); a 1.0 footprint fills each square edge to edge, no gaps.      */
+const BAR_W=1.0, BAR_GAP=1.0, BAR_MAXL=20.0, BAR_T=0.20, FLOOR_Y=-6;
+// ── Attack drill button on the 3D view itself ─────────────────────────────
+let ATK_ON=false;
+function paintAtkMain(){
+  const b=document.getElementById('atkbtn'); if(!b) return;
+  if(ATK_ON){b.classList.add('on');b.innerHTML='\u2620&nbsp; ATTACK: ON';}
+  else{b.classList.remove('on');b.innerHTML='\u2620&nbsp; ATTACK SIM';}
+}
+function toggleAttackMain(){
+  fetch('/api/attack_sim?set=toggle',{cache:'no-store'})
+    .then(r=>r.json()).then(d=>{ATK_ON=!!d.on;paintAtkMain();
+      if(typeof _attackOn!=='undefined'){_attackOn=ATK_ON;
+        try{_attackPaintBtn();}catch(e){}}})
+    .catch(e=>{alert('Attack drill toggle failed: '+e.message);});
+}
+// ── Kill switch: cut / restore all network traffic ─────────────────────────
+let KILL_ON=false;
+function paintKill(){
+  const b=document.getElementById('killbtn'); if(!b) return;
+  if(KILL_ON){ b.classList.add('on'); b.innerHTML='\u23FB&nbsp; RE-ENABLE CONNECTION'; }
+  else       { b.classList.remove('on'); b.innerHTML='\u23FB&nbsp; KILL CONNECTION'; }
+}
+async function killState(){
+  try{
+    const r=await fetch('/api/killswitch',{cache:'no-store'});
+    const d=await r.json(); KILL_ON=!!d.active; paintKill();
+  }catch(e){}
+}
+async function toggleKill(){
+  const b=document.getElementById('killbtn'); if(!b) return;
+  const turnOn=!KILL_ON;
+  if(turnOn && !confirm('Block ALL inbound and outbound network traffic on this machine?\n\nLocal dashboards keep working, and you can restore the connection from this same button.\n\nRequires Administrator.')) return;
+  b.disabled=true; b.innerHTML='\u23FB&nbsp; WORKING\u2026';
+  try{
+    const r=await fetch('/api/killswitch',{method:'POST',
+      headers:{'Content-Type':'text/plain'}, body:JSON.stringify({on:turnOn})});
+    const d=await r.json();
+    if(d.ok){ KILL_ON=turnOn; }
+    else{ alert('Kill switch failed: '+(d.error||'unknown - run as Administrator')); }
+  }catch(e){ alert('Kill switch failed: '+e.message); }
+  b.disabled=false; paintKill();
+}
+killState();
+let protoBars=[], protoPct={}, protoCnt={};
+
+/* Floor-bar labels need their own builder: makeSprite() renders 13px text into
+   a 256x36 canvas, which is illegible once it's lying on the grid several
+   units from the camera. This uses a much larger canvas, a bold face, a dark
+   plate behind the text and a matching outline so it stays readable against
+   both the near-black grid and a bright bar.                                 */
+function _mkBarLabel(text, hex){
+  const W=512, H=160, cv=document.createElement('canvas');
+  cv.width=W; cv.height=H;
+  const ctx=cv.getContext('2d');
+  const c=new THREE.Color(hex);
+  const rgb=`rgb(${(c.r*255)|0},${(c.g*255)|0},${(c.b*255)|0})`;
+  ctx.clearRect(0,0,W,H);
+  // rounded dark plate so the text never fights the grid behind it
+  const r=26, pad=6;
+  ctx.beginPath();
+  ctx.moveTo(pad+r,pad); ctx.lineTo(W-pad-r,pad); ctx.quadraticCurveTo(W-pad,pad,W-pad,pad+r);
+  ctx.lineTo(W-pad,H-pad-r); ctx.quadraticCurveTo(W-pad,H-pad,W-pad-r,H-pad);
+  ctx.lineTo(pad+r,H-pad); ctx.quadraticCurveTo(pad,H-pad,pad,H-pad-r);
+  ctx.lineTo(pad,pad+r); ctx.quadraticCurveTo(pad,pad,pad+r,pad); ctx.closePath();
+  ctx.fillStyle='rgba(3,8,15,0.82)'; ctx.fill();
+  ctx.lineWidth=4; ctx.strokeStyle=rgb; ctx.globalAlpha=0.55; ctx.stroke(); ctx.globalAlpha=1;
+  ctx.font='700 74px system-ui, -apple-system, "Segoe UI", sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.lineWidth=9; ctx.strokeStyle='rgba(0,0,0,0.9)';
+  ctx.strokeText(text, W/2, H/2+2);
+  ctx.fillStyle=rgb; ctx.fillText(text, W/2, H/2+2);
+  const tex=new THREE.CanvasTexture(cv);
+  tex.minFilter=THREE.LinearFilter; tex.magFilter=THREE.LinearFilter;
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false}));
+  sp.scale.set(3.4,1.06,1);          // big enough to read from the default camera
+  return sp;
+}
+(function _buildProtoBars(){
+  try{
+    const n=PROTO_BARS.length;
+    const x0=-((n-1)*BAR_GAP)/2;        // centre the row on the floor
+    const z=22.5;                          // half-integer = centred in a square row
+    PROTO_BARS.forEach((p,i)=>{
+      const col=COLORS[p]||COLORS.other;
+      const geo=new THREE.BoxGeometry(BAR_W,BAR_T,1);
+      geo.translate(0,0,-0.5);           // grows along -Z, anchored at its square
+      const mat=new THREE.MeshPhongMaterial({color:col,emissive:col,
+        emissiveIntensity:0.55,transparent:true,opacity:0.9,shininess:60});
+      const m=new THREE.Mesh(geo,mat);
+      m.position.set(x0+i*BAR_GAP, FLOOR_Y+BAR_T/2+0.02, z);
+      m.scale.z=0.02;
+      m.userData.isSky=true;             // decorative — excluded from picking
+      scene.add(m);
+      // faint base pad so an empty protocol still shows its slot
+      const pad=new THREE.Mesh(new THREE.BoxGeometry(BAR_W,0.06,BAR_W),
+        new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:0.22}));
+      pad.position.set(x0+i*BAR_GAP, FLOOR_Y+0.03, z);
+      pad.userData.isSky=true; scene.add(pad);
+      const lab=_mkBarLabel(BAR_LABEL[p]||p, col);
+      // sit the label just in FRONT of the bar's anchor square, lifted a
+      // little off the floor so it reads against the grid
+      lab.position.set(x0+i*BAR_GAP, FLOOR_Y+0.75, z+2.0);
+      scene.add(lab);
+      protoBars.push({key:p,mesh:m,label:lab,target:0.02,cur:0.02});
+    });
+  }catch(e){ protoBars=[]; }
+})();
+
+/* Recompute each protocol's share of current traffic. Called when new flow
+   data arrives; the bars then ease toward these targets in animate().        */
+function updateProtoBars(flows){
+  try{
+    const tot={}, cnt={}; let sum=0;
+    (flows||[]).forEach(f=>{
+      let k=(f.proto||'other').toLowerCase();
+      if(f.blocked) k='blocked'; else if(f.suspicious) k='suspicious';
+      if(PROTO_BARS.indexOf(k)<0) k='other';
+      const b=Math.max(0,f.bytes||0);
+      tot[k]=(tot[k]||0)+b; sum+=b;
+      cnt[k]=(cnt[k]||0)+1;                 // how many live flows use it
+    });
+    protoPct={}; protoCnt=cnt;
+    protoBars.forEach(bar=>{
+      const pct = sum>0 ? (tot[bar.key]||0)/sum : 0;
+      const n   = cnt[bar.key]||0;
+      protoPct[bar.key]=pct;
+      // Length is byte-share on a sqrt curve, BUT one huge transfer (TCP at
+      // 99%) would otherwise flatten every other protocol to nothing even
+      // though they're clearly active. So anything with at least one live flow
+      // gets a visible floor — presence is always readable, volume still wins.
+      const byVol = Math.sqrt(pct)*BAR_MAXL;
+      bar.target = n>0 ? Math.max(1.4, byVol) : 0.02;
+    });
+    _refreshProtoLegend();
+  }catch(e){}
+}
+
+/* Plain-English note on what each protocol actually is, so the colour on the
+   floor bars means something without having to look it up.                   */
+const PROTO_DESC={
+  http:'web, unencrypted',   http2:'modern web',        tls:'encrypted traffic',
+  ssl:'legacy encryption',   dns:'name lookups',        mdns:'local discovery',
+  dhcp:'address leases',     dhcpv6:'IPv6 leases',      icmp:'ping / errors',
+  icmpv6:'IPv6 control',     tcp:'reliable transport',  udp:'fast transport',
+  arp:'MAC lookups',         other:'unclassified',      blocked:'firewall drops',
+  suspicious:'AI-flagged'};
+
+function _refreshProtoLegend(){
+  const el=document.getElementById('legend'); if(!el) return;
+  let h='<div class="lgtitle">Protocol mix</div>';
+  PROTO_BARS.forEach(p=>{
+    const pct=(protoPct[p]||0)*100;
+    const n=protoCnt[p]||0;
+    const on=n>0;                       // "active" = has flows, not just volume
+    const hex='#'+(COLORS[p]||COLORS.other).toString(16).padStart(6,'0');
+    h+='<div class="row'+(on?' on':'')+'" style="opacity:'+(on?1:0.42)+'">'
+      +'<div class="dot" style="background:'+hex+(on?';box-shadow:0 0 6px '+hex:'')+'"></div>'
+      +'<span class="ptxt">'
+      +  '<span class="pname" style="color:'+(on?hex:'#54748e')+'">'+(BAR_LABEL[p]||p)+'</span>'
+      +  '<span class="pdesc">'+(PROTO_DESC[p]||'')+'</span>'
+      +'</span>'
+      +'<span class="ppct">'+(on?(pct>=0.1?pct.toFixed(1):pct.toFixed(2))+'%'
+                                 +' <span style="color:#4a6f8c">\u00d7'+n+'</span>':'—')+'</span>'
+      +'</div>';
+  });
+  el.innerHTML=h;
+}
+
+// ── state ─────────────────────────────────────────────────────────────────
+let nodeData=[], flowData=[], lastTick=-1, flowCurves=[];
+// ── World view ────────────────────────────────────────────────────────────
+// Hosts are placed on a globe at their real coordinates. Node x/y/z are
+// rewritten before rebuildGeometry, so orbs, arcs, labels, hover and click
+// hit-testing all keep working through the existing code paths untouched.
+let WORLD_ON=false, WORLD_SPIN=true, worldMesh=null;
+const WORLD_R=6.2;
+function _latLonToXYZ(lat,lon,r){
+  // Matches THREE.SphereGeometry's UV layout, so a host sits on its country.
+  const phi=(90-lat)*Math.PI/180, theta=(lon+180)*Math.PI/180;
+  return {x:-r*Math.sin(phi)*Math.cos(theta),
+           y: r*Math.cos(phi),
+           z: r*Math.sin(phi)*Math.sin(theta)};
+}
+function _worldNodeR(n){
+  // Matches the animate loop: unit sphere scaled by base, breathing up to +22%.
+  return (0.28+(n.frac||0)*0.48)*1.25;
+}
+function _vnorm(v){const l=Math.hypot(v.x,v.y,v.z)||1;return{x:v.x/l,y:v.y/l,z:v.z/l};}
+function _vcross(a,b){return{x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x};}
+function _worldPlace(nodes){
+  if(!WORLD_ON||!nodes||!nodes.length)return;
+  let hl=null;
+  for(const n of nodes){
+    if(typeof n.lat==='number'&&typeof n.lon==='number'&&!n.local){hl=n;break;}
+  }
+  // 1. Every node needs a coordinate. LAN hosts have none, so they sit at the
+  //    first geolocated peer — "home".
+  const res=nodes.map(function(n){
+    let lat=n.lat, lon=n.lon;
+    if(typeof lat!=='number'||typeof lon!=='number'||n.local){
+      lat=hl?hl.lat:51.5; lon=hl?hl.lon:-0.12;
+    }
+    return {n:n,lat:lat,lon:lon,r:_worldNodeR(n)};
+  });
+  // 2. Bucket hosts sharing a location (a data centre, or the whole LAN).
+  const groups={};
+  res.forEach(function(o){
+    const k=Math.round(o.lat*2)+'|'+Math.round(o.lon*2);
+    (groups[k]=groups[k]||[]).push(o);
+  });
+  // 3. Fan each stack out in the tangent plane at that point. Working in 3D
+  //    rather than lat/lon degrees keeps it correct at the poles, where
+  //    meridians converge and degree offsets explode.
+  Object.keys(groups).forEach(function(k){
+    const g=groups[k];
+    g.sort(function(a,b){return b.r-a.r;});
+    const c=_vnorm(_latLonToXYZ(g[0].lat,g[0].lon,1));
+    const ref=(Math.abs(c.y)<0.9)?{x:0,y:1,z:0}:{x:1,y:0,z:0};
+    const u=_vnorm(_vcross(ref,c));
+    const v=_vnorm(_vcross(c,u));
+    function put(o,dir){
+      const surf=WORLD_R+o.r+0.05;   // clear the surface by the orb's own radius
+      o.n.x=dir.x*surf/spreadFactor;
+      o.n.y=dir.y*surf/spreadFactor;
+      o.n.z=dir.z*surf/spreadFactor;
+    }
+    if(g.length===1){ put(g[0],c); return; }
+    let idx=0, ring=1, prevTheta=0, prevR=g[0].r;
+    while(idx<g.length){
+      const take=Math.min(Math.max(1,Math.round(5*ring)), g.length-idx);
+      const slice=g.slice(idx,idx+take);
+      let big=0; slice.forEach(function(o){ if(o.r>big)big=o.r; });
+      // Angular radius large enough that neighbours around the ring clear each
+      // other, and that this ring clears the one inside it.
+      const gapNeeded=(big+prevR)*1.12;
+      let theta=prevTheta+gapNeeded/WORLD_R;
+      if(take>1){
+        const need=Math.min(0.999,(big*1.12)/(WORLD_R*Math.sin(Math.PI/take)));
+        theta=Math.max(theta,Math.asin(need));
+      }
+      theta=Math.min(theta,1.35);            // never wrap round the far side
+      const st=Math.sin(theta), ct=Math.cos(theta);
+      for(let j=0;j<take;j++){
+        const ang=(j/take)*Math.PI*2 + ring*0.6;
+        const ca=Math.cos(ang), sa=Math.sin(ang);
+        put(slice[j], _vnorm({
+          x:c.x*ct+(u.x*ca+v.x*sa)*st,
+          y:c.y*ct+(u.y*ca+v.y*sa)*st,
+          z:c.z*ct+(u.z*ca+v.z*sa)*st}));
+      }
+      prevTheta=theta; prevR=big;
+      idx+=take; ring++;
+    }
+  });
+}
+function _worldBuild(){
+  const T=window.THREE; if(!T||worldMesh)return;
+  const geo=new T.SphereGeometry(WORLD_R,96,64);
+  const ld=new T.TextureLoader();
+  const dayTex=ld.load('/day-map.jpg'), nightTex=ld.load('/world-map.jpg');
+  // Day/night terminator driven by the real sun position. Opaque and
+  // depth-writing so the far side of the network is properly hidden.
+  const mat=new T.ShaderMaterial({
+    uniforms:{dayTex:{value:dayTex},nightTex:{value:nightTex},
+              sunDir:{value:new T.Vector3(1,0,0)}},
+    transparent:false, depthWrite:true, depthTest:true,
+    vertexShader:[
+      'varying vec2 vUv;','varying vec3 vN;',
+      'void main(){',
+      '  vUv=uv;',
+      '  vN=normalize(mat3(modelMatrix)*normal);',
+      '  gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);',
+      '}'].join('\n'),
+    fragmentShader:[
+      'uniform sampler2D dayTex;','uniform sampler2D nightTex;',
+      'uniform vec3 sunDir;','varying vec2 vUv;','varying vec3 vN;',
+      'void main(){',
+      '  vec3 n=normalize(vN);',
+      '  float d=dot(n,normalize(sunDir));',
+      '  float k=smoothstep(-0.12,0.22,d);',            // soft terminator
+      '  vec3 day=texture2D(dayTex,vUv).rgb;',
+      '  vec3 night=texture2D(nightTex,vUv).rgb;',
+      '  day*=0.55+0.65*clamp(d,0.0,1.0);',             // sun angle shading
+      '  night*=1.25;',                                  // lift the city lights
+      '  vec3 col=mix(night,day,k);',
+      '  float rim=pow(1.0-abs(dot(n,vec3(0.0,0.0,1.0))),3.0);',
+      '  col+=vec3(0.02,0.05,0.09)*rim;',                // faint limb, not a halo
+      '  gl_FragColor=vec4(col,1.0);',
+      '}'].join('\n')
+  });
+  worldMesh=new T.Mesh(geo,mat);
+  worldMesh.renderOrder=-1;        // draw before the flows so depth is laid down
+  worldMesh.userData.isWorld=true;
+  scene.add(worldMesh);
+}
+function _worldSunDir(){
+  // Subsolar point: longitude from UTC, declination from the day of year.
+  const now=new Date();
+  const utcH=now.getUTCHours()+now.getUTCMinutes()/60+now.getUTCSeconds()/3600;
+  const start=Date.UTC(now.getUTCFullYear(),0,0);
+  const doy=Math.floor((now.getTime()-start)/86400000);
+  const decl=23.44*Math.sin(2*Math.PI*(doy-81)/365.24);
+  const lon=(12-utcH)*15;
+  const v=_latLonToXYZ(decl,lon,1);
+  const l=Math.hypot(v.x,v.y,v.z)||1;
+  return {x:v.x/l,y:v.y/l,z:v.z/l};
+}
+function _worldDepthFix(){
+  // Sprites are created with depthTest:false so a label is never hidden by its
+  // own node. On the globe that let far-side labels show through the planet, so
+  // flip every sprite (not just the tracked ones) to match the mode.
+  try{
+    scene.traverse(function(o){
+      if(o.isSprite&&o.material&&o.material.depthTest!==WORLD_ON){
+        o.material.depthTest=WORLD_ON;
+      }
+    });
+  }catch(e){}
+}
+function _worldDestroy(){
+  if(worldMesh){scene.remove(worldMesh);
+    try{worldMesh.geometry.dispose();worldMesh.material.dispose();}catch(e){}
+    worldMesh=null;}
+
+}
+function toggleWorld(){
+  WORLD_ON=!WORLD_ON;
+  const b=document.getElementById('worldbtn');
+  if(b){b.classList.toggle('on',WORLD_ON);
+        b.innerHTML=WORLD_ON?'\ud83c\udf10&nbsp; WORLD: ON':'\ud83c\udf10&nbsp; WORLD VIEW';}
+  if(WORLD_ON){
+    _worldBuild(); WORLD_SPIN=true;
+    zoom=Math.max(zoom,17); rotX=0.42;          // pull back so the globe fits
+    if(typeof _fitToNodes==='function'){/* skip auto-fit: globe sets the frame */}
+  }else{
+    _worldDestroy();
+  }
+  try{ rebuildGeometry(nodeData,flowData); }catch(e){ console.warn('world rebuild:',e); }
+  _worldDepthFix();
+}
+let spreadFactor=1.0, showBlocked=true, showLabels=true;
+const _mat=new THREE.Matrix4(), _col=new THREE.Color();
+let t=0, hoveredIdx=-1;
+
+// Per-node sinusoidal drift offsets (seeded per-node so each moves differently)
+const _nodeDrift = Array.from({length:500},(_,i)=>({
+  freq: 0.6+Math.random()*0.8,
+  amp:  0.06+Math.random()*0.10,
+  phase:Math.random()*Math.PI*2,
+  fq2:  1.2+Math.random()*1.6,
+  amp2: 0.03+Math.random()*0.06,
+  ph2:  Math.random()*Math.PI*2,
+}));
+
+// Upgrade flow lines to additive blending for glow
+flowLines.material.blending = THREE.AdditiveBlending;
+flowLines.material.opacity  = 0.6;
+
+function nodeColor(nd){
+  if(nd.blocked) return COLORS.blocked;
+  if(nd.suspicious) return COLORS.suspicious;
+  return COLORS[nd.proto]||COLORS.other;
+}
+
+// ── rebuild geometry ───────────────────────────────────────────────────────
+function rebuildGeometry(nodes,flows){
+  _worldPlace(nodes);   // world view: rewrite x/y/z to real positions on the globe
+  // Return old flag spheres to pool
+  _returnNodeMeshes();
+  _rayTargets=[];
+
+  // Remove old label sprites
+  labelSprites.forEach(s=>scene.remove(s));
+  labelSprites.length=0;
+
+  const N=Math.min(nodes.length,MAX_NODES);
+  let ringCount=0;
+
+  for(let i=0;i<N;i++){
+    const nd=nodes[i];
+    const r=0.28+nd.frac*0.48;
+    const sx=nd.x*spreadFactor, sy=nd.y*spreadFactor, sz=nd.z*spreadFactor;
+    const col=nodeColor(nd);
+
+    const mesh=_getNodeMesh(r, nd.cc, col, nd.blocked, nd.local);
+    mesh.position.set(sx,sy,sz);
+    mesh.userData.nodeIdx=i;
+    _rayTargets.push(mesh);
+
+    if(nd.blocked){
+      _mat.makeScale(r*1.1,r*1.1,r*1.1); _mat.setPosition(sx,sy,sz);
+      ringIM.setMatrixAt(ringCount++,_mat);
+    }
+
+    if(showLabels){
+      const threshold = nodes.length > 20 ? 0.02 : 0;
+      if(nd.local || nd.blocked || nd.frac > threshold){
+        const sp=makeSprite(nd.label||nd.id, col);
+        sp.position.set(sx, sy+r+0.55, sz);
+        scene.add(sp); labelSprites.push(sp);
+        if(WORLD_ON)sp.material.depthTest=true;
+      }
+    }
+  }
+
+  ringIM.count=ringCount;
+  ringIM.instanceMatrix.needsUpdate=true;
+
+  const nmap={};
+  nodes.forEach(n=>nmap[n.id]=n);
+
+  flowCurves=[];
+  let vi=0;
+  const F=Math.min(flows.length,MAX_FLOWS);
+  for(let f=0;f<F;f++){
+    const fl=flows[f];
+    const s=nmap[fl.src], d=nmap[fl.dst];
+    if(!s||!d){flowCurves.push(null);continue;}
+    const fc=fl.blocked?new THREE.Color(0xff3333):(new THREE.Color(COLORS[fl.proto]||COLORS.other));
+    const pts=arcPoints(s,d);
+    flowCurves.push({pts,color:fc,frac:fl.frac,blocked:fl.blocked,
+                     src:fl.src,dst:fl.dst,proto:fl.proto,bytes:fl.bytes,pkts:fl.pkts});
+    for(let p=0;p<CPS-1;p++){
+      const a=pts[p],b=pts[p+1];
+      fPos[vi*3]=a.x;fPos[vi*3+1]=a.y;fPos[vi*3+2]=a.z;vi++;
+      fCol[(vi-1)*3]=fc.r;fCol[(vi-1)*3+1]=fc.g;fCol[(vi-1)*3+2]=fc.b;
+      fPos[vi*3]=b.x;fPos[vi*3+1]=b.y;fPos[vi*3+2]=b.z;vi++;
+      fCol[(vi-1)*3]=fc.r;fCol[(vi-1)*3+1]=fc.g;fCol[(vi-1)*3+2]=fc.b;
+    }
+  }
+  for(let i=vi;i<MAX_FLOWS*CPS*2;i++){fPos[i*3]=0;fPos[i*3+1]=0;fPos[i*3+2]=0;}
+  flowGeo.getAttribute('position').needsUpdate=true;
+  flowGeo.getAttribute('color').needsUpdate=true;
+  flowGeo.setDrawRange(0,vi);
+  partGeo.setDrawRange(0,Math.min(F*PARTS_PER_FLOW,MAX_PARTS_TOTAL));
+}
+
+function arcPoints(s,d){
+  const sx=s.x*spreadFactor,sy=s.y*spreadFactor,sz=s.z*spreadFactor;
+  const dx=d.x*spreadFactor,dy=d.y*spreadFactor,dz=d.z*spreadFactor;
+  const pts=[];
+  if(WORLD_ON){
+    // Great-circle path, lifted above the surface. A single bezier control
+    // point sagged through the planet on near-antipodal hops; slerping the
+    // direction and scaling the radius makes that impossible.
+    const rs=Math.hypot(sx,sy,sz)||1, rd=Math.hypot(dx,dy,dz)||1;
+    const ux=sx/rs, uy=sy/rs, uz=sz/rs;
+    const vx=dx/rd, vy=dy/rd, vz=dz/rd;
+    let dot=ux*vx+uy*vy+uz*vz; dot=Math.max(-1,Math.min(1,dot));
+    const omega=Math.acos(dot), sinO=Math.sin(omega);
+    const peak=WORLD_R*(0.08+0.42*(omega/Math.PI));   // longer hop, higher arc
+    for(let i=0;i<CPS;i++){
+      const tt=i/(CPS-1);
+      let a,b;
+      if(sinO<1e-6){a=1-tt;b=tt;}
+      else{a=Math.sin((1-tt)*omega)/sinO; b=Math.sin(tt*omega)/sinO;}
+      let px=ux*a+vx*b, py=uy*a+vy*b, pz=uz*a+vz*b;
+      const len=Math.hypot(px,py,pz)||1;
+      const rr=(rs*(1-tt)+rd*tt)+Math.sin(Math.PI*tt)*peak;
+      pts.push(new THREE.Vector3(px/len*rr, py/len*rr, pz/len*rr));
+    }
+    return pts;
+  }
+  const lift=Math.hypot(sx-dx,sz-dz)*0.32+0.8;
+  const mx=(sx+dx)*0.5, my=(sy+dy)*0.5+lift, mz=(sz+dz)*0.5;
+  for(let t=0;t<=1;t+=1/(CPS-1)){
+    const it=1-t;
+    pts.push(new THREE.Vector3(
+      it*it*sx+2*it*t*mx+t*t*dx,
+      it*it*sy+2*it*t*my+t*t*dy,
+      it*it*sz+2*it*t*mz+t*t*dz));
+  }
+  return pts;
+}
+
+// ── info panel ─────────────────────────────────────────────────────────────
+const infoDiv=document.getElementById('info');
+const cross=document.getElementById('crosshair');
+
+function showInfo(nd){
+  document.getElementById('iIP').textContent=nd.id;
+  document.getElementById('iDNS').textContent=nd.rdns||'—';
+  const geo=nd.flag?`${nd.flag} ${nd.city||nd.country||nd.cc}`:(nd.city||nd.country||'—');
+  document.getElementById('iGeo').textContent=geo;
+  document.getElementById('iOrg').textContent=nd.org||'—';
+  document.getElementById('iProto').textContent=nd.proto;
+  document.getElementById('iBytes').textContent=fmtBytes(nd.bytes||0);
+  document.getElementById('iPkts').textContent=(nd.pkts||0).toLocaleString()+' pkts';
+  const bEl=document.getElementById('iBlocked');
+  bEl.style.display=nd.blocked?'block':'none';
+  const sEl=document.getElementById('iSusp');
+  sEl.style.display=nd.suspicious?'block':'none';
+  // flows involving this IP
+  const related=flowData.filter(f=>f.src===nd.id||f.dst===nd.id).slice(0,8);
+  const fDiv=document.getElementById('iFlows');
+  fDiv.innerHTML=related.map(f=>{
+    const peer=f.src===nd.id?f.dst:f.src;
+    const dir=f.src===nd.id?'→':'←';
+    const bTag=f.blocked?'<span style="color:#ff4444">⛔</span> ':'';
+    return `<div style="color:#2a5a7a;margin:1px 0">${bTag}${dir} ${peer} <span style="color:#38b8f0">${f.proto}</span> <span style="color:#a371f7">${fmtBytes(f.bytes||0)}</span></div>`;
+  }).join('');
+  infoDiv.style.display='block';
+}
+
+function hideInfo(){infoDiv.style.display='none';cross.style.display='none';hoveredIdx=-1;}
+
+// ── raycasting ─────────────────────────────────────────────────────────────
+const raycaster=new THREE.Raycaster();
+const mouse2=new THREE.Vector2();
+function onMouseMove(e){
+  mouse2.x=(e.clientX/_getW())*2-1;
+  mouse2.y=-(e.clientY/_getH())*2+1;
+  raycaster.setFromCamera(mouse2,camera);
+  const hits=raycaster.intersectObjects(_rayTargets,false);
+  if(hits.length>0){
+    const idx=hits[0].object.userData.nodeIdx;
+    if(idx!==undefined && idx<nodeData.length){
+      hoveredIdx=idx;
+      showInfo(nodeData[idx]);
+      cross.style.left=e.clientX+'px'; cross.style.top=e.clientY+'px';
+      cross.style.display='block';
+      return;
+    }
+  }
+  hideInfo();
+}
+canvas.addEventListener('mousemove',onMouseMove);
+
+// ── Node click → pin selection + traffic graph on wall ─────────────────────
+let selectedNode = null;
+let graphHistory = {};   // ip → [{t, bytes}]
+const GRAPH_WALL_SIZE = 18; // match wall grid size
+
+// ── Traffic graph panel (east wall) ────────────────────────────────────────
+const graphCv  = document.createElement('canvas');
+graphCv.width  = 512; graphCv.height = 256;
+const graphCtx = graphCv.getContext('2d');
+const graphTex = new THREE.CanvasTexture(graphCv);
+const graphPlaneGeo = new THREE.PlaneGeometry(GRAPH_WALL_SIZE*0.8, GRAPH_WALL_SIZE*0.4);
+const graphPlaneMat = new THREE.MeshBasicMaterial({
+  map: graphTex, transparent: true, opacity: 0.92,
+  side: THREE.FrontSide, depthWrite: false
+});
+const graphPlane = new THREE.Mesh(graphPlaneGeo, graphPlaneMat);
+graphPlane.position.set(29.9, -6 + GRAPH_WALL_SIZE*0.2 + 1, 0);
+graphPlane.rotation.y = -Math.PI / 2;
+graphPlane.visible = false;
+graphPlane.raycast = ()=>{};  // never intercept hover raycasts
+scene.add(graphPlane);
+
+// ── AI summary panel (north wall) ──────────────────────────────────────────
+const aiCv  = document.createElement('canvas');
+aiCv.width  = 512; aiCv.height = 384;
+const aiCtx = aiCv.getContext('2d');
+const aiTex = new THREE.CanvasTexture(aiCv);
+const aiPlaneGeo = new THREE.PlaneGeometry(GRAPH_WALL_SIZE*0.8, GRAPH_WALL_SIZE*0.6);
+const aiPlaneMat = new THREE.MeshBasicMaterial({
+  map: aiTex, transparent: true, opacity: 0.92,
+  side: THREE.FrontSide, depthWrite: false
+});
+const aiPlane = new THREE.Mesh(aiPlaneGeo, aiPlaneMat);
+aiPlane.position.set(0, -6 + GRAPH_WALL_SIZE*0.3 + 1, -29.9);
+aiPlane.visible = false;
+aiPlane.raycast = ()=>{};  // never intercept hover raycasts
+scene.add(aiPlane);
+
+document.addEventListener('keydown', function(e){
+  if(e.key === 'Escape') { try{ hideAiOverlay(); }catch(err){} }
+});
+
+function hideFw(){var e=document.getElementById('fwoverlay'); if(e)e.style.display='none';}
+function fwEsc(s){var d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function fwRefresh(){
+  var el=document.getElementById('fwbody'); if(!el)return;
+  el.innerHTML='<div style="color:#6a9ab8">Reading the firewall\u2026</div>';
+  fetch('/api/firewall',{cache:'no-store'}).then(function(r){return r.json();})
+   .then(function(d){
+     if(d.error){ el.innerHTML='<div style="color:#ff4444">'+fwEsc(d.error)+'</div>'; return; }
+     var sub=document.getElementById('fwsub');
+     if(sub) sub.textContent=(d.backend||'no backend')
+        +(d.elevated?'':'  \u2014 NOT ELEVATED, rules cannot be written');
+     var h='';
+     h+='<div style="display:flex;gap:18px;margin-bottom:10px;flex-wrap:wrap">'
+       +'<span>Blocked hosts <b style="color:#ff4444">'+(d.count||0)+'</b></span>'
+       +'<span>Kill switch <b style="color:'+(d.killswitch?'#ff4444':'#38f0a8')+'">'
+       +(d.killswitch?'ACTIVE':'off')+'</b></span>'
+       +'<span>Drop logging <b style="color:'+(d.logging?'#38f0a8':'#6a9ab8')+'">'
+       +(d.logging?'on':'off')+'</b></span>'
+       +'<span>Backend <b>'+fwEsc(d.backend||'none')+'</b></span></div>';
+     if(!d.elevated){
+       h+='<div style="color:#ff9f43;margin-bottom:10px">Not running elevated \u2014 '
+         +'blocking will fail silently until you restart as '
+         +'Administrator (or root).</div>';
+     }
+     if(!(d.blocked||[]).length){
+       h+='<div style="color:#6a9ab8">No hosts are currently blocked by this app.</div>';
+     }else{
+       h+='<table style="width:100%;border-collapse:collapse">'
+         +'<tr><th style="text-align:left;color:#6a9ab8;font-weight:600;padding:3px 6px;'
+         +'border-bottom:1px solid #12283e">Blocked address</th>'
+         +'<th style="text-align:left;color:#6a9ab8;font-weight:600;padding:3px 6px;'
+         +'border-bottom:1px solid #12283e">Rule name</th></tr>';
+       (d.blocked||[]).forEach(function(ip){
+         h+='<tr><td style="padding:3px 6px">'+fwEsc(ip)+'</td>'
+           +'<td style="padding:3px 6px;color:#6a9ab8">NM_BLOCK_'
+           +fwEsc(String(ip).replace(/\./g,'_'))+'</td></tr>';
+       });
+       h+='</table>';
+     }
+     var other=(d.rules||[]).filter(function(r){return r.indexOf('NM_BLOCK_')!==0;});
+     if(other.length){
+       h+='<div style="margin-top:12px;color:#38b8f0">Other rules created by this app</div>';
+       other.forEach(function(r){ h+='<div style="color:#c8dff0">'+fwEsc(r)+'</div>'; });
+     }
+     if((d.recent||[]).length){
+       h+='<div style="margin-top:12px;color:#38b8f0">Written in the last 10 minutes</div>';
+       (d.recent||[]).forEach(function(e){
+         h+='<div style="color:#c8dff0">'+fwEsc(e.ip)+'  '
+           +'<span style="color:#6a9ab8">'+fwEsc(e.reason||'')+'</span></div>';
+       });
+     }
+     el.innerHTML=h;
+   })
+   .catch(function(e){ el.innerHTML='<div style="color:#ff4444">'+fwEsc(e.message)+'</div>'; });
+}
+function showFw(){
+  var e=document.getElementById('fwoverlay'); if(!e)return;
+  e.style.display='block'; fwRefresh();
+}
+document.addEventListener('keydown',function(ev){ if(ev.key==='Escape') hideFw(); });
+
+function hideAiOverlay(){
+  const el=document.getElementById('aioverlay');
+  if(el) el.style.display='none';
+  try{ aiPlane.visible=false; }catch(e){}
+}
+function _showAiOverlay(title, lines, color, loading){
+  // The wall panel is a texture on a 3D plane, so it is drawn at an angle and
+  // is hard to read. Mirror the same content into a centred HTML panel.
+  const el=document.getElementById('aioverlay');
+  if(!el) return;
+  const t=document.getElementById('aiTitle');
+  const sub=document.getElementById('aiSub');
+  const body=document.getElementById('aiBody');
+  if(t) t.style.color=color||'#38b8f0';
+  if(sub) sub.textContent=title||'';
+  if(body){
+    if(loading){
+      body.textContent='Analysing traffic\u2026';
+      body.style.color='#6a9ab8';
+    }else{
+      body.style.color='#c8dff0';
+      body.textContent=(lines||[]).join('\n').replace(/\*\*/g,'').trim()
+                       || 'No analysis returned.';
+    }
+  }
+  el.style.display='block';
+}
+function _drawAiPanel(title, lines, color, loading){
+  try{ _showAiOverlay(title, lines, color, loading); }catch(e){}
+  const W=512, H=384, ctx=aiCtx;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='rgba(4,10,22,0.94)'; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle=color; ctx.lineWidth=2; ctx.strokeRect(1,1,W-2,H-2);
+
+  // Header
+  ctx.fillStyle=color; ctx.font='bold 13px monospace';
+  ctx.fillText('⬡ AI ANALYSIS', 12, 22);
+  ctx.fillStyle='#2a5a7a'; ctx.font='11px monospace';
+  ctx.fillText(title, 12, 40);
+  ctx.strokeStyle='#0d2030'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(12,48); ctx.lineTo(W-12,48); ctx.stroke();
+
+  if(loading){
+    // Animated loading dots (we redraw every 600ms anyway)
+    ctx.fillStyle='#38b8f0'; ctx.font='12px monospace';
+    ctx.fillText('Analysing traffic…', 12, 80);
+    const dots = Math.floor(Date.now()/400)%4;
+    ctx.fillText('●'.repeat(dots)+'○'.repeat(3-dots), 12, 100);
+    aiTex.needsUpdate=true; return;
+  }
+
+  ctx.fillStyle='#c8dff0'; ctx.font='11px monospace';
+  let y=66;
+  const lineH=16, maxW=W-24;
+  lines.forEach(line=>{
+    if(!line.trim()){y+=8;return;}
+    // Word-wrap
+    const words=line.split(' ');
+    let row='';
+    words.forEach(w=>{
+      const test=row?row+' '+w:w;
+      if(ctx.measureText(test).width>maxW && row){
+        ctx.fillText(row,12,y); y+=lineH; row=w;
+      } else { row=test; }
+    });
+    if(row){ctx.fillText(row,12,y); y+=lineH;}
+    if(y>H-20) return;
+  });
+  aiTex.needsUpdate=true;
+}
+
+let _aiCache={};  // ip → summary text
+let _aiKey=null;
+
+async function _getAiKey(){
+  // Key stays server-side; return '' so /api/ai_query uses the stored key.
+  return '';
+}
+
+async function _fetchAiSummary(nd){
+  const ip = nd.id;
+  if(_aiCache[ip]){
+    _renderAiSummary(nd, _aiCache[ip]);
+    return;
+  }
+  _drawAiPanel(ip, [], '#38b8f0', true);
+  aiTex.needsUpdate=true;
+
+  const hist = graphHistory[ip]||[];
+  const totalBytes = (nd.bytes||0);
+  const flows = flowData.filter(f=>f.src===ip||f.dst===ip).slice(0,8);
+  const prompt = [
+    `Analyse this network node: IP=${ip}`,
+    nd.rdns ? `rDNS: ${nd.rdns}` : '',
+    nd.org  ? `Org: ${nd.org}` : '',
+    nd.city ? `Location: ${nd.city}, ${nd.country}` : '',
+    `Protocol: ${nd.proto}`,
+    `Total bytes: ${totalBytes}`,
+    nd.blocked ? 'STATUS: BLOCKED BY FIREWALL' : '',
+    nd.suspicious ? 'STATUS: FLAGGED SUSPICIOUS' : '',
+    flows.length ? `Active flows: ${flows.map(f=>`${f.src===ip?'→':'←'}${f.src===ip?f.dst:f.src}(${f.proto})`).join(', ')}` : '',
+    '',
+    'In 4-6 short bullet points, describe: what this IP is likely doing, whether it appears benign or suspicious, and any notable patterns. Be concise and technical.',
+  ].filter(Boolean).join('\n');
+
+  try {
+    const resp = await fetch('/api/ai_analyze', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({prompt})
+    });
+    const data = await resp.json();
+    const text = data.text || (data.error ? ('AI unavailable:\n'+data.error) : 'No analysis available.');
+    if(data.text) _aiCache[ip] = text;
+    _renderAiSummary(nd, text);
+  } catch(e){
+    _renderAiSummary(nd, `Analysis failed:\n${e.message}`);
+  }
+}
+
+function _renderAiSummary(nd, text){
+  const color = nd.blocked?'#ff4444':nd.suspicious?'#ff9f43':'#38b8f0';
+  const lines = text.split('\n');
+  _drawAiPanel(nd.id, lines, color, false);
+}
+
+function _drawGraph(ip, color){
+  const W=512, H=256;
+  const ctx=graphCtx;
+  ctx.clearRect(0,0,W,H);
+
+  // Dark panel background
+  ctx.fillStyle='rgba(4,10,22,0.92)';
+  ctx.fillRect(0,0,W,H);
+
+  // Border
+  ctx.strokeStyle=color;
+  ctx.lineWidth=2;
+  ctx.strokeRect(1,1,W-2,H-2);
+
+  // Title
+  ctx.fillStyle=color;
+  ctx.font='bold 14px monospace';
+  ctx.fillText(ip, 12, 22);
+
+  const hist = graphHistory[ip] || [];
+  if(hist.length < 2){
+    ctx.fillStyle='#2a5a7a';
+    ctx.font='12px monospace';
+    ctx.fillText('Waiting for traffic data…', 12, H/2);
+    graphTex.needsUpdate=true;
+    return;
+  }
+
+  // Grid lines
+  ctx.strokeStyle='rgba(56,184,240,0.08)';
+  ctx.lineWidth=1;
+  for(let i=1;i<4;i++){
+    const y=H-30-(i/4)*(H-50);
+    ctx.beginPath();ctx.moveTo(40,y);ctx.lineTo(W-12,y);ctx.stroke();
+  }
+
+  // Find max for scaling
+  const vals = hist.map(h=>h.bytes);
+  const maxB = Math.max(...vals, 1);
+
+  // Area fill
+  const gx0=40, gx1=W-12, gy0=H-30, gy1=22;
+  const grad=ctx.createLinearGradient(0,gy1,0,gy0);
+  grad.addColorStop(0,color+'44');
+  grad.addColorStop(1,color+'00');
+  ctx.beginPath();
+  hist.forEach((h,i)=>{
+    const x=gx0+(i/(hist.length-1))*(gx1-gx0);
+    const y=gy0-(h.bytes/maxB)*(gy0-gy1);
+    i===0?ctx.moveTo(x,gy0):null;
+    ctx.lineTo(x,y);
+  });
+  ctx.lineTo(gx1,gy0);ctx.closePath();
+  ctx.fillStyle=grad;ctx.fill();
+
+  // Line
+  ctx.strokeStyle=color;ctx.lineWidth=2;ctx.lineJoin='round';
+  ctx.beginPath();
+  hist.forEach((h,i)=>{
+    const x=gx0+(i/(hist.length-1))*(gx1-gx0);
+    const y=gy0-(h.bytes/maxB)*(gy0-gy1);
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+
+  // Y axis label
+  ctx.fillStyle='#4a7a9a';ctx.font='10px monospace';
+  const fmtB=b=>b>1e6?(b/1e6).toFixed(1)+'M':b>1e3?(b/1e3).toFixed(0)+'K':b.toFixed(0);
+  ctx.fillText(fmtB(maxB), 2, gy1+4);
+  ctx.fillText('0', 2, gy0);
+
+  // Current value
+  const last=hist[hist.length-1];
+  ctx.fillStyle=color;ctx.font='bold 16px monospace';
+  ctx.fillText(fmtB(last.bytes)+' B/s', gx0, H-10);
+
+  // Time label
+  ctx.fillStyle='#2a5a7a';ctx.font='10px monospace';
+  ctx.fillText('← 60s', gx1-40, H-10);
+
+  graphTex.needsUpdate=true;
+}
+
+function selectNode(nd){
+  selectedNode = nd;
+  if(!nd){
+    graphPlane.visible=false;
+    aiPlane.visible=false;
+    try{ hideAiOverlay(); }catch(e){}
+    return;
+  }
+  if(!graphHistory[nd.id]) graphHistory[nd.id]=[];
+  graphPlane.visible=true;
+  aiPlane.visible=true;
+  const col='#'+(COLORS[nd.proto]||COLORS.other).toString(16).padStart(6,'0');
+  _drawGraph(nd.id, col);
+  _fetchAiSummary(nd);
+}
+
+// Track bytes over time for selected node
+let _lastBytes={};
+function _updateGraphHistory(){
+  nodeData.forEach(nd=>{
+    const prev=_lastBytes[nd.id]||0;
+    const delta=Math.max(0,(nd.bytes||0)-prev);
+    _lastBytes[nd.id]=nd.bytes||0;
+    if(!graphHistory[nd.id]) graphHistory[nd.id]=[];
+    graphHistory[nd.id].push({t:Date.now(),bytes:delta});
+    if(graphHistory[nd.id].length>60) graphHistory[nd.id].shift();
+  });
+  // Cap graphHistory to 200 IPs to prevent memory growth
+  const keys=Object.keys(graphHistory);
+  if(keys.length>200){
+    const active=new Set(nodeData.map(n=>n.id));
+    keys.filter(k=>!active.has(k)).slice(0,keys.length-200)
+        .forEach(k=>delete graphHistory[k]);
+  }
+  // Cap _aiCache to 100 entries
+  const aiKeys=Object.keys(_aiCache);
+  if(aiKeys.length>100) delete _aiCache[aiKeys[0]];
+
+  if(selectedNode){
+    const still=nodeData.find(n=>n.id===selectedNode.id);
+    if(still){
+      const col='#'+(COLORS[still.proto]||COLORS.other).toString(16).padStart(6,'0');
+      _drawGraph(still.id, col);
+    }
+  }
+}
+
+// Click: select node or clear
+let _lastMousePos={x:0,y:0};
+canvas.addEventListener('mousedown',e=>{
+  // Any interaction parks the globe — it stays stationary until WORLD is
+  // toggled again, so you can inspect a host without it drifting away.
+  if(WORLD_ON)WORLD_SPIN=false;
+  _lastMousePos={x:e.clientX,y:e.clientY};
+  if(e.target!==canvas)return;isDrag=true;px=e.clientX;py=e.clientY;canvas.classList.add('drag');
+});
+
+canvas.addEventListener('click',e=>{
+  // Only treat as click if mouse didn't move much (not a drag)
+  const dx=e.clientX-_lastMousePos.x, dy=e.clientY-_lastMousePos.y;
+  if(Math.sqrt(dx*dx+dy*dy)>5) return;
+  mouse2.x=(e.clientX/_getW())*2-1;
+  mouse2.y=-(e.clientY/_getH())*2+1;
+  raycaster.setFromCamera(mouse2,camera);
+  const hits=raycaster.intersectObjects(_rayTargets,false);
+  if(hits.length>0){
+    const idx=hits[0].object.userData.nodeIdx;
+    if(idx!==undefined && idx<nodeData.length){
+      selectNode(nodeData[idx]);
+      return;
+    }
+  }
+  // Click on empty space — deselect
+  selectNode(null);
+});
+
+// ── controls ───────────────────────────────────────────────────────────────
+function toggleSpread(){
+  const row=document.getElementById('spread-row');
+  const btn=document.getElementById('btnSpread');
+  const open=row.style.display==='none';
+  row.style.display=open?'flex':'none';
+  btn.classList.toggle('active',open);
+}
+function onSpread(v){
+  spreadFactor=parseFloat(v);
+  document.getElementById('spread-val').textContent=spreadFactor.toFixed(1)+'×';
+  rebuildGeometry(nodeData,flowData);
+}
+function toggleShowBlocked(){
+  showBlocked=!showBlocked;
+  document.getElementById('btnBlocked').classList.toggle('active',showBlocked);
+  rebuildGeometry(nodeData,flowData);
+}
+function toggleLabels(){
+  showLabels=!showLabels;
+  document.getElementById('btnLabels').classList.toggle('active',showLabels);
+  rebuildGeometry(nodeData,flowData);
+}
+let _autoCentrePending=false;  // defined here, not duplicated elsewhere
+
+function _fitToNodes(){
+  if(!nodeData||nodeData.length===0) return;
+  // Compute bounding box of all nodes
+  let minX=Infinity,maxX=-Infinity,minZ=Infinity,maxZ=-Infinity;
+  nodeData.forEach(n=>{
+    const sx=n.x*spreadFactor, sz=n.z*spreadFactor;
+    if(sx<minX)minX=sx; if(sx>maxX)maxX=sx;
+    if(sz<minZ)minZ=sz; if(sz>maxZ)maxZ=sz;
+  });
+  // Pan to bounding box centre
+  panX=(minX+maxX)/2;
+  panZ=(minZ+maxZ)/2;
+  // Set zoom so the widest dimension fills ~70% of the view
+  const extentX=(maxX-minX)/2;
+  const extentZ=(maxZ-minZ)/2;
+  const extent=Math.max(extentX,extentZ,4);
+  const fovRad=(55*Math.PI/180)/2;
+  const aspect=_getW()/_getH();
+  const hFovRad=Math.atan(Math.tan(fovRad)*aspect);
+  // Use narrower of the two FOVs to guarantee everything fits
+  const fitZoom=extent/Math.tan(Math.min(fovRad,hFovRad))*1.4;
+  zoom=Math.max(14,Math.min(80,fitZoom));
+  rotX=0.22; rotY=0; panY=0;
+}
+
+function resetCamera(){
+  rotX=0.22;rotY=0;zoom=22;panX=0;panY=0;panZ=0;
+  _firstFit=true;
+}
+// ── Top Flow Talkers Sankey ──────────────────────────────────────────────────
+let _talkersOpen=false,_talkersRAF=null,_talkersT=0,_showIncoming=true;
+let _aiScanRunning=false;
+// ── Attack simulation ─────────────────────────────────────────────────────
+// Purely visual drill: synthetic hostile sources appear, get "detected", then
+// are blocked and blown up on the scope. Addresses come from the reserved
+// TEST-NET documentation ranges and every label is prefixed SIM, so a drill can
+// never be mistaken for real traffic or get a real host blocked by accident.
+let _attackOn=false,_attackers=[],_attackBooms=[],_attackLastSpawn=0,_attackKills=0;
+const _ATTACK_POOL=[
+  {ip:'198.51.100.7',  city:'Moscow',      lat:55.75, lon:37.62,  proto:'tcp', kind:'SSH brute force'},
+  {ip:'198.51.100.23', city:'Beijing',     lat:39.91, lon:116.39, proto:'tcp', kind:'port scan'},
+  {ip:'203.0.113.44',  city:'Sao Paulo',   lat:-23.55,lon:-46.63, proto:'udp', kind:'UDP flood'},
+  {ip:'192.0.2.88',    city:'Lagos',       lat:6.52,  lon:3.38,   proto:'tcp', kind:'RDP probe'},
+  {ip:'203.0.113.101', city:'Mumbai',      lat:19.08, lon:72.88,  proto:'tcp', kind:'SMB exploit'},
+  {ip:'198.51.100.66', city:'Kyiv',        lat:50.45, lon:30.52,  proto:'tcp', kind:'credential stuffing'},
+  {ip:'192.0.2.150',   city:'Seoul',       lat:37.57, lon:126.98, proto:'udp', kind:'DNS amplification'},
+  {ip:'203.0.113.9',   city:'Amsterdam',   lat:52.37, lon:4.90,   proto:'tcp', kind:'vuln scanner'},
+  {ip:'198.51.100.201',city:'Istanbul',    lat:41.01, lon:28.98,  proto:'tcp', kind:'web shell probe'},
+  {ip:'192.0.2.33',    city:'Jakarta',     lat:-6.21, lon:106.85, proto:'tcp', kind:'botnet beacon'},
+  {ip:'203.0.113.222', city:'Mexico City', lat:19.43, lon:-99.13, proto:'udp', kind:'NTP reflection'},
+  {ip:'198.51.100.140',city:'Sydney',      lat:-33.87,lon:151.21, proto:'tcp', kind:'SQL injection'},
+  {ip:'192.0.2.210',   city:'Cairo',       lat:30.04, lon:31.24,  proto:'tcp', kind:'telnet sweep'},
+  {ip:'203.0.113.77',  city:'Toronto',     lat:43.65, lon:-79.38, proto:'tcp', kind:'proxy abuse'},
+];
+function _attackGeo(ip){
+  for(const a of _attackers) if(a.ip===ip) return a;
+  return null;
+}
+let _seenBlockEvents=new Set();
+function _realBlockEvents(d){
+  // A rule was written by the app (auto-block, country block, manual block).
+  // Detonate it on the scope so a real block looks exactly like a drill kill.
+  try{
+    (d.block_events||[]).forEach(function(e){
+      const key=e.ip+'@'+e.ts;
+      if(_seenBlockEvents.has(key))return;
+      _seenBlockEvents.add(key);
+      if(typeof e.lat!=='number'||typeof e.lon!=='number')return;  // no geo, nothing to place
+      _attackBooms.push({lat:e.lat,lon:e.lon,t0:performance.now(),
+                         label:e.city||e.ip,real:true});
+      _attackKills++;
+      _sonarPing(false);
+      // A rule was actually written: warp a raider in and destroy it.
+      try{
+        _shipSpawn('raider', e.ip);
+        const _s=_ships[_ships.length-1];
+        if(_s && _s.kind==='raider') setTimeout(function(){ _shipKill(_s); }, 1400);
+      }catch(err){}
+    });
+    if(_seenBlockEvents.size>500)_seenBlockEvents=new Set();
+  }catch(err){}
+}
+function _attackBoom(a){
+  _attackBooms.push({lat:a.lat,lon:a.lon,t0:performance.now(),label:a.city});
+  _attackKills++;
+}
+function _attackTick(){
+  // Hostiles are generated server-side and arrive as ordinary nodes, so the
+  // 3D view, the Sankey page and the desktop window all see the same drill.
+  // Detonations are driven by the shared block-event stream, not from here.
+  _attackers=[];
+  try{
+    (nodeData||[]).forEach(function(n){
+      if(n&&n.attack){
+        _attackers.push({ip:n.id,city:n.city||n.label,kind:n.attack_kind||'hostile',
+                         lat:n.lat,lon:n.lon,proto:n.proto||'tcp',
+                         bytes:n.bytes||0,state:n.attack_state||'detected'});
+      }
+    });
+  }catch(e){}
+}
+function _attackPaintBtn(){
+  const b=document.getElementById('btnAttack');
+  if(b){b.classList.toggle('active',_attackOn);b.style.opacity=_attackOn?'1':'0.5';
+        b.textContent=_attackOn?'\u2620 ATTACK: ON':'\u2620 ATTACK SIM';}
+}
+function _toggleAttack(){
+  _sonarAudio();                               // unlock audio on this gesture
+  fetch('/api/attack_sim?set=toggle',{cache:'no-store'})
+    .then(r=>r.json())
+    .then(d=>{_attackOn=!!d.on;_attackPaintBtn();})
+    .catch(e=>{console.warn('[attack] toggle failed:',e);});
+}
+let _sonarAngle=0,_sonarBlips=[],_radarMapImg=null,_radarMapReady=false;
+// Map is OFF by default: it competes with the labels. Toggle with the MAP button.
+let _radarMapOn=false;
+let _radarMapTries=0,_radarMapSeq=0;
+function _radarPreload(){
+  // Only skip if it is loaded, or a request is genuinely still in flight.
+  // Previously ANY existing object short-circuited this, so a single failed
+  // request left the map permanently blank with no way to retry.
+  if(_radarMapReady)return;
+  if(_radarMapImg&&_radarMapImg._loading)return;
+  if(_radarMapTries>6)return;
+  _radarMapTries++;
+  const img=new Image();
+  img._loading=true;
+  img.onload=function(){img._loading=false;_radarMapImg=img;_radarMapReady=true;};
+  img.onerror=function(){
+    img._loading=false;_radarMapImg=null;_radarMapReady=false;
+    console.warn('[radar] map image failed to load, will retry');
+  };
+  _radarMapImg=img;
+  // Cache-bust: a stale or failed cached response would otherwise stick for a day.
+  _radarMapSeq++;
+  img.src='/radar-map.png?v='+_radarMapSeq;   // monotonic: never reuse a cached failure
+}
+function _toggleRadarMap(){
+  _radarMapOn=!_radarMapOn;
+  if(_radarMapOn){_radarMapTries=0;_radarPreload();}
+  const b=document.getElementById('btnRadarMap');
+  if(b){b.classList.toggle('active',_radarMapOn);b.style.opacity=_radarMapOn?'1':'0.45';}
+}
+// Equirectangular: lon -180..180 across the scope, lat 90..-90 down it.
+// Matches how /radar-map.png is drawn, so positions are geographically true.
+function _geoXY(lat,lon,cx,cy,R){
+  let x=cx+(lon/180)*R, y=cy-(lat/90)*R;
+  const dx=x-cx,dy=y-cy,d=Math.hypot(dx,dy),lim=R*0.94;
+  if(d>lim){x=cx+dx/d*lim;y=cy+dy/d*lim;}   // keep inside the scope ring
+  return {x:Math.round(x),y:Math.round(y)};
+}
+// ── Sonar audio: ping when a connection appears that has not been seen ──────
+let _sonarSeen=new Set(),_sonarAudioCtx=null,_sonarSoundOn=true,_sonarLastPing=0,_sonarPrimed=false;
+function _sonarAudio(){
+  try{
+    if(!_sonarAudioCtx){
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC){console.warn('[sonar] Web Audio unavailable in this browser');return null;}
+      _sonarAudioCtx=new AC();
+    }
+    if(_sonarAudioCtx.state==='suspended')_sonarAudioCtx.resume();
+    _sonarLoadSample();
+    return _sonarAudioCtx;
+  }catch(e){console.warn('[sonar] audio init failed:',e);return null;}
+}
+// Browsers only allow audio after a user gesture. Unlock on the first
+// interaction anywhere on the page, not just the SONAR button.
+['pointerdown','keydown','touchstart'].forEach(function(ev){
+  try{document.addEventListener(ev,function(){_sonarAudio();},{once:true,capture:true});}catch(e){}
+});
+let _sonarBuf=null,_sonarBufLoading=false;
+function _sonarLoadSample(){
+  if(_sonarBuf||_sonarBufLoading)return;
+  // Set the in-flight flag BEFORE calling _sonarAudio(): that function calls
+  // back into this one, and with the flag set afterwards the two recursed.
+  _sonarBufLoading=true;
+  const ac=_sonarAudio();
+  if(!ac){_sonarBufLoading=false;return;}
+  fetch('/sonar.mp3',{cache:'force-cache'})
+    .then(r=>r.arrayBuffer())
+    .then(b=>ac.decodeAudioData(b))
+    .then(buf=>{_sonarBuf=buf;_sonarBufLoading=false;})
+    .catch(e=>{_sonarBufLoading=false;console.warn('[sonar] sample load failed, using tone:',e);});
+}
+function _sonarFlash(outgoing){
+  // Visible confirmation of every ping. If audio is blocked by the browser or
+  // the OS mixer, the button still flashes so it is obvious the sonar fired.
+  const b=document.getElementById('btnSonarSnd');
+  if(!b)return;
+  try{
+    b.style.transition='none';
+    b.style.background=outgoing?'#0a4a6a':'#0a4a2a';
+    b.style.color=outgoing?'#7fe4ff':'#7dffb0';
+    setTimeout(function(){
+      b.style.transition='background .35s, color .35s';
+      b.style.background='';b.style.color='';
+    },160);
+  }catch(e){}
+}
+function _sonarPing(outgoing,force){
+  if(!_sonarSoundOn)return;
+  const now=performance.now();
+  // force = user-triggered confirmation, must never be swallowed by the throttle
+  if(!force&&now-_sonarLastPing<110)return;   // never machine-gun on a burst
+  _sonarLastPing=now;
+  _sonarFlash(outgoing);
+  const ac=_sonarAudio();if(!ac)return;
+  if(!_sonarBuf){_sonarLoadSample();}
+  if(_sonarBuf){
+    try{
+      const s=ac.createBufferSource(),g=ac.createGain();
+      s.buffer=_sonarBuf;
+      // Same sample both ways; outgoing is pitched up slightly so direction
+      // is still audible without needing two files.
+      s.playbackRate.value=outgoing?1.18:0.92;
+      g.gain.value=0.85;
+      s.connect(g);g.connect(ac.destination);
+      s.start();
+      return;
+    }catch(e){/* fall through to the tone */}
+  }
+  // Fallback tone if the sample has not decoded yet or Web Audio refuses it.
+  try{
+    const t=ac.currentTime,o=ac.createOscillator(),g=ac.createGain();
+    o.type='sine';
+    const f0=outgoing?900:520;                // outgoing pings higher than incoming
+    o.frequency.setValueAtTime(f0,t);
+    o.frequency.exponentialRampToValueAtTime(f0*0.55,t+0.30);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(0.12,t+0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.40);
+    o.connect(g);g.connect(ac.destination);
+    o.start(t);o.stop(t+0.42);
+  }catch(e){}
+}
+function _toggleSonarSound(){
+  _sonarSoundOn=!_sonarSoundOn;
+  if(_sonarSoundOn){
+    const ac=_sonarAudio();
+    if(ac)_sonarPing(true,true); else alert('Sonar audio is unavailable in this browser.');
+  }
+  const b=document.getElementById('btnSonarSnd');
+  if(b){
+    b.textContent=_sonarSoundOn?'🔊 SONAR':'🔇 SONAR';
+    b.style.opacity=_sonarSoundOn?'1':'0.45';
+    b.classList.toggle('active',_sonarSoundOn);
+  }
+}
+let _sonarX=null,_sonarY=null,_sonarR=null;  // user-set position (null=auto)
+let _sonarDragging=false,_sonarResizing=false,_sonarDX=0,_sonarDY=0;
+let _speedtestActive=false,_incomingAutoHidden=false,_talkersLastBuild=0,_talkersBuildMinInterval=600;
+let _talkers3DMode=false,_t3dRAF=null,_t3dRenderer=null,_t3dDrag=false,_t3dLX=0,_t3dLY=0;
+let _t3dRotX=0.28,_t3dRotY=0.12,_t3dZoom=17,_t3dParts=[];
+let _talkersBands=[],_talkersBandsTarget=[],_talkersEvents=[],_radarFlowsAll=[];
+let _dnsMap={},_dnsRequested={};
+setInterval(()=>{
+  const mk=Object.keys(_dnsMap); if(mk.length>2000) mk.slice(0,500).forEach(k=>{delete _dnsMap[k];delete _dnsRequested[k];});
+  const rk=Object.keys(_dnsRequested); if(rk.length>2000) rk.slice(0,500).forEach(k=>delete _dnsRequested[k]);
+},300000);
+let _talkersPrevBytes={};
+let _localBlockedIPs=new Set();  // persists across polls
+
+const TC=['#00c8ff','#ff6b35','#e15759','#39ff14','#bf5af2','#ffd700','#00ff88','#ff4da6','#4dffff','#ff9500'];
+const PC={tcp:'#00c8ff',udp:'#ff6b35',dns:'#ffd700',http:'#39ff14',tls:'#bf5af2',
+          icmp:'#ff4444',mdns:'#ff4da6',other:'#4dffff'};
+
+function fmtB(b){if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(1)+'K';return(b/1048576).toFixed(1)+'M';}
+function _resolveName(ip){return _dnsMap[ip]||ip;}
+function _requestResolve(ips){
+  const need=ips.filter(ip=>ip&&!_dnsMap[ip]&&!_dnsRequested[ip]);
+  if(!need.length)return;
+  need.forEach(ip=>_dnsRequested[ip]=1);
+  fetch('/api/resolve?ips='+need.join(',')).then(r=>r.json()).then(m=>Object.assign(_dnsMap,m)).catch(()=>{});
+}
+function _bpt(x0,y0,cx0,cy0,cx1,cy1,x1,y1,t){
+  const m=1-t;
+  return{x:m*m*m*x0+3*m*m*t*cx0+3*m*t*t*cx1+t*t*t*x1,
+         y:m*m*m*y0+3*m*m*t*cy0+3*m*t*t*cy1+t*t*t*y1};
+}
+function _bz1(a,b,c,d,t){const m=1-t;return m*m*m*a+3*m*m*t*b+3*m*t*t*c+t*t*t*d;}
+// True point-in-band test. The old hit-test used each band's BOUNDING BOX, which
+// for a diagonal band is a huge rectangle — so the first (widest) band swallowed
+// every click and you could never select the flow you actually aimed at.
+// The top and bottom edges share identical x control points, so one t solves both.
+function _bandHit(b,mx,my){
+  const xa=Math.min(b.x0,b.x1),xb=Math.max(b.x0,b.x1);
+  if(mx<xa-2||mx>xb+2)return null;
+  const asc=b.x1>=b.x0;
+  let lo=0,hi=1;
+  for(let i=0;i<22;i++){                      // bisect for t where x(t)==mx
+    const mid=(lo+hi)/2;
+    const xv=_bz1(b.x0,b.cx0,b.cx1,b.x1,mid);
+    if((xv<mx)===asc) lo=mid; else hi=mid;
+  }
+  const t=(lo+hi)/2;
+  const yt=_bz1(b.y0,b.cy0,b.cy1,b.y1,t);
+  const yb=_bz1(b.y0b,b.cy0b,b.cy1b,b.y1b,t);
+  const top=Math.min(yt,yb)-3,bot=Math.max(yt,yb)+3;
+  if(my<top||my>bot)return null;
+  return Math.abs(my-(top+bot)/2);            // distance from band centre
+}
+
+function _drawShape(ctx,proto,px,py,angle,sz){
+  // All particles drawn without rotation (no ctx.rotate) so shapes stay axis-aligned
+  // and crisp — rotated gradients/rects produce soft diagonal anti-aliased edges
+  ctx.save();ctx.translate(px,py);
+  const col=PC[proto]||PC.other;
+  const r=Math.max(2,Math.round(sz*0.45));  // crisp integer radius
+  if(proto==='dns'||proto==='mdns'){
+    // Ring + solid centre — no rotation needed, circles are symmetric
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.globalAlpha=0.95;
+    ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.stroke();
+    ctx.fillStyle='#ffffff';ctx.globalAlpha=1;
+    ctx.beginPath();ctx.arc(0,0,Math.max(1,r*0.35),0,Math.PI*2);ctx.fill();
+  } else if(proto==='udp'){
+    // Solid diamond — integer coords stay crisp
+    const d=Math.round(r*1.1);
+    ctx.fillStyle=col;ctx.globalAlpha=0.95;
+    ctx.beginPath();ctx.moveTo(0,-d);ctx.lineTo(d,0);ctx.lineTo(0,d);ctx.lineTo(-d,0);
+    ctx.closePath();ctx.fill();
+    ctx.fillStyle='#fff';ctx.globalAlpha=0.8;
+    ctx.beginPath();ctx.arc(0,0,Math.max(1,Math.round(d*0.3)),0,Math.PI*2);ctx.fill();
+  } else if(proto==='icmp'){
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.globalAlpha=0.9;
+    ctx.beginPath();ctx.arc(0,0,r,0,Math.PI*2);ctx.stroke();
+  } else {
+    // TCP/TLS/HTTP/other: bright solid rhombus aligned to travel direction
+    // Use rotation only for the rhombus (elongated along motion axis)
+    ctx.rotate(angle);
+    const hw=Math.round(sz*1.4),hh=Math.max(2,Math.round(sz*0.28));
+    ctx.fillStyle=col;ctx.globalAlpha=0.95;
+    ctx.beginPath();ctx.moveTo(-hw,0);ctx.lineTo(0,-hh);ctx.lineTo(hw,0);ctx.lineTo(0,hh);
+    ctx.closePath();ctx.fill();
+    // White hot centre dot
+    ctx.fillStyle='#ffffff';ctx.globalAlpha=1;
+    ctx.beginPath();ctx.arc(0,0,Math.max(1,hh-1),0,Math.PI*2);ctx.fill();
+  }
+  ctx.restore();
+}
+
+async function _runTalkersAiScan(){
+  if(_aiScanRunning) return;
+  if(!_talkersBands||!_talkersBands.length){alert('No flow data yet.');return;}
+  _aiScanRunning=true;
+  const btn=document.getElementById('btnAiScan');
+  if(btn){btn.textContent='⚠ SCANNING…';btn.style.opacity='0.6';}
+  const panel=document.getElementById('talkersAiPanel');
+  const result=document.getElementById('talkersAiResult');
+  panel.style.display='block'; result.textContent='Analysing flows…';
+  const maxB=_talkersBands.reduce((m,b)=>Math.max(m,b.bytes),1);
+  const lines=_talkersBands.map(b=>{
+    const ip=b.outgoing?(b.dstLabel||b.dst):(b.srcLabel||b.src);
+    const rawIp=b.outgoing?b.dst:b.src;
+    const dir=b.outgoing?'OUT':'IN';
+    const vol=b.bytes>=1048576?(b.bytes/1048576).toFixed(1)+'MB':(b.bytes/1024).toFixed(0)+'KB';
+    const pct=Math.round(b.bytes/maxB*100);
+    return dir+' '+rawIp+' ('+ip+') proto='+b.proto.toUpperCase()+' vol='+vol+' ('+pct+'% of traffic)'+(b.blocked?' [BLOCKED]':'');
+  }).join('\n');
+  const prompt='You are a network security analyst. Analyse these live network flows.\n\nFlows:\n'+lines+'\n\nLook for: C2 beaconing, data exfiltration, unusual protocols, suspicious volumes, Tor/proxy. Be concise. List genuine threats with severity (HIGH/MEDIUM). If clean, say so. Plain text, no markdown.';
+  try{
+    const resp=await fetch('/api/ai_analyze',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt})
+    });
+    const data=await resp.json();
+    const text=data.text||(data.error?('AI unavailable: '+data.error):'No response.');
+    result.innerHTML=text.split('\n').map(l=>
+      /HIGH/i.test(l)?'<span style="color:#ff4444;font-weight:bold">'+l+'</span>':
+      /MEDIUM/i.test(l)?'<span style="color:#ff9f43">'+l+'</span>':
+      /clean|no threat|no suspicious/i.test(l)?'<span style="color:#39ff14">'+l+'</span>':l
+    ).join('\n');
+  }catch(e){result.textContent='Error: '+e.message;}
+  finally{_aiScanRunning=false;if(btn){btn.textContent='⚠ AI SCAN';btn.style.opacity='1';}}
+}
+
+function _toggleIncoming(){
+  _showIncoming=!_showIncoming;
+  _incomingAutoHidden=false;
+  // Entering radar mode: unlock audio on this user gesture and reseed the
+  // seen-set so existing traffic does not ping, only genuinely new connections.
+  // Also drop any stale drag position so the scope re-centres at full size.
+  _sonarX=null;_sonarY=null;_sonarR=null;
+  if(!_showIncoming){
+    _sonarSeen=new Set();_sonarPrimed=false;_sonarAudio();
+    _sonarPing(true,true);                  // audible "sonar online" confirmation
+  }
+  const btn=document.getElementById('btnIncoming');
+  if(btn){btn.classList.toggle('active',_showIncoming);btn.style.opacity=_showIncoming?'1':'0.45';btn.title='Show/hide incoming flows';}
+  _buildTalkers();
+}
+
+function toggleTalkers(){
+  _talkersOpen=!_talkersOpen;
+  document.getElementById('talkersOverlay').style.display=_talkersOpen?'flex':'none';
+  document.getElementById('btnTalkers').classList.toggle('active',_talkersOpen);
+  if(_talkersOpen){
+    const bi=document.getElementById('btnIncoming');
+    if(bi){bi.classList.toggle('active',_showIncoming);bi.style.opacity=_showIncoming?'1':'0.45';}
+    // Warm the map and ping so the first MAP/SONAR press is instant
+    try{_radarPreload();}catch(e){}
+    setTimeout(()=>{_buildTalkers();if(!_talkers3DMode)_animateTalkers();},60);
+  } else {
+    if(_talkersRAF)cancelAnimationFrame(_talkersRAF);_talkersRAF=null;
+    if(_t3dRAF)cancelAnimationFrame(_t3dRAF);_t3dRAF=null;
+    _talkers3DMode=false;
+    _talkersBands=[];_talkersBandsTarget=[];_sonarBlips=[];_t3dParts=[];_radarFlowsAll=[];
+    const b3=document.getElementById('btn3DTalkers');if(b3)b3.classList.remove('active');
+    const c3d=document.getElementById('talkersCanvas3d');if(c3d)c3d.style.display='none';
+    const c2d=document.getElementById('talkersCanvas');if(c2d)c2d.style.visibility='visible';
+  }
+}
+
+// Click handler for block buttons on talkers canvas
+document.addEventListener('click',function(e){
+  const popup=document.getElementById('talkersPopup');
+  if(e.target.id!=='talkersCanvas'){
+    if(popup&&!popup.contains(e.target))popup.style.display='none';
+    return;
+  }
+  if(!_talkersBands.length&&!_sonarBlips.length){popup.style.display='none';return;}
+  const canvas=e.target;
+  const rect=canvas.getBoundingClientRect();
+  const mx=e.clientX-rect.left,my=e.clientY-rect.top;
+
+  // ── Sonar blips first (they sit on top), then FALL THROUGH to the bands ──
+  // The old code did `popup.style.display='none';return;` here whenever sonar
+  // mode was on, so the band hit-test below was NEVER reached — which is why
+  // clicking a flow did nothing while the sonar was up.
+  if(!_showIncoming&&_sonarBlips.length){
+    let sonarHit=null;
+    for(const blip of _sonarBlips){
+      const dx=mx-blip.bx,dy=my-blip.by;
+      if(Math.sqrt(dx*dx+dy*dy)<=blip.bSz+10){sonarHit=blip;break;}
+      // Label text is a much bigger target than the dot — accept clicks on it too
+      if(blip.lx0!==undefined&&mx>=blip.lx0&&mx<=blip.lx1&&my>=blip.ly0&&my<=blip.ly1){
+        sonarHit=blip;break;
+      }
+    }
+    if(sonarHit){
+      const f=sonarHit.flow;
+      const _sip=f.ip||f.src;
+      _showTalkerPopup({
+        ip:_sip,
+        name:(f.label&&f.label!==_sip)?f.label:_sip,
+        bytes:f.bytes, proto:f.proto,
+        blocked:sonarHit.isBlocked||_localBlockedIPs.has(_sip),
+        dirText:f.outgoing?'\u2197 OUTGOING (SONAR)':'\u2199 INCOMING (SONAR)',
+        col:f.outgoing?'#00c8ff':'#00ff88',
+        band:null
+      }, e);
+      return;
+    }
+    // Radar mode hides the ribbons, so there is nothing behind it to click.
+    popup.style.display='none';return;
+  }
+
+  let hit=null,hitD=Infinity;
+  for(const b of _talkersBands){
+    const d=_bandHit(b,mx,my);
+    if(d!==null&&d<hitD){hit=b;hitD=d;}     // nearest band centre, not first bbox
+  }
+  if(!hit){popup.style.display='none';return;}
+  const ip=hit._ip||(hit.outgoing?hit.dst:hit.src);
+  _showTalkerPopup({
+    ip:ip,
+    name:hit.outgoing?(hit.dstLabel||hit.dst):(hit.srcLabel||hit.src),
+    bytes:hit.bytes, proto:hit.proto,
+    blocked:hit.blocked||_localBlockedIPs.has(ip),
+    dirText:hit.outgoing?'\u2197 OUTGOING':'\u2199 INCOMING', col:hit.col,
+    band:hit
+  }, e);
+});
+
+// ONE popup builder for both sonar blips and bands. Previously the sonar path
+// wired only tpBlockBtn and left tpWhoisBtn / tpRangeBtn with no onclick at
+// all — so those two buttons were simply dead on the sonar popup.
+function _showTalkerPopup(o, e){
+  const popup=document.getElementById('talkersPopup');
+  const ip=o.ip, name=o.name||o.ip, isBlocked=!!o.blocked;
+  document.getElementById('tpDir').textContent=o.dirText;
+  document.getElementById('tpDir').style.color=o.col||'#4cc9f0';
+  document.getElementById('tpName').textContent=name;
+  document.getElementById('tpName').style.color=isBlocked?'#ff4444':(o.col||'#4cc9f0');
+  document.getElementById('tpIP').textContent=(name!==ip)?ip:'';
+  document.getElementById('tpBytes').textContent=fmtB(o.bytes||0);
+  document.getElementById('tpProto').textContent=(o.proto||'').toUpperCase();
+  document.getElementById('tpBlockedBadge').style.display=isBlocked?'block':'none';
+
+  const btn=document.getElementById('tpBlockBtn');
+  if(isBlocked){
+    btn.textContent='\u26D4 ALREADY BLOCKED';btn.style.opacity='0.5';
+    btn.style.cursor='default';btn.onclick=null;
+  } else {
+    btn.textContent='\u26D4 BLOCK THIS IP';btn.style.opacity='1';btn.style.cursor='pointer';
+    btn.onclick=function(){
+      if(!confirm('Block '+ip+'?\nAdds a Windows Firewall rule blocking all traffic to/from this IP.'))return;
+      fetch('/api/block_ip?ip='+encodeURIComponent(ip))
+        .then(r=>r.json()).then(d=>{
+          if(d.result==='blocked'||d.result==='already_blocked'){
+            _localBlockedIPs.add(ip);
+            _talkersBands.forEach(x=>{if(x._ip===ip)x.blocked=true;});
+          }
+          popup.style.display='none';
+          if(d.result==='blocked')alert('\u2705 Blocked: '+ip);
+          else if(d.result==='already_blocked')alert('Already blocked: '+ip);
+          else alert('Result: '+d.result);
+        }).catch(err=>alert('Error: '+err));
+    };
+  }
+
+  // Reset secondary panels
+  const whoisResult=document.getElementById('tpWhoisResult');
+  const rangeInput=document.getElementById('tpRangeInput');
+  whoisResult.style.display='none';
+  rangeInput.style.display='none';
+
+  // WHOIS
+  document.getElementById('tpWhoisBtn').onclick=function(){
+    whoisResult.style.display='block';
+    whoisResult.textContent='Looking up '+ip+'\u2026';
+    fetch('/api/whois?ip='+encodeURIComponent(ip),{cache:'no-store'})
+      .then(r=>r.json())
+      .then(d=>{
+        // Server returns {ok, ip, summary:{org,netname,range|cidr,country,descr,
+        // note,error}, raw}. This used to read d.whois/d.error — neither exists,
+        // so the panel always said "No data".
+        const s=(d&&d.summary)||{};
+        if(s.error||s.note){whoisResult.textContent=s.error||s.note;return;}
+        const rows=[['Org',s.org],['Netname',s.netname],['Range',s.range||s.cidr],
+                    ['Country',s.country],['Descr',s.descr]].filter(r=>r[1]);
+        whoisResult.textContent=rows.length
+          ? rows.map(r=>r[0]+': '+r[1]).join('\n')
+          : ((d&&d.raw)?String(d.raw).slice(0,600):'No data');
+      })
+      .catch(err=>{whoisResult.textContent='Error: '+err;});
+  };
+
+  // BLOCK RANGE
+  const rangeVal=document.getElementById('tpRangeVal');
+  const rangeConfirm=document.getElementById('tpRangeConfirm');
+  document.getElementById('tpRangeBtn').onclick=function(){
+    rangeInput.style.display=(rangeInput.style.display==='none')?'block':'none';
+    if(rangeInput.style.display==='block'&&!rangeVal.value){
+      const p=ip.split('.');
+      if(p.length===4)rangeVal.value=p[0]+'.'+p[1]+'.'+p[2]+'.0/24';
+    }
+  };
+  rangeConfirm.onclick=function(){
+    const cidr=(rangeVal.value||'').trim();
+    if(!cidr){alert('Enter a CIDR range, e.g. 185.220.0.0/24');return;}
+    rangeConfirm.textContent='Blocking\u2026';
+    fetch('/api/block_range?cidr='+encodeURIComponent(cidr))
+      .then(r=>r.json()).then(d=>{
+        if(d.error){rangeConfirm.textContent='\u2717 '+d.error;rangeConfirm.style.color='#ff4444';return;}
+        rangeConfirm.textContent='\u2705 '+(d.blocked||0)+' IPs blocked';
+        rangeConfirm.style.color='#39ff14';
+        setTimeout(()=>{
+          popup.style.display='none';
+          rangeConfirm.textContent='\u26D4 BLOCK THIS RANGE';
+          rangeConfirm.style.color='#ff9f43';
+        },1800);
+      }).catch(err=>alert('Error: '+err));
+  };
+
+  const pw=300,ph=260;
+  let px2=e.clientX+14,py2=e.clientY-50;
+  if(px2+pw>window.innerWidth-10)px2=e.clientX-pw-14;
+  if(py2+ph>window.innerHeight-10)py2=window.innerHeight-ph-10;
+  if(py2<10)py2=10;
+  popup.style.left=px2+'px';popup.style.top=py2+'px';
+  popup.style.display='block';
+}
+
+function _sonarScan(topSrc){
+  // Detect genuinely new connections across the FULL flow set. The radar only
+  // draws the top 10 out / top 4 in, so watching the drawn list meant new hosts
+  // almost never registered and the sonar stayed silent.
+  let localIPs=new Set();
+  try{(nodeData||[]).forEach(n=>{if(n&&n.local&&n.ip)localIPs.add(n.ip);});}catch(e){}
+  const fresh=[];
+  try{
+    (flowData||[]).forEach(f=>{
+      if(!f||!f.bytes)return;
+      const s=f.src,d=f.dst;if(!s||!d)return;
+      let ip,out;
+      const sl=localIPs.has(s),dl=localIPs.has(d);
+      if(sl&&!dl){ip=d;out=true;}
+      else if(dl&&!sl){ip=s;out=false;}
+      else{out=(s===topSrc);ip=out?d:s;}
+      if(!ip)return;
+      const key=(out?'o|':'i|')+ip;
+      if(!_sonarSeen.has(key)){_sonarSeen.add(key);fresh.push(out);}
+    });
+  }catch(e){}
+  if(!_sonarPrimed){_sonarPrimed=true;return;}   // first scan seeds silently
+  for(const out of fresh)_sonarPing(out);        // _sonarPing throttles bursts
+  if(_sonarSeen.size>6000)_sonarSeen=new Set();
+}
+
+function _buildTalkers(){
+  const totals={},pairs={};
+  flowData.forEach(f=>{
+    const b=f.bytes||0;if(!b)return;
+    totals[f.src]=(totals[f.src]||0)+b;totals[f.dst]=(totals[f.dst]||0)+b;
+    const k=f.src+'|'+f.dst+'|'+(f.proto||'other');pairs[k]=(pairs[k]||0)+b;
+  });
+  _attackTick();
+  const canvas=document.getElementById('talkersCanvas');if(!canvas)return;
+  // Derive dimensions from overlay's known fixed geometry (position:fixed;inset:36px 0 0 0)
+  const _hdrEl=document.querySelector('#talkersOverlay > div');
+  const _hdrH=_hdrEl?_hdrEl.offsetHeight:44;
+  const W=window.innerWidth;  // full width — popup overlay used instead
+  const H=Math.max(200,window.innerHeight-36-_hdrH);
+  const dpr=window.devicePixelRatio||1;
+  // Only reset canvas dimensions when they genuinely change — setting canvas.width always
+  // blanks the canvas mid-animation frame, causing a visible 600ms flash on every poll tick
+  const _newW=Math.round(W*dpr),_newH=Math.round(H*dpr);
+  if(canvas.width!==_newW||canvas.height!==_newH){
+    canvas.width=_newW;canvas.height=_newH;
+    canvas.style.width=W+'px';canvas.style.height=H+'px';
+  }
+
+  if(!Object.keys(pairs).length&&!_attackers.length){_talkersBands=[];return;}
+  let topSrc=Object.keys(totals).sort((a,b)=>totals[b]-totals[a])[0];
+  // Hostiles now arrive from the server as ordinary flows, so they are already
+  // in `pairs` — injecting again here would double-count their traffic.
+  _sonarScan(topSrc);
+
+  // ── Radar dataset ─────────────────────────────────────────────────────────
+  // The ribbon view is deliberately scoped to the busiest host, but the radar
+  // replaces the whole view, so it must show EVERY endpoint in the capture or
+  // it will not correlate with the Sankey. Aggregate per remote endpoint and
+  // direction across all flows.
+  const _localSet=new Set();
+  try{(nodeData||[]).forEach(n=>{if(n&&n.local&&n.ip)_localSet.add(n.ip);});}catch(e){}
+  const _radarAgg={};
+  Object.entries(pairs).forEach(([k,v])=>{
+    const p=k.split('|'),s=p[0],d=p[1],proto=p[2];
+    const sl=_localSet.has(s),dl=_localSet.has(d);
+    let ip,out;
+    if(sl&&!dl){ip=d;out=true;}
+    else if(dl&&!sl){ip=s;out=false;}
+    else{out=(s===topSrc);ip=out?d:s;}
+    if(!ip)return;
+    const key=(out?'o|':'i|')+ip;
+    if(!_radarAgg[key])_radarAgg[key]={ip:ip,src:ip,outgoing:out,bytes:0,proto:proto};
+    _radarAgg[key].bytes+=v;
+  });
+  const _radarFlows=Object.values(_radarAgg).sort((a,b)=>b.bytes-a.bytes).slice(0,40);
+  // Kept in its own variable, not on _talkersBands: that array is reassigned
+  // (and the function early-returns) when the top host has no outgoing flows,
+  // which silently dropped the radar back to the old topSrc-only list.
+  _radarFlowsAll=_radarFlows.map(f=>{
+    const n=(nodeData||[]).find(nd=>nd&&nd.id===f.ip);
+    const atk=_attackGeo(f.ip);
+    if(atk){
+      return {ip:f.ip,src:f.ip,proto:f.proto,bytes:f.bytes,outgoing:false,
+              label:'SIM '+atk.city+' \u2014 '+atk.kind,
+              lat:atk.lat,lon:atk.lon,local:false,
+              attack:true,attackState:atk.state};
+    }
+    return {ip:f.ip,src:f.ip,proto:f.proto,bytes:f.bytes,outgoing:f.outgoing,
+            label:_resolveName(f.ip),
+            lat:(n&&typeof n.lat==='number')?n.lat:null,
+            lon:(n&&typeof n.lon==='number')?n.lon:null,
+            local:!!(n&&n.local)};
+  });
+
+  const srcFlows=Object.entries(pairs)
+    .filter(([k])=>k.startsWith(topSrc+'|'))
+    .map(([k,v])=>{const p=k.split('|');return{dst:p[1],proto:p[2],bytes:v};})
+    .sort((a,b)=>b.bytes-a.bytes).slice(0,10);
+  // A drill (or a pure inbound attack) has no outgoing flows from topSrc;
+  // bailing here would leave the ribbon view blank while the radar showed hostiles.
+  if(!srcFlows.length&&!_attackers.length){_talkersBands=[];return;}
+
+  let inFlows=Object.entries(pairs)
+    .filter(([k])=>k.split('|')[1]===topSrc)
+    .map(([k,v])=>{const p=k.split('|');return{src:p[0],proto:p[2],bytes:v};})
+    .sort((a,b)=>b.bytes-a.bytes).slice(0,4);  // top 4 only — more space per band
+  if(_attackers.length){
+    // Hostiles always get a ribbon; the top-4 cap used to hide them entirely
+    // behind ordinary traffic.
+    const _atk=_attackers.map(a=>({src:a.ip,proto:a.proto,bytes:a.bytes}));
+    inFlows=_atk.concat(inFlows.filter(f=>!_attackGeo(f.src))).slice(0,10);
+  }
+
+  _requestResolve([topSrc,...srcFlows.map(f=>f.dst),...inFlows.map(f=>f.src),
+                   ..._radarFlows.slice(0,20).map(f=>f.ip)]);
+
+  const PAD={t:10,b:10,l:100,r:10},GAP=6;
+  const drawH=H-PAD.t-PAD.b;
+  const xL=PAD.l,xR=W-PAD.r,cp=(xR-xL)*0.42;
+
+  // Sqrt scaling so dominant flow doesn't swamp others
+  const sqV=srcFlows.map(f=>Math.sqrt(f.bytes)),sqT=sqV.reduce((s,v)=>s+v,0);
+  const usableH=drawH*0.65-GAP*(srcFlows.length-1);
+  const srcSpan=usableH*0.4,srcStart=PAD.t+(usableH-srcSpan)/2;
+
+  _talkersBands=[];
+  let dstY=PAD.t,srcY=srcStart;
+  srcFlows.forEach((f,i)=>{
+    const r=sqV[i]/sqT,dstH=Math.max(12,r*usableH),srcH=Math.max(6,r*srcSpan);
+    const col=TC[i%TC.length],pcol=PC[f.proto]||col;
+    const spike=(_talkersPrevBytes[f.dst]||0)>0&&f.bytes>(_talkersPrevBytes[f.dst]||0)*1.5;
+    _talkersPrevBytes[f.dst]=f.bytes;
+    if(spike)_talkersEvents.push({type:'flare',x:xR,y:dstY+dstH/2,alpha:1,col,w:0});
+    const dstBlocked=!!(nodeData.find(n=>n.ip===f.dst)?.blocked)||_localBlockedIPs.has(f.dst);
+    _talkersBands.push({col,pcol,bytes:f.bytes,dstH,srcH,ySrc:srcY,dstY,dst:f.dst,proto:f.proto,
+      _ip:f.dst,
+      dstLabel:_resolveName(f.dst),outgoing:true,blocked:dstBlocked,
+      x0:xL,y0:srcY,cx0:xL+cp,cy0:srcY,cx1:xR-cp,cy1:dstY,x1:xR,y1:dstY,
+      x0b:xL,y0b:srcY+srcH,cx0b:xL+cp,cy0b:srcY+srcH,cx1b:xR-cp,cy1b:dstY+dstH,x1b:xR,y1b:dstY+dstH});
+    dstY+=dstH+GAP;srcY+=srcH+2;
+  });
+
+  // Incoming bands — bottom portion, reversed (skipped when _showIncoming is false)
+  if(_showIncoming){
+  const inH=drawH*0.38-GAP*(inFlows.length||1);  // more vertical budget (was 0.28)
+  const inSqV=inFlows.map(f=>Math.sqrt(f.bytes)),inSqT=inSqV.reduce((s,v)=>s+v,0)||1;
+
+  // Compute raw heights then normalise so they always fit within inH regardless
+  // Two-pass height allocation — guaranteed to fit within inH regardless of traffic skew:
+  // Pass 1: reserve MIN_H for every band.
+  // Pass 2: distribute remaining space proportionally by sqrt(bytes).
+  // This means a dominant flow can never push small flows off-canvas.
+  const MIN_H=20,MIN_S=10;
+  const gapTotal=GAP*(inFlows.length-1);
+  const availH=Math.max(MIN_H*inFlows.length, inH-gapTotal);
+  const minReserve=MIN_H*inFlows.length;
+  const extraH=Math.max(0,availH-minReserve);
+  const normDH=inFlows.map((_,i)=>Math.round(MIN_H+inSqV[i]/inSqT*extraH));
+  // Sanity clamp — floating point rounding can add a pixel or two
+  const normTotal=normDH.reduce((s,v)=>s+v,0);
+  if(normTotal>availH){ normDH[0]-=(normTotal-availH); }
+
+  const inSrcSpan=inH*0.45,inSrcStart=H-PAD.b-inH+(inH-inSrcSpan)/2;
+  let inDstY=H-PAD.b-inH,inSrcY=inSrcStart;
+  inFlows.forEach((f,i)=>{
+    const dstH=normDH[i],srcH=Math.max(MIN_S,Math.round(inSqV[i]/inSqT*inSrcSpan));
+    const col=TC[(srcFlows.length+i)%TC.length],pcol=PC[f.proto]||col;
+    const srcBlocked2=_localBlockedIPs.has(f.src)||(!!nodeData.find(n=>n.ip===f.src)?.blocked);
+    _talkersBands.push({col,pcol,bytes:f.bytes,dstH,srcH,ySrc:inSrcY,dstY:inDstY,
+      _ip:f.src,
+      src:f.src,proto:f.proto,srcLabel:_resolveName(f.src),outgoing:false,blocked:srcBlocked2,
+      x0:xR,y0:inDstY,cx0:xR-cp,cy0:inDstY,cx1:xL+cp,cy1:inSrcY,x1:xL,y1:inSrcY,
+      x0b:xR,y0b:inDstY+dstH,cx0b:xR-cp,cy0b:inDstY+dstH,cx1b:xL+cp,cy1b:inSrcY+srcH,x1b:xL,y1b:inSrcY+srcH});
+    inDstY+=dstH+GAP;inSrcY+=srcH+2;
+  });
+
+  }  // end if(_showIncoming)
+
+  _talkersEvents.push({type:'ring',x:xL,y:PAD.t+drawH*0.32,r:6,alpha:1,col:'#00c8ff'});
+  // Store as target for lerp — seed live set on first build
+  const _nb=_talkersBands;  // reference before possible reassign
+  _talkersBands._W=W;_talkersBands._H=H;_talkersBands._dpr=dpr;
+  _talkersBands._PAD=PAD;_talkersBands._xL=xL;_talkersBands._xR=xR;_talkersBands._topSrc=topSrc;
+  _talkersBands._inFlows=inFlows.map(f=>({src:f.src,ip:f.src,proto:f.proto,bytes:f.bytes,
+                                          label:_resolveName(f.src),outgoing:false}));
+  _talkersBands._outFlows=srcFlows.map(f=>({src:f.dst,ip:f.dst,proto:f.proto,bytes:f.bytes,
+                                            label:_resolveName(f.dst),outgoing:true}));
+  if(_talkers3DMode&&window.THREE)setTimeout(_build3DTalkers,0);
+}
+
+function _drawSonar(ctx,W,H,inFlows,T){
+  if(!inFlows||!inFlows.length)return;
+  const maxB=Math.max(...inFlows.map(f=>f.bytes),1);
+  // Sonar occupies bottom portion of canvas
+  // Use user-set position if available, else auto-position below outgoing bands
+  let cx,cy,maxR;
+  const _radarOnly=!_showIncoming;   // no ribbons on screen: use the whole canvas
+  if(_sonarX!==null){
+    cx=_sonarX; cy=_sonarY; maxR=_sonarR;
+  } else if(_radarOnly){
+    maxR=Math.min(W*0.44,H*0.44);
+    cx=W/2; cy=H/2+10;
+  } else {
+    const _outBotY=(H-20)*0.65+10;
+    const _gapH=H-_outBotY-4;
+    maxR=Math.min(_gapH*0.46, 220);
+    cy=_outBotY+maxR+6;
+    cx=100+maxR+14;
+  }
+  // Keep within canvas bounds
+  const _capW=_radarOnly?0.47:0.4, _capH=_radarOnly?0.47:0.45;
+  maxR=Math.max(60,Math.min(maxR,Math.min(W*_capW,H*_capH)));
+  cx=Math.max(maxR+4,Math.min(W-maxR-4,cx));
+  cy=Math.max(maxR+4,Math.min(H-maxR-4,cy));
+
+  // Background disc — clipped to sonar circle so it doesn't bleed onto the canvas
+  ctx.save();
+  ctx.beginPath();ctx.arc(cx,cy,maxR+36,0,Math.PI*2);
+  ctx.fillStyle='rgba(2,8,20,0.88)';ctx.fill();
+  // Clip everything inside the circle from here on
+  ctx.beginPath();ctx.arc(cx,cy,maxR+38,0,Math.PI*2);ctx.clip();
+
+  // Range rings
+  for(let i=1;i<=4;i++){
+    ctx.globalAlpha=0.3+i*0.06;ctx.strokeStyle='#0d3d1a';ctx.lineWidth=0.8;
+    ctx.beginPath();ctx.arc(cx,cy,maxR*i/4,0,Math.PI*2);ctx.stroke();
+    const ringLabel=(maxB*i/4/1048576).toFixed(1)+'M';
+    ctx.globalAlpha=0.45;ctx.fillStyle='#1a6030';ctx.font='9px monospace';ctx.textAlign='left';
+    ctx.fillText(ringLabel,cx+maxR*i/4+3,cy-3);
+  }
+  // Crosshairs
+  ctx.globalAlpha=0.15;ctx.strokeStyle='#1a6030';ctx.lineWidth=0.7;
+  ctx.beginPath();ctx.moveTo(cx-maxR-6,cy);ctx.lineTo(cx+maxR+6,cy);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(cx,cy-maxR-6);ctx.lineTo(cx,cy+maxR+6);ctx.stroke();
+
+  // Outer ring + degree ticks
+  ctx.globalAlpha=0.7;ctx.strokeStyle='#00cc44';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.arc(cx,cy,maxR+4,0,Math.PI*2);ctx.stroke();
+  for(let deg=0;deg<360;deg+=10){
+    const a=deg*Math.PI/180-Math.PI/2,isMajor=deg%30===0;
+    const r1=maxR+4,r2=maxR+(isMajor?14:8);
+    ctx.globalAlpha=isMajor?0.65:0.3;ctx.lineWidth=isMajor?1.5:0.7;ctx.strokeStyle='#00cc44';
+    ctx.beginPath();ctx.moveTo(cx+Math.cos(a)*r1,cy+Math.sin(a)*r1);ctx.lineTo(cx+Math.cos(a)*r2,cy+Math.sin(a)*r2);ctx.stroke();
+    if(isMajor){ctx.globalAlpha=0.55;ctx.fillStyle='#00cc44';ctx.font='8px monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(deg,cx+Math.cos(a)*(r2+9),cy+Math.sin(a)*(r2+9));}
+  }
+
+  // Sweep line + fade trail
+  _sonarAngle=(T*0.8)%(Math.PI*2);
+  for(let s=20;s>=0;s--){
+    const a=_sonarAngle-(s/20)*Math.PI*0.55;
+    const alpha=(1-s/20)*0.42;
+    ctx.globalAlpha=alpha;ctx.strokeStyle=`rgba(0,255,80,${alpha})`;ctx.lineWidth=s===0?1.5:0.7;
+    ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+Math.cos(a)*(maxR+4),cy+Math.sin(a)*(maxR+4));ctx.stroke();
+  }
+  ctx.globalAlpha=0.07;ctx.fillStyle='#00ff50';
+  ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,maxR+4,_sonarAngle-0.5,_sonarAngle);ctx.closePath();ctx.fill();
+
+  // Blips — deterministic hash positions, size from bytes
+  // ── World-map backdrop ──────────────────────────────────────────────────
+  // Equirectangular, fitted to the scope's bounding square, so a blip placed
+  // from lat/lon by _geoXY lands exactly on the coastline it belongs to.
+  if(_radarMapOn)_radarPreload();
+  if(_radarMapOn&&_radarMapReady){
+    ctx.save();
+    ctx.beginPath();ctx.arc(cx,cy,maxR,0,Math.PI*2);ctx.clip();
+    ctx.globalAlpha=0.55;
+    ctx.drawImage(_radarMapImg,cx-maxR,cy-maxR,maxR*2,maxR*2);
+    ctx.globalAlpha=1;
+    ctx.restore();
+  }
+
+  _sonarBlips=[];
+  _sonarBlips._lastR=maxR;
+  if(_sonarX===null){_sonarX=cx;_sonarY=cy;_sonarR=maxR;}  // seed on first render
+  inFlows.forEach((f,i)=>{
+    const _fip=f.ip||f.src||'';
+    let h=0;for(const c of _fip)h=(h*31+c.charCodeAt(0))>>>0;
+    const bSz=Math.max(5,Math.round(6+Math.sqrt(f.bytes/maxB)*14));
+    let bx,by,bAngle;
+    if(typeof f.lat==='number'&&typeof f.lon==='number'&&!f.local){
+      const p=_geoXY(f.lat,f.lon,cx,cy,maxR);
+      bx=p.x;by=p.y;
+      bAngle=Math.atan2(by-cy,bx-cx);
+    }else{
+      // LAN or un-geolocated: cluster near the centre with a stable offset
+      const r0=f.local?maxR*0.06:maxR*0.16;
+      bAngle=((h>>>4)%3600)/3600*Math.PI*2;
+      bx=Math.round(cx+Math.cos(bAngle)*r0);
+      by=Math.round(cy+Math.sin(bAngle)*r0);
+    }
+    const isBlocked=_localBlockedIPs.has(_fip)||(f.attack&&f.attackState==='blocked');
+    const isAtk=!!f.attack;
+    _sonarBlips.push({bx,by,bSz,flow:f,isBlocked});
+    // Ping brightness when sweep passes
+    const ad=((bAngle-_sonarAngle)%(Math.PI*2)+Math.PI*2)%(Math.PI*2);
+    const pa=Math.max(0.3,1-ad/(Math.PI*2)*0.85);
+    const blipCol=isAtk?(f.attackState==='blocked'?'#ff3020':'#ff5a2a')
+                 :(isBlocked?'#ff2200':(f.outgoing?`hsl(${190+i*12},100%,62%)`:`hsl(${120+i*40},100%,60%)`));
+    const glowCol=isAtk?'#ff5522':(isBlocked?'#ff4400':(f.outgoing?'#00c8ff':'#00ff50'));
+    ctx.globalAlpha=pa*0.25;ctx.fillStyle=glowCol;
+    ctx.beginPath();ctx.arc(bx,by,bSz+5,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=pa*0.92;ctx.fillStyle=blipCol;
+    ctx.beginPath();ctx.arc(bx,by,bSz,0,Math.PI*2);ctx.fill();
+    if(isBlocked){
+      ctx.globalAlpha=pa;ctx.strokeStyle='#ffffff';ctx.lineWidth=1.5;
+      const d2=Math.round(bSz*0.55);
+      ctx.beginPath();ctx.moveTo(bx-d2,by-d2);ctx.lineTo(bx+d2,by+d2);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(bx+d2,by-d2);ctx.lineTo(bx-d2,by+d2);ctx.stroke();
+    }
+    ctx.fillStyle='#ffffff';ctx.globalAlpha=pa;
+    ctx.beginPath();ctx.arc(bx,by,Math.max(1,bSz*0.3),0,Math.PI*2);ctx.fill();
+    // Label
+    const name=(f.label&&f.label!==_fip)?f.label:_fip;
+    const short=name.length>22?'…'+name.slice(-20):name;
+    const vol=f.bytes>=1048576?(f.bytes/1048576).toFixed(1)+'M':(f.bytes/1024).toFixed(0)+'K';
+    const lx=bx+(bx>cx?bSz+6:-(bSz+6));
+    ctx.globalAlpha=Math.max(0.5,pa)*0.9;ctx.textBaseline='middle';
+    ctx.font='bold 12px monospace';ctx.textAlign=bx>cx?'left':'right';
+    const _ltxt=(f.outgoing?'\u2197 ':'\u2199 ')+short;
+    // Dark halo behind the text: labels must stay readable over rings, the
+    // sweep and the map backdrop.
+    ctx.save();
+    ctx.lineJoin='round';ctx.miterLimit=2;
+    ctx.strokeStyle='rgba(0,6,12,0.95)';ctx.lineWidth=4;
+    ctx.strokeText(_ltxt,lx,by-6);
+    ctx.restore();
+    ctx.fillStyle=isAtk?'#ff8a5a':(f.outgoing?'#9beeff':'#5affa8');
+    ctx.fillText(_ltxt,lx,by-6);
+    // Record the label box so the TEXT is clickable, not just the small dot.
+    // The dot can be ~5px across, which made hosts effectively unclickable.
+    try{
+      const _lw=Math.max(40,ctx.measureText(_ltxt).width);
+      const _bl=(bx>cx)?lx:(lx-_lw);
+      const _lastBlip=_sonarBlips[_sonarBlips.length-1];
+      if(_lastBlip){_lastBlip.lx0=_bl-4;_lastBlip.ly0=by-17;_lastBlip.lx1=_bl+_lw+4;_lastBlip.ly1=by+14;}
+    }catch(e){}
+    ctx.font='bold 10px monospace';
+    const _vtxt=vol+' · '+f.proto.toUpperCase();
+    ctx.save();ctx.lineJoin='round';ctx.miterLimit=2;
+    ctx.strokeStyle='rgba(0,6,12,0.95)';ctx.lineWidth=3.5;
+    ctx.strokeText(_vtxt,lx,by+7);ctx.restore();
+    ctx.fillStyle=f.outgoing?'#cfefff':'#a8ffd8';
+    ctx.fillText(_vtxt,lx,by+7);
+  });
+
+  // Centre dot
+  ctx.globalAlpha=0.9;ctx.fillStyle='#00ff50';
+  ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='#00ff50';ctx.lineWidth=1;
+  ctx.beginPath();ctx.arc(cx,cy,7,0,Math.PI*2);ctx.stroke();
+  ctx.restore();  // restore clip
+  // Title + drag hint (drawn outside clip so never cropped)
+  // ── Blocked-attacker detonations ────────────────────────────────────────
+  if(_attackBooms.length){
+    const _tnow=performance.now();
+    _attackBooms=_attackBooms.filter(function(b){
+      const t=(_tnow-b.t0)/950;
+      if(t>=1)return false;
+      const p=_geoXY(b.lat,b.lon,cx,cy,maxR);
+      ctx.save();
+      ctx.beginPath();ctx.arc(cx,cy,maxR,0,Math.PI*2);ctx.clip();
+      // shock rings
+      for(let r=0;r<3;r++){
+        const tt=Math.max(0,t-r*0.12);
+        if(tt<=0||tt>=1)continue;
+        const rad=6+tt*(maxR*0.30);
+        ctx.globalAlpha=(1-tt)*0.85;
+        ctx.strokeStyle=r===0?'#fff2c0':(r===1?'#ff9a3c':'#ff3b1f');
+        ctx.lineWidth=Math.max(1,3.2*(1-tt));
+        ctx.beginPath();ctx.arc(p.x,p.y,rad,0,Math.PI*2);ctx.stroke();
+      }
+      // core flash
+      if(t<0.35){
+        const f=1-t/0.35;
+        const g=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,26*f+6);
+        g.addColorStop(0,'rgba(255,255,220,'+(0.95*f)+')');
+        g.addColorStop(0.4,'rgba(255,150,40,'+(0.7*f)+')');
+        g.addColorStop(1,'rgba(255,40,0,0)');
+        ctx.globalAlpha=1;ctx.fillStyle=g;
+        ctx.beginPath();ctx.arc(p.x,p.y,26*f+6,0,Math.PI*2);ctx.fill();
+      }
+      // debris
+      ctx.globalAlpha=Math.max(0,1-t);
+      ctx.strokeStyle='#ffb066';ctx.lineWidth=1.4;
+      for(let k=0;k<10;k++){
+        const a=(k/10)*Math.PI*2+b.t0*0.001;
+        const d0=8+t*(maxR*0.26), d1=d0+9*(1-t);
+        ctx.beginPath();
+        ctx.moveTo(p.x+Math.cos(a)*d0,p.y+Math.sin(a)*d0);
+        ctx.lineTo(p.x+Math.cos(a)*d1,p.y+Math.sin(a)*d1);
+        ctx.stroke();
+      }
+      if(t<0.6){
+        ctx.globalAlpha=(1-t/0.6)*0.95;
+        ctx.fillStyle='#ffd0a0';ctx.font='bold 11px monospace';ctx.textAlign='center';
+        ctx.fillText('BLOCKED',p.x,p.y-30-t*14);
+      }
+      ctx.restore();
+      return true;
+    });
+  }
+
+  ctx.save();
+  ctx.globalAlpha=0.5;ctx.fillStyle='#00cc44';ctx.font='10px monospace';ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.fillText(_attackOn
+      ? ('☠ ATTACK DRILL — hostiles: '+_attackers.length+'  neutralised: '+_attackKills)
+      : '◉ SONAR — blips placed by geographic location',cx-maxR,cy-maxR-16);
+  // Resize grip — arc at bottom-right of circle
+  const _ga=Math.PI*0.25;  // 45°
+  ctx.globalAlpha=0.55;ctx.strokeStyle='#00cc44';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(cx,cy,maxR+4,_ga-0.45,_ga+0.45);ctx.stroke();
+  ctx.globalAlpha=0.35;ctx.strokeStyle='#00cc44';ctx.lineWidth=1;
+  ctx.beginPath();ctx.arc(cx,cy,maxR+8,_ga-0.3,_ga+0.3);ctx.stroke();
+  ctx.restore();
+}
+
+function _drawRadioactive(ctx,px,py,sz){
+  ctx.save();ctx.translate(px,py);
+  const R=Math.max(4,Math.round(sz*1.1));
+  const pulse=0.85+Math.sin(performance.now()*0.004)*0.15;
+  ctx.globalAlpha=0.95*pulse;
+  ctx.strokeStyle='#39ff14';ctx.lineWidth=Math.max(1.5,R*0.13);
+  ctx.beginPath();ctx.arc(0,0,R,0,Math.PI*2);ctx.stroke();
+  const inner=R*0.28,outer=R*0.82,sweep=Math.PI*0.52;
+  ctx.fillStyle='#39ff14';
+  for(let i=0;i<3;i++){
+    const base=i*Math.PI*2/3-Math.PI/2;
+    ctx.beginPath();
+    ctx.arc(0,0,outer,base-sweep/2,base+sweep/2);
+    ctx.arc(0,0,inner,base+sweep/2,base-sweep/2,true);
+    ctx.closePath();ctx.fill();
+  }
+  ctx.fillStyle='#ffffff';ctx.globalAlpha=1;
+  ctx.beginPath();ctx.arc(0,0,Math.max(1,Math.round(R*0.2)),0,Math.PI*2);ctx.fill();
+  ctx.restore();
+}
+
+function _animateTalkers(){
+  if(!_talkersOpen||_talkers3DMode)return;
+  const canvas=document.getElementById('talkersCanvas');
+  if(!canvas){_talkersRAF=requestAnimationFrame(_animateTalkers);return;}
+  _talkersT+=0.016;
+  const T=_talkersT,dpr=_talkersBands._dpr||1;
+  const W=_talkersBands._W||canvas.offsetWidth,H=_talkersBands._H||canvas.offsetHeight;
+  const ctx=canvas.getContext('2d',{alpha:false});  // alpha:false = faster compositing
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.globalCompositeOperation='source-over';
+
+  // Background
+  ctx.fillStyle='#030b16';ctx.globalAlpha=1;ctx.fillRect(0,0,W,H);
+
+  // Subtle hex grid (draw once; very low cost)
+  ctx.save();
+  const hs=30,hh=hs*0.866;
+  for(let row=0;row<H/hh+2;row++){
+    for(let col2=0;col2<W/hs+2;col2++){
+      const ox=(row%2)*hs*0.5,cx=col2*hs+ox,cy=row*hh;
+      const wave=Math.sin(cx*0.016-T*0.5+cy*0.009);
+      if(wave<0.1)continue;
+      ctx.globalAlpha=wave*0.04;
+      ctx.strokeStyle='#1a6090';ctx.lineWidth=0.4;
+      ctx.beginPath();
+      for(let s=0;s<6;s++){const a=s*Math.PI/3;s===0?ctx.moveTo(cx+hs*0.46*Math.cos(a),cy+hs*0.46*Math.sin(a)):ctx.lineTo(cx+hs*0.46*Math.cos(a),cy+hs*0.46*Math.sin(a));}
+      ctx.closePath();ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  if(!_talkersBands.length){
+    ctx.globalAlpha=1;ctx.fillStyle='#2a5a7a';ctx.font='14px monospace';ctx.textAlign='center';
+    ctx.fillText('No flow data — waiting for traffic',W/2,H/2);
+    _talkersRAF=requestAnimationFrame(_animateTalkers);return;
+  }
+
+  // Live DNS + blocked status refresh every frame
+  _talkersBands.forEach(b=>{
+    // Refresh blocked status from current nodeData
+    const ipKey=b.outgoing?b.dst:b.src;
+    const node=nodeData.find(n=>n.ip===ipKey);
+    if(node) b.blocked=!!node.blocked;
+    if(_localBlockedIPs.has(ipKey)) b.blocked=true;  // local override persists
+    if(b.outgoing){const r=_resolveName(b.dst);if(r!==b.dst)b.dstLabel=r;}
+    else{const r=_resolveName(b.src);if(r!==b.src)b.srcLabel=r;}
+  });
+  const topSrc=_talkersBands._topSrc||'';
+  const xL=_talkersBands._xL,xR=_talkersBands._xR,PAD=_talkersBands._PAD;
+  const maxBytes=_talkersBands.filter(b=>b.outgoing)[0]?.bytes||1;
+
+  document.getElementById('talkersSubtitle').textContent=
+    'source: '+_resolveName(topSrc)+'  •  '+_talkersBands.filter(b=>b.outgoing).length+' flows out / '+_talkersBands.filter(b=>!b.outgoing).length+' in';
+
+  // ── Draw bands ─────────────────────────────────────────────────────────────
+  _talkersBands.forEach((b,bi)=>{
+    // Radar mode shows BOTH directions as blips — no ribbons at all.
+    if(!_showIncoming){b._ip=b.outgoing?b.dst:b.src;return;}
+    // Simulated hostiles read as blocked traffic in the ribbon view too.
+    if(_attackGeo(b.outgoing?b.dst:b.src))b.blocked=true;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(b.x0,b.y0);ctx.bezierCurveTo(b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1);
+    ctx.lineTo(b.x1b,b.y1b);ctx.bezierCurveTo(b.cx1b,b.cy1b,b.cx0b,b.cy0b,b.x0b,b.y0b);
+    ctx.closePath();ctx.clip();
+
+    const dir=b.outgoing?1:-1;
+    if(b.blocked){
+      // Blocked: red gradient + diagonal warning stripes
+      const gr=ctx.createLinearGradient(b.outgoing?xL:xR,0,b.outgoing?xR:xL,0);
+      gr.addColorStop(0,'#ff2200cc');gr.addColorStop(0.5,'#aa110066');gr.addColorStop(1,'#ff220022');
+      ctx.globalAlpha=0.45;ctx.fillStyle=gr;ctx.fill();
+      ctx.globalAlpha=0.12;ctx.strokeStyle='#ff4444';ctx.lineWidth=6;
+      for(let sx2=xL-H;sx2<xR+H;sx2+=28){
+        ctx.beginPath();ctx.moveTo(sx2,0);ctx.lineTo(sx2+H,H);ctx.stroke();
+      }
+    } else {
+      const gr=ctx.createLinearGradient(b.outgoing?xL:xR,0,b.outgoing?xR:xL,0);
+      gr.addColorStop(0,b.col+'cc');gr.addColorStop(0.5,b.col+'77');gr.addColorStop(1,b.col+'22');
+      ctx.globalAlpha=b.outgoing?0.6:0.55;
+      ctx.fillStyle=gr;ctx.fill();
+    }
+
+    // Shimmer — only on bands wide enough that the clip is taller than a line.
+    // Thin bands (<20px) produce full-width horizontal lines when fillRect is clipped
+    // to a 4-8px strip, which flashes like a strobe as the gradient peak sweeps through.
+    const bandThick=Math.max(b.dstH,b.srcH);
+    if(bandThick>=20){
+      const origin=b.outgoing?xL:xR,span=(b.outgoing?1:-1)*(xR-xL);
+      const rawOff=((T*55+bi*120)%Math.abs(span)+Math.abs(span))%Math.abs(span);
+      const sx=origin+rawOff*Math.sign(span);
+      // Alpha scales 0→1 over 20-60px so shimmer fades in as bands grow
+      const shimA=Math.min(1,(bandThick-20)/40);
+      const sg=ctx.createLinearGradient(sx-80,0,sx+80,0);
+      sg.addColorStop(0,'rgba(255,255,255,0)');
+      sg.addColorStop(0.4,`rgba(255,255,255,${(0.06*shimA).toFixed(3)})`);
+      sg.addColorStop(0.5,`rgba(255,255,255,${(0.13*shimA).toFixed(3)})`);
+      sg.addColorStop(0.6,`rgba(255,255,255,${(0.06*shimA).toFixed(3)})`);
+      sg.addColorStop(1,'rgba(255,255,255,0)');
+      ctx.fillStyle=sg;ctx.globalAlpha=1;
+      ctx.fillRect(0,0,W,H);  // clip path bounds it to this band's bezier shape
+    }
+    ctx.restore();
+
+    // Node bars
+    ctx.save();ctx.shadowColor=b.col;ctx.shadowBlur=10;ctx.globalAlpha=0.85;ctx.fillStyle=b.col;
+    const lx=b.outgoing?xL:xR,rx=b.outgoing?xR:xL;
+    ctx.beginPath();ctx.roundRect(rx+(b.outgoing?4:-18),b.dstY,14,b.dstH,3);ctx.fill();
+    ctx.beginPath();ctx.roundRect(lx+(b.outgoing?-18:4),b.ySrc,14,b.srcH,3);ctx.fill();
+    ctx.restore();
+
+    // Store IP for click detection (labels now in side panel)
+    b._ip=b.outgoing?b.dst:b.src;
+  });
+
+  // Separator line between outgoing and incoming
+  const firstIn=_talkersBands.find(b=>!b.outgoing);
+  if(firstIn&&_showIncoming){
+    ctx.save();
+    ctx.strokeStyle='#1a4a6a';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+    ctx.beginPath();ctx.moveTo(xL,firstIn.dstY-10);ctx.lineTo(xR,firstIn.dstY-10);ctx.stroke();
+    ctx.setLineDash([]);ctx.restore();
+  }
+
+  // Labels panel removed — flow info shown in click popup
+
+  // Incoming / outgoing divider label
+  if(_showIncoming&&_talkersBands.some(b=>!b.outgoing)){
+    ctx.globalAlpha=0.4;ctx.fillStyle='#4dffff';ctx.font='10px monospace';ctx.textAlign='left';
+    const firstIn=_talkersBands.find(b=>!b.outgoing);
+    if(firstIn)ctx.fillText('↙ INCOMING',xL,firstIn.dstY-6);
+    ctx.globalAlpha=1;
+  } else if(!_showIncoming){
+    const _sf=_radarFlowsAll||[];
+    _drawSonar(ctx,W,H,_sf,T);
+  }
+
+  // Source label (ribbon-mode only — radar mode has no ribbons to anchor it to)
+  if(_showIncoming){
+  const srcMidY=_talkersBands.filter(b=>b.outgoing).reduce((s,b)=>s+b.ySrc+b.srcH/2,0)/
+                Math.max(_talkersBands.filter(b=>b.outgoing).length,1);
+  ctx.save();ctx.shadowColor='#00c8ff';ctx.shadowBlur=10;
+  ctx.fillStyle='#00c8ff';ctx.font='bold 12px monospace';ctx.textAlign='right';
+  const sn=_resolveName(topSrc);ctx.fillText(sn.length>22?'…'+sn.slice(-21):sn,xL-20,srcMidY+5);
+  ctx.restore();
+  }
+
+  // ── Particles ─────────────────────────────────────────────────────────────
+  const allParts=[];
+  _talkersBands.forEach((b,bi)=>{
+    if(!_showIncoming)return;   // radar mode: no ribbons, so no bits travelling along them
+    const speed=0.04+(b.bytes/maxBytes)*0.11;
+    // Skip particles on bands too thin to contain them cleanly
+    const bandThickP=Math.max(b.dstH,b.srcH);
+    if(bandThickP<8)return;
+    const pCount=bandThickP<20?1:2+Math.round((b.bytes/maxBytes)*3);  // max 5, 1 on thin bands
+    const sz=Math.min(12, Math.max(4, b.dstH*0.12));
+    for(let k=0;k<pCount;k++){
+      const u=((T*speed+k/pCount+bi*0.09)%1+1)%1;
+      const lane=0.12+(k/Math.max(pCount-1,1))*0.76;
+      const pt=_bpt(b.x0,b.y0,b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1,u);
+      const pb=_bpt(b.x0b,b.y0b,b.cx0b,b.cy0b,b.cx1b,b.cy1b,b.x1b,b.y1b,u);
+      // Snap to integer pixels — bezier floats cause sub-pixel blur
+      const px=Math.round(pt.x*(1-lane)+pb.x*lane),py=Math.round(pt.y*(1-lane)+pb.y*lane);
+      const du=Math.min(u+0.01,1);
+      const pt2=_bpt(b.x0,b.y0,b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1,du);
+      const pb2=_bpt(b.x0b,b.y0b,b.cx0b,b.cy0b,b.cx1b,b.cy1b,b.x1b,b.y1b,du);
+      const angle=Math.atan2((pt2.y*(1-lane)+pb2.y*lane)-py,(pt2.x*(1-lane)+pb2.x*lane)-px);
+      if(b.blocked) _drawRadioactive(ctx,px,py,sz);
+      else _drawShape(ctx,b.proto,px,py,angle,sz);
+      // Binary label — regenerate every ~200ms via T bucket.
+      // NOTE: the old code stamped _t on the FIRST particle, so k=1..4 then saw a
+      // matching bucket and were never regenerated — only the lead bit-string ever
+      // changed. Reset the whole cache when the bucket rolls over.
+      const _binBucket=Math.floor(T*5);
+      if(!b._binCache||b._binCache._t!==_binBucket) b._binCache={_t:_binBucket};
+      if(b._binCache[k]===undefined)
+        b._binCache[k]=(Math.random()*256|0).toString(2).padStart(8,'0');
+      const _bin=b._binCache[k];
+      ctx.save();
+      ctx.font='bold '+(Math.max(11,Math.round(sz*1.1)))+'px monospace';
+      ctx.textBaseline='middle';
+      // Bits trail BEHIND the shape…
+      ctx.fillStyle=b.pcol||b.col||'#00c8ff';ctx.globalAlpha=0.65;
+      ctx.textAlign='right';
+      ctx.fillText(_bin,px-sz-6,py);
+      // …and the flow's DNS name sits to the RIGHT of it.
+      const _nm=(b.outgoing?(b.dstLabel||b.dst):(b.srcLabel||b.src))||'';
+      if(_nm){
+        const _shown=_nm.length>24?_nm.slice(0,23)+'\u2026':_nm;
+        ctx.font=(Math.max(10,Math.round(sz*0.95)))+'px monospace';
+        ctx.textAlign='left';
+        ctx.globalAlpha=0.9;ctx.fillStyle='rgba(5,13,26,0.65)';
+        const _tw=ctx.measureText(_shown).width;
+        ctx.fillRect(px+sz+4,py-7,_tw+6,14);          // keep it legible over the band
+        ctx.globalAlpha=0.95;ctx.fillStyle=b.pcol||b.col||'#c8dff0';
+        ctx.fillText(_shown,px+sz+7,py);
+      }
+      ctx.restore();
+      allParts.push({px,py,col:b.pcol,bi});
+    }
+  });
+
+  // ── Constellation filaments (source-over, low alpha) ──────────────────────
+  for(let i=0;i<allParts.length;i++){
+    for(let j=i+1;j<allParts.length;j++){
+      const p=allParts[i],q=allParts[j];
+      if(p.bi===q.bi)continue;
+      const dx=p.px-q.px,dy=p.py-q.py,d=Math.sqrt(dx*dx+dy*dy);
+      if(d>90)continue;
+      const a=(1-d/90)*0.25;
+      ctx.globalAlpha=a;ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=0.7;
+      ctx.beginPath();ctx.moveTo(p.px,p.py);ctx.lineTo(q.px,q.py);ctx.stroke();
+    }
+  }
+  ctx.globalAlpha=1;
+
+  // ── Events ────────────────────────────────────────────────────────────────
+  if(!_showIncoming)_talkersEvents.length=0;   // ribbon-anchored ripples: not in radar mode
+  _talkersEvents=_talkersEvents.filter(ev=>{
+    if(ev.type==='ring'){
+      ev.r+=2.5;ev.alpha-=0.02;if(ev.alpha<=0)return false;
+      ctx.globalAlpha=ev.alpha;ctx.strokeStyle=ev.col;ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.arc(ev.x,ev.y,ev.r,0,Math.PI*2);ctx.stroke();
+    } else if(ev.type==='flare'){
+      ev.w+=20;ev.alpha-=0.025;if(ev.alpha<=0)return false;
+      ctx.globalAlpha=ev.alpha*0.35;
+      const fg=ctx.createRadialGradient(ev.x,ev.y,0,ev.x,ev.y,ev.w);
+      fg.addColorStop(0,ev.col);fg.addColorStop(1,ev.col+'00');
+      ctx.fillStyle=fg;ctx.beginPath();ctx.arc(ev.x,ev.y,ev.w,0,Math.PI*2);ctx.fill();
+    }
+    return true;
+  });
+  if(_showIncoming&&Math.floor(T*60)%480===0&&_talkersBands.length){
+    const rb=_talkersBands[Math.floor(Math.random()*_talkersBands.length)];
+    _talkersEvents.push({type:'ring',x:(xL+xR)/2,y:(rb.ySrc+rb.dstY)/2,r:4,alpha:1,col:'#ffffff'});
+  }
+  ctx.globalAlpha=1;
+
+
+
+  _talkersRAF=requestAnimationFrame(_animateTalkers);
+}
+function toggleFullscreen(){
+  const btn=document.getElementById('btnFS');
+  // Work whether we're standalone or inside an iframe
+  const topDoc=(window.top||window).document;
+  const isFS=!!(topDoc.fullscreenElement||topDoc.webkitFullscreenElement||
+                document.fullscreenElement||document.webkitFullscreenElement);
+  if(!isFS){
+    // Try top-level first (full tab fullscreen), fall back to local
+    const el=topDoc.documentElement;
+    const fn=el.requestFullscreen||el.webkitRequestFullscreen;
+    if(fn) fn.call(el); else {
+      const el2=document.documentElement;
+      (el2.requestFullscreen||el2.webkitRequestFullscreen).call(el2);
+    }
+    btn.textContent='⛶ EXIT FULL';
+    setTimeout(()=>{ _onResize(); resetCamera(); }, 300);
+  } else {
+    const fn=topDoc.exitFullscreen||topDoc.webkitExitFullscreen||document.exitFullscreen;
+    if(fn) fn.call(topDoc.exitFullscreen?topDoc:document);
+    btn.textContent='⛶ FULLSCREEN';
+    setTimeout(()=>{ _onResize(); resetCamera(); }, 300);
+  }
+}
+document.addEventListener('fullscreenchange',()=>{
+  const isFS=!!(document.fullscreenElement||document.webkitFullscreenElement);
+  if(!isFS) document.getElementById('btnFS').textContent='⛶ FULLSCREEN';
+  setTimeout(_onResize,150);
+});
+
+// ── orbit controls ─────────────────────────────────────────────────────────
+let rotX=0.22,rotY=0,zoom=22,panX=0,panY=0,panZ=0;
+let isDrag=false,px=0,py=0;
+addEventListener('mouseup',()=>{isDrag=false;canvas.classList.remove('drag');});
+addEventListener('mousemove',e=>{
+  if(!isDrag)return;
+  if(e.shiftKey){panX-=(e.clientX-px)*0.025;panY+=(e.clientY-py)*0.025;}
+  else{rotY+=(e.clientX-px)*0.007;rotX+=(e.clientY-py)*0.004;rotX=Math.max(-1.3,Math.min(1.3,rotX));}
+  px=e.clientX;py=e.clientY;
+});
+canvas.addEventListener('wheel',e=>{zoom=Math.max(4,Math.min(100,zoom+e.deltaY*0.025));e.preventDefault();},{passive:false});
+let tp=null;
+canvas.addEventListener('touchstart',e=>{tp=e.touches[0];});
+canvas.addEventListener('touchmove',e=>{if(!tp)return;
+  rotY+=(e.touches[0].clientX-tp.clientX)*0.009;
+  rotX+=(e.touches[0].clientY-tp.clientY)*0.006;
+  rotX=Math.max(-1.3,Math.min(1.3,rotX));tp=e.touches[0];e.preventDefault();},{passive:false});
+function _onResize(){
+  const w=_getW(), h=_getH();
+  renderer.setSize(w, h, false);  // never overwrite canvas CSS
+  if(composer){ try{ composer.setSize(w,h); if(bloomPass&&bloomPass.setSize) bloomPass.setSize(w,h); }catch(e){} }
+  camera.aspect=w/h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize',()=>{ setTimeout(_onResize,100); if(_talkersOpen) setTimeout(_buildTalkers,150); });
+
+// ── Sonar drag / resize ───────────────────────────────────────────────────────
+(function(){
+  function _sonarHit(mx,my){
+    // Returns 'drag' if inside circle, 'resize' if within ±14px of edge, else null
+    // Uses last known cx/cy/maxR from blip registration (updated each frame)
+    if(!_sonarBlips.length&&_sonarX===null) return null;
+    const scx=_sonarX!==null?_sonarX:null, scy=_sonarY!==null?_sonarY:null;
+    if(scx===null) return null;
+    const sr=_sonarR||80;
+    const dist=Math.sqrt((mx-scx)**2+(my-scy)**2);
+    if(dist<=sr-10) return 'drag';
+    if(dist<=sr+14) return 'resize';
+    return null;
+  }
+
+  document.addEventListener('mousedown',function(e){
+    if(!_talkersOpen||_showIncoming) return;
+    if(e.target.id!=='talkersCanvas') return;
+    const canvas=e.target;
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    const hit=_sonarHit(mx,my);
+    if(hit==='drag'){
+      _sonarDragging=true;
+      _sonarDX=mx-(_sonarX||0); _sonarDY=my-(_sonarY||0);
+      e.stopPropagation(); e.preventDefault();
+    } else if(hit==='resize'){
+      _sonarResizing=true;
+      e.stopPropagation(); e.preventDefault();
+    }
+  },{capture:true});
+
+  document.addEventListener('mousemove',function(e){
+    if(!_sonarDragging&&!_sonarResizing) return;
+    const canvas=document.getElementById('talkersCanvas');
+    if(!canvas) return;
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    if(_sonarDragging){
+      _sonarX=mx-_sonarDX; _sonarY=my-_sonarDY;
+      // keep R from current value
+      if(_sonarR===null) _sonarR=_sonarBlips._lastR||100;
+    } else if(_sonarResizing){
+      const scx=_sonarX!==null?_sonarX:0, scy=_sonarY!==null?_sonarY:0;
+      _sonarR=Math.max(60,Math.round(Math.sqrt((mx-scx)**2+(my-scy)**2)));
+    }
+    canvas.style.cursor=_sonarDragging?'grabbing':'nwse-resize';
+  });
+
+  document.addEventListener('mouseup',function(e){
+    if(_sonarDragging||_sonarResizing){
+      const canvas=document.getElementById('talkersCanvas');
+      if(canvas) canvas.style.cursor='pointer';
+    }
+    _sonarDragging=false; _sonarResizing=false;
+  });
+
+  // Cursor feedback on hover
+  document.addEventListener('mousemove',function(e){
+    if(_sonarDragging||_sonarResizing) return;
+    if(!_talkersOpen||_showIncoming) return;
+    const canvas=document.getElementById('talkersCanvas');
+    if(!canvas||e.target!==canvas) return;
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+    const hit=_sonarHit(mx,my);
+    canvas.style.cursor=hit==='drag'?'grab':hit==='resize'?'nwse-resize':'pointer';
+  });
+})();
+
+// ── 3D Top Talkers ────────────────────────────────────────────────────────────
+function _toggle3DTalkers(){
+  _talkers3DMode=!_talkers3DMode;
+  const btn=document.getElementById('btn3DTalkers');
+  if(btn)btn.classList.toggle('active',_talkers3DMode);
+  if(_talkers3DMode){
+    if(_talkersRAF){cancelAnimationFrame(_talkersRAF);_talkersRAF=null;}
+    document.getElementById('talkersCanvas').style.visibility='hidden';
+    const c3=document.getElementById('talkersCanvas3d');c3.style.display='block';
+    _t3dRotX=0.25;_t3dRotY=0.45;_t3dZoom=19;
+    if(!window.THREE){
+      const s=document.createElement('script');
+      s.src='/vendor/three.min.js';   // locally cached copy (works offline)
+      s.onload=_build3DTalkers;document.head.appendChild(s);
+    } else _build3DTalkers();
+  } else {
+    if(_t3dRAF){cancelAnimationFrame(_t3dRAF);_t3dRAF=null;}
+    document.getElementById('talkersCanvas').style.visibility='visible';
+    document.getElementById('talkersCanvas3d').style.display='none';
+    _animateTalkers();
+  }
+}
+
+function _build3DTalkers(){
+  const T=window.THREE;
+  if(!T||!_talkersBands||!_talkersBands.length)return;
+  if(_t3dRAF){cancelAnimationFrame(_t3dRAF);_t3dRAF=null;}
+  const c3=document.getElementById('talkersCanvas3d');if(!c3)return;
+  const W=c3.offsetWidth,H=c3.offsetHeight||500;
+  if(!_t3dRenderer){
+    _t3dRenderer=new T.WebGLRenderer({canvas:c3,antialias:true});
+    _t3dRenderer.setPixelRatio(devicePixelRatio);_t3dRenderer.setClearColor(0x030b16,1);
+  }
+  _t3dRenderer.setSize(W,H,false);
+  const scene=new T.Scene();scene.fog=new T.FogExp2(0x030b16,0.010);
+  const camera=new T.PerspectiveCamera(50,W/Math.max(H,1),0.1,300);
+  scene.add(new T.AmbientLight(0xffffff,0.4));
+  const dl=new T.DirectionalLight(0x88ddff,1.1);dl.position.set(8,12,10);scene.add(dl);
+  const dl2=new T.DirectionalLight(0xffffff,0.4);dl2.position.set(-6,-4,-8);scene.add(dl2);
+  const grid=new T.GridHelper(50,30,0x091e30,0x071525);grid.position.y=-5;scene.add(grid);
+  const bW=_talkersBands._W||1200,bH=_talkersBands._H||600;
+  const tx=px=>(px/bW-0.5)*18,ty=py=>-(py/bH-0.5)*8;
+  const maxB=_talkersBands.reduce((m,b)=>Math.max(m,b.bytes),1);
+  _t3dParts=[];
+  const outBands=_talkersBands.filter(b=>b.outgoing),inBands=_talkersBands.filter(b=>!b.outgoing);
+  function addBand(b,zSrc,zDst){
+    const col=new T.Color(b.col||'#38b8f0');
+    const msy=(b.y0+b.y0b)*0.5,mdy=(b.y1+b.y1b)*0.5;
+    const rAvg=Math.max(0.08,((b.srcH+b.dstH)*0.5)/bH*5);
+    const pts=[
+      new T.Vector3(tx(b.x0),ty(msy),zSrc),
+      new T.Vector3(tx(b.x0)+(tx(b.x1)-tx(b.x0))*0.25,ty(msy+(mdy-msy)*0.15),zSrc+(zDst-zSrc)*0.25),
+      new T.Vector3((tx(b.x0)+tx(b.x1))*0.5,ty((msy+mdy)*0.5),(zSrc+zDst)*0.5),
+      new T.Vector3(tx(b.x0)+(tx(b.x1)-tx(b.x0))*0.75,ty(mdy-(mdy-msy)*0.15),zSrc+(zDst-zSrc)*0.75),
+      new T.Vector3(tx(b.x1),ty(mdy),zDst)];
+    const curve=new T.CatmullRomCurve3(pts);
+    const geo=new T.TubeGeometry(curve,48,rAvg,10,false);
+    const mat=new T.MeshPhongMaterial({color:col,transparent:true,opacity:b.outgoing?0.72:0.65,shininess:55,emissive:col,emissiveIntensity:0.1});
+    scene.add(new T.Mesh(geo,mat));
+    const spd=0.003+(b.bytes/maxB)*0.009,pc=Math.max(2,Math.round(Math.sqrt(b.bytes/maxB)*5));
+    const pcol=new T.Color(b.pcol||b.col||'#ffffff');
+    for(let k=0;k<pc;k++){
+      const sg=new T.SphereGeometry(rAvg*0.32,8,8);
+      const sm=new T.MeshPhongMaterial({color:0xffffff,emissive:pcol,emissiveIntensity:1,shininess:120});
+      const sp=new T.Mesh(sg,sm);scene.add(sp);
+      _t3dParts.push({mesh:sp,curve,t:k/pc,speed:spd,dir:b.outgoing?1:-1});
+    }
+  }
+  outBands.forEach((b,i)=>addBand(b,(i/(Math.max(outBands.length-1,1))-0.5)*10,0));
+  inBands.forEach((b,i)=>addBand(b,0,(i/(Math.max(inBands.length-1,1))-0.5)*7));
+  const xL3=tx(_talkersBands._xL||100),xR3=tx(_talkersBands._xR||1100);
+  const pg=new T.CylinderGeometry(0.1,0.1,11,12);
+  const pm=new T.MeshPhongMaterial({color:0x00c8ff,emissive:0x003344,shininess:90});
+  const lp=new T.Mesh(pg,pm);lp.position.set(xL3,0,0);scene.add(lp);
+  const rp=new T.Mesh(pg,pm);rp.position.set(xR3,0,0);scene.add(rp);
+  (function loop(){
+    if(!_talkers3DMode)return;_t3dRAF=requestAnimationFrame(loop);
+    const now=performance.now()*0.001;
+    _t3dParts.forEach(p=>{p.t=(p.t+p.speed*p.dir+1)%1;p.mesh.position.copy(p.curve.getPoint(p.dir===1?p.t:1-p.t));p.mesh.scale.setScalar(0.85+Math.sin(now*4+p.t*Math.PI*4)*0.15);});
+    camera.position.x=Math.sin(_t3dRotY)*_t3dZoom*Math.cos(_t3dRotX);
+    camera.position.y=Math.sin(_t3dRotX)*_t3dZoom*0.7+1;
+    camera.position.z=Math.cos(_t3dRotY)*_t3dZoom*Math.cos(_t3dRotX);
+    camera.lookAt(0,0,0);_t3dRenderer.render(scene,camera);
+  })();
+}
+
+(function(){
+  document.addEventListener('mousedown',e=>{if(e.target.id==='talkersCanvas3d'){_t3dDrag=true;_t3dLX=e.clientX;_t3dLY=e.clientY;e.preventDefault();}});
+  document.addEventListener('mouseup',()=>_t3dDrag=false);
+  document.addEventListener('mousemove',e=>{if(!_t3dDrag)return;_t3dRotY+=(e.clientX-_t3dLX)*0.008;_t3dRotX=Math.max(-1.1,Math.min(1.1,_t3dRotX+(e.clientY-_t3dLY)*0.005));_t3dLX=e.clientX;_t3dLY=e.clientY;});
+  document.addEventListener('wheel',e=>{if(!_talkers3DMode||!_talkersOpen)return;const ov=document.getElementById('talkersOverlay');if(!ov||!ov.contains(e.target))return;_t3dZoom=Math.max(6,Math.min(30,_t3dZoom+e.deltaY*0.025));},{passive:true});
+})();
+document.addEventListener('fullscreenchange',()=>{ setTimeout(_onResize,200); });
+document.addEventListener('webkitfullscreenchange',()=>{ setTimeout(_onResize,200); });
+
+// ── animate ────────────────────────────────────────────────────────────────
+function sampleCurve(pts,u){
+  // Guard: a non-finite u (from a flow missing `frac`) used to index pts[NaN]
+  // and throw on every animation frame, killing the whole 3D view.
+  if(!pts||pts.length<2)return{x:0,y:0,z:0};
+  if(!isFinite(u))u=0;
+  u=Math.max(0,Math.min(1,u));
+  const fi=u*(pts.length-1),i=Math.max(0,Math.min(Math.floor(fi),pts.length-2)),tf=fi-i;
+  return{x:pts[i].x+(pts[i+1].x-pts[i].x)*tf,y:pts[i].y+(pts[i+1].y-pts[i].y)*tf,z:pts[i].z+(pts[i+1].z-pts[i].z)*tf};
+}
+
+// ── Data-driven traffic (original designs, no licensed IP) ────────────────
+// A patrol cruiser makes a slow pass whenever a host we have never seen before
+// turns up. A raider warps in and is destroyed when the firewall actually
+// writes a block rule — the same event stream that detonates the radar.
+let _ships=[], _shipHosts=new Set(), _shipPrimed=false, _shipLast=0;
+const SHIP_MAX=4;
+
+function _mkCruiser(){
+  const T=THREE, g=new T.Group();
+  const body=new T.MeshPhongMaterial({color:0x35506e,emissive:0x0a1826,
+                                      emissiveIntensity:0.9,shininess:60});
+  const trim=new T.MeshPhongMaterial({color:0x8fc6e8,emissive:0x1d4a68,
+                                      emissiveIntensity:1.0,shininess:90});
+  // long tapered hull
+  const hull=new T.Mesh(new T.CylinderGeometry(0.13,0.30,2.5,7),body);
+  hull.rotation.z=Math.PI/2; g.add(hull);
+  // dorsal spine
+  const spine=new T.Mesh(new T.BoxGeometry(1.15,0.10,0.16),trim);
+  spine.position.set(-0.15,0.20,0); g.add(spine);
+  // bridge block
+  const br=new T.Mesh(new T.BoxGeometry(0.34,0.20,0.26),body);
+  br.position.set(-0.72,0.20,0); g.add(br);
+  // outriggers
+  for(const zz of [-0.34,0.34]){
+    const f=new T.Mesh(new T.BoxGeometry(0.75,0.05,0.10),body);
+    f.position.set(0.05,-0.06,zz); g.add(f);
+  }
+  // engine bells + glow
+  for(const zz of [-0.16,0.16]){
+    const e=new T.Mesh(new T.CylinderGeometry(0.10,0.13,0.22,8),
+      new T.MeshBasicMaterial({color:0x7fe4ff}));
+    e.rotation.z=Math.PI/2; e.position.set(1.30,0,zz); g.add(e);
+    const gl=new T.Mesh(new T.SphereGeometry(0.20,10,8),
+      new T.MeshBasicMaterial({color:0x38b8f0,transparent:true,opacity:0.30,
+                               depthWrite:false}));
+    gl.position.set(1.46,0,zz); g.add(gl);
+  }
+  // running lights
+  for(let i=0;i<5;i++){
+    const l=new T.Mesh(new T.SphereGeometry(0.035,6,6),
+      new T.MeshBasicMaterial({color:i%2?0x39ff14:0xffffff}));
+    l.position.set(-0.9+i*0.45,0.27,0); g.add(l);
+  }
+  g.userData.kind='patrol';
+  return g;
+}
+
+function _mkRaider(){
+  const T=THREE, g=new T.Group();
+  const body=new T.MeshPhongMaterial({color:0x4a1414,emissive:0x2a0604,
+                                      emissiveIntensity:1.1,shininess:30});
+  const core=new T.Mesh(new T.OctahedronGeometry(0.42,0),body);
+  core.scale.set(1.7,0.55,0.9); g.add(core);
+  for(const sgn of [-1,1]){
+    const w=new T.Mesh(new T.BoxGeometry(0.5,0.05,0.55),body);
+    w.position.set(-0.1,0,sgn*0.42); w.rotation.x=sgn*0.35; g.add(w);
+  }
+  const eye=new T.Mesh(new T.SphereGeometry(0.13,10,8),
+    new T.MeshBasicMaterial({color:0xff3b1f}));
+  eye.position.set(0.62,0,0); g.add(eye);
+  const gl=new T.Mesh(new T.SphereGeometry(0.34,10,8),
+    new T.MeshBasicMaterial({color:0xff3b1f,transparent:true,opacity:0.22,
+                             depthWrite:false}));
+  gl.position.set(0.62,0,0); g.add(gl);
+  g.userData.kind='raider';
+  return g;
+}
+
+function _shipSpawn(kind,label){
+  if(_ships.length>=SHIP_MAX) return;
+  const now=performance.now();
+  if(now-_shipLast<900) return;       // never a swarm
+  _shipLast=now;
+  let obj;
+  try{ obj = (kind==='raider') ? _mkRaider() : _mkCruiser(); }catch(e){ return; }
+  // Cross the view well behind the network, so it never obscures the data.
+  const side = Math.random()<0.5 ? -1 : 1;
+  const y = 6 + Math.random()*9;
+  const z = -26 - Math.random()*16;
+  const dist = 46;
+  obj.position.set(-side*dist, y, z);
+  obj.rotation.y = side>0 ? 0 : Math.PI;
+  obj.scale.setScalar(kind==='raider' ? 1.25 : 1.0);
+  scene.add(obj);
+  const sh={obj:obj, kind:kind, vx: side*(kind==='raider'?3.4:2.1),
+            born:now, life:0, dying:0, label:label||'', sparks:null};
+  if(kind==='raider'){ obj.scale.setScalar(0.01); }   // warp-in
+  _ships.push(sh);
+}
+
+function _shipKill(sh){
+  if(sh.dying) return;
+  sh.dying=1; sh.dieT=0;      // measured in frame deltas, not wall clock, so the
+                              // wreck always clears regardless of frame rate
+  try{
+    const T=THREE, geo=new T.BufferGeometry(), N=90;
+    const pos=new Float32Array(N*3), vel=[];
+    for(let i=0;i<N;i++){
+      pos[i*3]=sh.obj.position.x; pos[i*3+1]=sh.obj.position.y; pos[i*3+2]=sh.obj.position.z;
+      const th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1), sp=2+Math.random()*7;
+      vel.push([Math.sin(ph)*Math.cos(th)*sp, Math.sin(ph)*Math.sin(th)*sp, Math.cos(ph)*sp]);
+    }
+    geo.setAttribute('position', new T.BufferAttribute(pos,3));
+    // Round mask, else each debris particle is a hard square.
+    let _dbTex=null;
+    try{
+      const cv=document.createElement('canvas'); cv.width=cv.height=32;
+      const c2=cv.getContext('2d');
+      const gg=c2.createRadialGradient(16,16,0,16,16,16);
+      gg.addColorStop(0,'rgba(255,255,255,1)');
+      gg.addColorStop(0.45,'rgba(255,255,255,0.5)');
+      gg.addColorStop(1,'rgba(255,255,255,0)');
+      c2.fillStyle=gg; c2.fillRect(0,0,32,32);
+      _dbTex=new T.CanvasTexture(cv);
+    }catch(e){}
+    const pts=new T.Points(geo, new T.PointsMaterial({color:0xffb066,size:0.30,
+      transparent:true, opacity:1, depthWrite:false, blending:T.AdditiveBlending,
+      map:_dbTex||undefined, alphaMap:_dbTex||undefined, alphaTest:0.02}));
+    scene.add(pts); sh.sparks={pts:pts, vel:vel};
+  }catch(e){}
+}
+
+function _shipsUpdate(dt){
+  for(let i=_ships.length-1;i>=0;i--){
+    const sh=_ships[i];
+    sh.life+=dt;
+    if(sh.dying){
+      sh.dieT=(sh.dieT||0)+dt;
+      const t=sh.dieT/1.2;                       // 1.2 s of debris
+      if(sh.sparks){
+        const p=sh.sparks.pts.geometry.attributes.position;
+        for(let k=0;k<sh.sparks.vel.length;k++){
+          p.array[k*3]+=sh.sparks.vel[k][0]*dt;
+          p.array[k*3+1]+=sh.sparks.vel[k][1]*dt-2.2*dt*t;
+          p.array[k*3+2]+=sh.sparks.vel[k][2]*dt;
+        }
+        p.needsUpdate=true;
+        sh.sparks.pts.material.opacity=Math.max(0,1-t);
+      }
+      sh.obj.scale.multiplyScalar(0.88);
+      if(t>=1){
+        scene.remove(sh.obj);
+        if(sh.sparks) scene.remove(sh.sparks.pts);
+        _ships.splice(i,1);
+      }
+      continue;
+    }
+    // warp-in for raiders (~0.35 s regardless of frame rate)
+    if(sh.kind==='raider' && sh.obj.scale.x<1.25){
+      sh.obj.scale.multiplyScalar(1+3.2*dt*12);
+      if(sh.obj.scale.x>1.25) sh.obj.scale.setScalar(1.25);
+    }
+    sh.obj.position.x += sh.vx*dt;
+    sh.obj.position.y += Math.sin(sh.life*0.8)*0.004;
+    sh.obj.rotation.z  = Math.sin(sh.life*0.6)*0.05;
+    if(Math.abs(sh.obj.position.x)>52){
+      scene.remove(sh.obj);
+      _ships.splice(i,1);
+    }
+  }
+}
+
+// A host we have never seen before -> send a patrol past.
+function _shipsScanHosts(d){
+  try{
+    const ids=(d.nodes||[]).map(n=>n && n.id).filter(Boolean);
+    if(!_shipPrimed){ ids.forEach(x=>_shipHosts.add(x)); _shipPrimed=true; return; }
+    for(const id of ids){
+      if(!_shipHosts.has(id)){
+        _shipHosts.add(id);
+        _shipSpawn('patrol', id);
+      }
+    }
+    if(_shipHosts.size>4000) _shipHosts=new Set(ids);
+  }catch(e){}
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  t+=0.016;
+
+  // ── Node sinusoidal drift + breathing ─────────────────────────────────────
+  for(let i=0;i<_rayTargets.length;i++){
+    const mesh=_rayTargets[i];
+    const nd=nodeData[i];
+    if(!nd) continue;
+    const dr=_nodeDrift[i%500];
+    const base=0.28+(nd.frac||0)*0.48;
+    const isHov=(i===hoveredIdx);
+    // Breathing pulse
+    const breath = base*(1+(isHov?0.22:0.06)*Math.sin(t*2.2+i*0.7));
+    mesh.scale.setScalar(breath);
+    // Sinusoidal position drift (organic feel). Damped hard in world view so
+    // orbs stay pinned to their country instead of wandering off the surface.
+    const _dk=WORLD_ON?0.12:1.0;
+    const ox=Math.sin(t*dr.freq +dr.phase )*dr.amp*_dk;
+    const oy=Math.sin(t*dr.fq2  +dr.ph2  )*dr.amp2*_dk;
+    const oz=Math.cos(t*dr.freq +dr.phase+1.3)*dr.amp*0.7*_dk;
+    const sx=nd.x*spreadFactor, sy=nd.y*spreadFactor, sz=nd.z*spreadFactor;
+    mesh.position.set(sx+ox, sy+oy, sz+oz);
+    // Sync label sprite to drifted position
+    if(labelSprites[i]) labelSprites[i].position.set(sx+ox, sy+oy+breath+0.55, sz+oz);
+  }
+
+  // ── Flow line shimmer ─────────────────────────────────────────────────────
+  flowLines.material.opacity = 0.45 + Math.sin(t*0.8)*0.15;
+
+  // ── Particles: each layer uses a time offset for trail effect ───────────────
+  const F=flowCurves.length;
+  window._partLayers.forEach((layer,L)=>{
+    const tOff=t-layer.tOffset;
+    let pi=0;
+    for(let f=0;f<F&&pi<MAX_PARTS_TOTAL-PARTS_PER_FLOW;f++){
+      const fc=flowCurves[f]; if(!fc) continue;
+      const speed=0.08+fc.frac*0.18;
+      for(let k=0;k<PARTS_PER_FLOW;k++){
+        const u=((tOff*speed+(f*0.13+k/PARTS_PER_FLOW))%1+1)%1;
+        const p=sampleCurve(fc.pts,u);
+        const wobble=Math.sin(tOff*3+f+k)*0.07;
+        layer.pos[pi*3  ]=p.x+wobble;
+        layer.pos[pi*3+1]=p.y+Math.sin(tOff*4+f*0.3+k)*0.05;
+        layer.pos[pi*3+2]=p.z+wobble*0.5;
+        const bright=L===0?1.5:1.0;
+        layer.col[pi*3  ]=Math.min(1,fc.color.r*bright);
+        layer.col[pi*3+1]=Math.min(1,fc.color.g*bright);
+        layer.col[pi*3+2]=Math.min(1,fc.color.b*bright);
+        pi++;
+      }
+    }
+    layer.geo.getAttribute('position').needsUpdate=true;
+    layer.geo.getAttribute('color').needsUpdate=true;
+    layer.geo.setDrawRange(0,pi);
+  });
+
+  // ── Label sprites face camera ──────────────────────────────────────────────
+  labelSprites.forEach(s=>{
+    s.quaternion.copy(camera.quaternion);
+    if(s.material.depthTest!==WORLD_ON)s.material.depthTest=WORLD_ON;
+  });
+
+  // ── Data-driven ships ───────────────────────────────────────────────────
+  try{ _shipsUpdate(0.016); }catch(e){}
+  // ── World view: slow spin until the user clicks ──────────────────────────
+  if(WORLD_ON&&WORLD_SPIN){ rotY += 0.0016; }   // ~1 revolution / 65s
+  if(WORLD_ON&&worldMesh&&worldMesh.material.uniforms){
+    const sd=_worldSunDir();
+    worldMesh.material.uniforms.sunDir.value.set(sd.x,sd.y,sd.z);
+  }
+  // ── Camera: orbit + subtle breathing ─────────────────────────────────────
+  const camBreath = Math.sin(t*0.25)*0.08;  // barely perceptible inhale
+  camera.position.x=panX+Math.sin(rotY)*Math.cos(rotX)*(zoom+camBreath);
+  camera.position.y=panY+Math.sin(rotX)*(zoom+camBreath)*0.7+1.5;
+  camera.position.z=panZ+Math.cos(rotY)*Math.cos(rotX)*(zoom+camBreath);
+  camera.lookAt(panX,panY,panZ);
+  if(protoBars.length){                // protocol bars ease toward their share
+    for(let i=0;i<protoBars.length;i++){
+      const b=protoBars[i];
+      b.cur += (b.target-b.cur)*0.10;    // smooth approach, no popping
+      b.mesh.scale.z=Math.max(0.02,b.cur);   // extends across the floor
+      const lively=Math.min(1,b.cur/5.0);
+      b.mesh.material.emissiveIntensity=0.30+0.55*lively
+                                        +0.10*Math.sin(t*2.0+i*0.5);
+      b.mesh.material.opacity=0.55+0.42*lively;
+    }
+  }
+  if(starField){                       // slow parallax drift + faint twinkle
+    starField.rotation.y = t*0.006;
+    starField.rotation.x = Math.sin(t*0.03)*0.02;
+    starField.material.opacity = 0.86 + Math.sin(t*0.5)*0.06;
+  }
+  if(composer && bloomOn){ composer.render(); } else { renderer.render(scene,camera); }
+}
+
+// ── data poll ──────────────────────────────────────────────────────────────
+const waitDiv=document.getElementById('wait');
+const waitMsg=document.getElementById('wait-msg');
+
+async function poll(){
+  try{
+    const d=await fetch('/api/topology3d').then(r=>r.json());
+    if(!d.open){
+      waitMsg.textContent='EtherApe not open — click ◎ TOPOLOGY in the main dashboard first';
+      waitDiv.style.display='flex';
+      setTimeout(poll,1500);return;
+    }
+    // Always update geometry first — this populates _rayTargets for hover/click
+    const _allNodes=d.nodes||[], _allFlows=d.flows||[];
+    if(_topN<500&&_allNodes.length>_topN){
+      const _sorted=[..._allNodes].sort((a,b)=>(b.bytes||0)-(a.bytes||0)).slice(0,_topN);
+      const _kept=new Set(_sorted.map(n=>n.ip||n.id));
+      nodeData=_sorted; flowData=_allFlows.filter(f=>_kept.has(f.src)&&_kept.has(f.dst));
+    } else { nodeData=_allNodes; flowData=_allFlows; }
+    try{ updateProtoBars(_allFlows); }catch(e){}   // bars reflect ALL traffic
+    if(d.dns_map) Object.assign(_dnsMap, d.dns_map);
+    // Also extract rdns from nodeData — this is the most reliable source
+    if(d.nodes) d.nodes.forEach(n=>{ if(n.rdns && n.rdns !== n.id) _dnsMap[n.id]=n.rdns; });
+    try{ rebuildGeometry(nodeData,flowData); }catch(rge){ console.warn('rebuildGeometry error:',rge); }
+    // Top Flow Talkers (ribbons AND radar) is built from a snapshot. Without a
+    // rebuild here it stays frozen at whatever the capture looked like when the
+    // overlay was opened, so it drifts out of step with the live view.
+    try{ if(typeof d.attack_sim==='boolean'){
+           if(d.attack_sim!==_attackOn){_attackOn=d.attack_sim;_attackPaintBtn();}
+           if(d.attack_sim!==ATK_ON){ATK_ON=d.attack_sim;paintAtkMain();} } }catch(ae){}
+    try{ _realBlockEvents(d); }catch(be){}
+    try{ _shipsScanHosts(d); }catch(se){}
+    try{ if(_talkersOpen) _buildTalkers(); }catch(tbe){ console.warn('talkers rebuild error:',tbe); }
+    // VPN banner + wall pulse
+    _vpnActive = !!d.vpn_active;
+    const _vpnEl = document.getElementById('vpnbanner');
+    if(_vpnEl){
+      const v = d.vpn || {};
+      const who = v.provider || 'VPN';
+      if(_vpnActive){
+        _vpnEl.textContent = '\ud83d\udd12 ' + who.toUpperCase();
+        _vpnEl.style.color = '#39ff14';
+        _vpnEl.style.background = 'rgba(10,60,20,0.5)';
+        _vpnEl.style.borderColor = '#1a4a2a';
+      }else{
+        _vpnEl.textContent = '\u26a0 NO VPN';
+        _vpnEl.style.color = '#ff9f43';
+        _vpnEl.style.background = 'rgba(90,45,10,0.5)';
+        _vpnEl.style.borderColor = '#5a3a10';
+      }
+      _vpnEl.title = (v.iface ? v.iface + ' \u2014 ' : '') + (v.reason || '');
+    }
+    // URL board — always update so empty state is visible
+    const _newUrls = d.visited_urls || [];
+    if(_newUrls.length !== _visitedUrls.length || (_newUrls.length > 0 && _newUrls[0] !== _visitedUrls[0])){
+      _visitedUrls = _newUrls;
+      _drawUrlBoard(_visitedUrls);
+    }
+    // Node positions are centroid-normalised server-side
+    if(nodeData.length>0 && _firstFit){ _firstFit=false; _fitToNodes(); }
+    // Update graph history after geometry is built (non-critical — won't break hover if it fails)
+    try{ _updateGraphHistory(); }catch(e){ console.warn('graph history error:',e); }
+    document.getElementById('hn').textContent=nodeData.length;
+    document.getElementById('hf').textContent=flowData.length;
+    const bps=flowData.reduce((a,f)=>a+(f.bytes||0),0);
+    document.getElementById('hp').textContent=(bps/1400).toFixed(0);
+    const nb=d.total_blocked||0;
+    const hb=document.getElementById('hblocked');
+    hb.style.display=nb>0?'inline':'none';
+    document.getElementById('hbn').textContent=nb;
+    if(nodeData.length===0){
+      const nb=d.total_blocked||0;
+      if(d.capturing){
+        const pkts=d.total_pkts||0;
+        waitMsg.textContent='Capture running — waiting for traffic'+(pkts?' ('+pkts.toLocaleString()+' pkts, '+nb+' IPs blocked)':' ('+nb+' IPs blocked)');
+      } else {
+        waitMsg.textContent='EtherApe open — click ▶ START in the topology window to begin capture  ('+nb+' IPs blocked)';
+      }
+      waitDiv.style.display='flex';
+    } else {
+      waitDiv.style.display='none';
+      // Debug: show how many nodes have country codes
+      const withCC=nodeData.filter(n=>n.cc).length;
+      document.getElementById('hp').textContent=`${(bps/1400).toFixed(0)} | ${withCC}/${nodeData.length} geo`;
+    }
+  }catch(e){
+    waitMsg.textContent='Cannot reach localhost:8765 — is the app running?';
+    waitDiv.style.display='flex';
+  }
+  setTimeout(poll,600);
+}
+
+// initialise toggle states
+document.getElementById('btnBlocked').classList.add('active');
+document.getElementById('btnLabels').classList.add('active');
+
+try{ _refreshProtoLegend(); }catch(e){}   // show the key before data arrives
+
+// Post-processing (safe: falls back to plain rendering if unavailable)
+if(_initBloom()){
+  let _lv=null; try{ _lv=localStorage.getItem('nm_bloom_level'); }catch(e){}
+  if(_lv!==null && _lv!=='' && !isNaN(+_lv)){
+    bloomLevel=Math.max(0,Math.min(BLOOM_LEVELS.length-1,parseInt(_lv,10)));
+  }else{
+    let _old='1'; try{ _old=localStorage.getItem('nm_bloom')||'1'; }catch(e){}
+    bloomLevel = (_old==='0') ? 0 : 2;      // migrate the old on/off setting
+  }
+  _applyBloom();
+}else{
+  const _bb=document.getElementById('bloomBtn');
+  if(_bb) _bb.style.display='none';   // addons missing — hide the toggle
+}
+animate();
+
+// ── Flag proxy test ────────────────────────────────────────────────────────
+// Show a GB flag in the corner to verify /flag/ proxy is working
+(function(){
+  const img=document.createElement('img');
+  img.src='/flag/gb';
+  img.style.cssText='position:fixed;bottom:60px;right:14px;width:40px;height:28px;border-radius:4px;border:1px solid #1a3a5a;opacity:0.8;z-index:50';
+  img.title='Flag proxy test (GB)';
+  img.onerror=()=>{img.style.border='2px solid #ff3333';img.title='Flag proxy FAILED';};
+  document.body.appendChild(img);
+})();
+
+// Wrap poll in global error handler to surface any startup crash
+window.addEventListener('error', function(e){
+  const wd=document.getElementById('wait');
+  const wm=document.getElementById('wait-msg');
+  if(wm) wm.textContent='JS Error: '+e.message+' ('+e.filename+':'+e.lineno+')';
+  if(wd) wd.style.display='flex';
+});
+poll();
+</script>
+</body>
+</html>

@@ -1,0 +1,1772 @@
+<!DOCTYPE html>
+<!-- saved from url=(0062)file:///C:/Users/colli/Downloads/network_monitor_manual_3.html -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Network Monitor — User Manual</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Exo+2:ital,wght@0,200;0,400;0,600;0,800;1,300&display=swap');
+
+  :root {
+    --bg:        #030a14;
+    --bg2:       #060f1e;
+    --panel:     #081525;
+    --border:    #0e2540;
+    --acc1:      #38b8f0;
+    --acc2:      #a371f7;
+    --acc3:      #39ff14;
+    --acc4:      #ff9f43;
+    --acc5:      #ff6b6b;
+    --text:      #c8dff0;
+    --muted:     #4a6a8a;
+    --mono:      'Share Tech Mono', monospace;
+    --head:      'Rajdhani', sans-serif;
+    --body:      'Exo 2', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--body);
+    font-size: 15px;
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  /* ── Scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Sidebar nav ── */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 280px;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    z-index: 100;
+    padding: 0 0 40px;
+  }
+
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-track { background: var(--bg); }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .nav-logo {
+    padding: 24px 20px 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .nav-logo h1 {
+    font-family: var(--head);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--acc1);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .nav-logo span {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    display: block;
+    margin-top: 2px;
+    letter-spacing: 1px;
+  }
+
+  .nav-section {
+    padding: 8px 20px 4px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-top: 12px;
+  }
+
+  .nav-item {
+    display: block;
+    padding: 7px 20px 7px 28px;
+    color: var(--muted);
+    text-decoration: none;
+    font-family: var(--body);
+    font-size: 13px;
+    font-weight: 400;
+    transition: all 0.15s;
+    border-left: 2px solid transparent;
+    position: relative;
+  }
+  .nav-item:hover {
+    color: var(--acc1);
+    background: rgba(56,184,240,0.05);
+    border-left-color: var(--acc1);
+  }
+  .nav-item.sub {
+    padding-left: 40px;
+    font-size: 12px;
+    color: #384858;
+  }
+  .nav-item.sub:hover { color: var(--acc1); }
+
+  /* ── Main content ── */
+  .content {
+    margin-left: 280px;
+    min-height: 100vh;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    background: linear-gradient(160deg, #05111f 0%, #0a1e35 40%, #050d1a 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 80px 60px 60px;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 50%;
+    background: radial-gradient(ellipse at 80% 50%, rgba(56,184,240,0.06) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--acc1);
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    opacity: 0.8;
+  }
+  .hero h1 {
+    font-family: var(--head);
+    font-size: 52px;
+    font-weight: 700;
+    color: white;
+    line-height: 1.1;
+    margin-bottom: 12px;
+    letter-spacing: 1px;
+  }
+  .hero h1 span { color: var(--acc1); }
+  .hero p {
+    font-size: 16px;
+    color: var(--muted);
+    max-width: 560px;
+    line-height: 1.6;
+    margin-bottom: 28px;
+  }
+  .hero-badges { display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 3px;
+    letter-spacing: 1px;
+  }
+  .badge-blue  { background: rgba(56,184,240,0.12); color: var(--acc1); border: 1px solid rgba(56,184,240,0.25); }
+  .badge-purp  { background: rgba(163,113,247,0.12); color: var(--acc2); border: 1px solid rgba(163,113,247,0.25); }
+  .badge-green { background: rgba(57,255,20,0.10); color: var(--acc3); border: 1px solid rgba(57,255,20,0.20); }
+  .badge-amber { background: rgba(255,159,67,0.12); color: var(--acc4); border: 1px solid rgba(255,159,67,0.25); }
+
+  /* ── Page sections ── */
+  .section {
+    padding: 60px 60px 40px;
+    border-bottom: 1px solid var(--border);
+    max-width: 900px;
+  }
+  .section:last-child { border-bottom: none; }
+
+  .section-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  h2 {
+    font-family: var(--head);
+    font-size: 34px;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 6px;
+    letter-spacing: 0.5px;
+  }
+  h2 .accent { color: var(--acc1); }
+
+  .section-intro {
+    color: var(--muted);
+    font-size: 15px;
+    margin-bottom: 36px;
+    max-width: 700px;
+    border-left: 2px solid var(--border);
+    padding-left: 16px;
+  }
+
+  h3 {
+    font-family: var(--head);
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--acc1);
+    margin: 32px 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h3::before {
+    content: '';
+    display: inline-block;
+    width: 18px;
+    height: 2px;
+    background: var(--acc1);
+    opacity: 0.5;
+  }
+
+  h4 {
+    font-family: var(--head);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--acc2);
+    margin: 20px 0 8px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  p { margin-bottom: 12px; color: var(--text); }
+
+  /* ── Feature grid ── */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+    margin: 24px 0;
+  }
+
+  .feature-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px;
+    transition: border-color 0.2s;
+  }
+  .feature-card:hover { border-color: var(--acc1); }
+  .feature-card .icon {
+    font-size: 22px;
+    margin-bottom: 10px;
+    display: block;
+  }
+  .feature-card strong {
+    display: block;
+    font-family: var(--head);
+    font-size: 15px;
+    font-weight: 600;
+    color: white;
+    margin-bottom: 6px;
+  }
+  .feature-card p {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  /* ── Info boxes ── */
+  .info-box {
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin: 20px 0;
+    font-size: 14px;
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+  }
+  .info-box .icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .info-box.tip   { background: rgba(57,255,20,0.06); border: 1px solid rgba(57,255,20,0.2); }
+  .info-box.warn  { background: rgba(255,159,67,0.08); border: 1px solid rgba(255,159,67,0.25); }
+  .info-box.note  { background: rgba(56,184,240,0.07); border: 1px solid rgba(56,184,240,0.2); }
+  .info-box.danger{ background: rgba(255,107,107,0.08); border: 1px solid rgba(255,107,107,0.25); }
+  .info-box.tip   .icon { color: var(--acc3); }
+  .info-box.warn  .icon { color: var(--acc4); }
+  .info-box.note  .icon { color: var(--acc1); }
+  .info-box.danger .icon{ color: var(--acc5); }
+  .info-box p { margin: 0; }
+
+  /* ── Steps ── */
+  .steps { margin: 20px 0; counter-reset: step; }
+  .step {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+    align-items: flex-start;
+  }
+  .step-num {
+    flex-shrink: 0;
+    width: 28px; height: 28px;
+    background: rgba(56,184,240,0.1);
+    border: 1px solid rgba(56,184,240,0.3);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--acc1);
+    font-weight: bold;
+  }
+  .step-body { flex: 1; padding-top: 3px; }
+  .step-body strong { color: white; }
+  .step-body p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+
+  /* ── Key reference table ── */
+  .ref-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    font-size: 13px;
+  }
+  .ref-table th {
+    background: var(--panel);
+    color: var(--acc1);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    padding: 10px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  .ref-table td {
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(14,37,64,0.6);
+    vertical-align: top;
+  }
+  .ref-table tr:last-child td { border-bottom: none; }
+  .ref-table tr:nth-child(even) td { background: rgba(6,15,30,0.4); }
+  .ref-table .ctrl {
+    font-family: var(--mono);
+    color: var(--acc1);
+    white-space: nowrap;
+  }
+  .ref-table .desc { color: var(--text); }
+  .ref-table .note-cell { color: var(--muted); font-size: 12px; }
+
+  /* ── Kbd ── */
+  kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 7px;
+    color: var(--acc1);
+    white-space: nowrap;
+  }
+
+  /* ── Inline code ── */
+  code {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: rgba(56,184,240,0.08);
+    border: 1px solid rgba(56,184,240,0.15);
+    border-radius: 3px;
+    padding: 1px 6px;
+    color: var(--acc1);
+  }
+
+  /* ── UI element callout ── */
+  .ui-el {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(163,113,247,0.12);
+    border: 1px solid rgba(163,113,247,0.25);
+    color: var(--acc2);
+    white-space: nowrap;
+  }
+
+  /* ── Divider ── */
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+
+  /* ── Bullet list ── */
+  ul.feature-list {
+    list-style: none;
+    margin: 12px 0 20px;
+    padding: 0;
+  }
+  ul.feature-list li {
+    padding: 5px 0 5px 22px;
+    position: relative;
+    font-size: 14px;
+    color: var(--text);
+  }
+  ul.feature-list li::before {
+    content: '▸';
+    position: absolute;
+    left: 0;
+    color: var(--acc1);
+    font-size: 12px;
+  }
+
+  /* ── Screenshot placeholder ── */
+  .screen-placeholder {
+    background: var(--panel);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 24px;
+    text-align: center;
+    margin: 20px 0;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  /* ── Colour legend ── */
+  .colour-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 6px 0;
+    font-size: 13px;
+  }
+  .colour-dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ── TOC quick-links ── */
+  .quick-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 20px 0;
+  }
+  .quick-link {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--muted);
+    text-decoration: none;
+    transition: all 0.15s;
+    letter-spacing: 0.5px;
+  }
+  .quick-link:hover {
+    color: var(--acc1);
+    border-color: var(--acc1);
+    background: rgba(56,184,240,0.05);
+  }
+
+  /* ── Version tag ── */
+  .version-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 12px;
+    vertical-align: middle;
+  }
+
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .content { margin-left: 0; }
+    .hero, .section { padding: 40px 24px; }
+    .hero h1 { font-size: 34px; }
+  }
+
+  @media print {
+    /* ── Reset all dark theme colours to print-safe light values ── */
+    :root {
+      --bg:     #ffffff;
+      --bg2:    #ffffff;
+      --panel:  #f5f5f5;
+      --border: #cccccc;
+      --acc1:   #0066aa;
+      --acc2:   #6030a0;
+      --acc3:   #1a7a1a;
+      --acc4:   #c06010;
+      --acc5:   #cc2222;
+      --text:   #111111;
+      --muted:  #444444;
+      --mono:   'Courier New', monospace;
+    }
+
+    * {
+      color: #111111 !important;
+      background: #ffffff !important;
+      border-color: #cccccc !important;
+      box-shadow: none !important;
+      text-shadow: none !important;
+    }
+
+    /* Hide sidebar and scanline overlay */
+    .sidebar, body::before { display: none !important; }
+    .content { margin-left: 0 !important; }
+
+    /* Hero */
+    .hero {
+      background: #1a1a2e !important;
+      color: white !important;
+      padding: 24px 32px !important;
+      border-radius: 0 !important;
+      page-break-after: avoid;
+    }
+    .hero h1, .hero p, .hero-tag { color: white !important; }
+    .hero h1 span { color: #88ccee !important; }
+    .badge {
+      border: 1px solid #666 !important;
+      color: #222 !important;
+      background: #eee !important;
+      padding: 2px 8px !important;
+    }
+
+    /* Sections */
+    .section {
+      padding: 20px 32px !important;
+      border-bottom: 1px solid #ddd !important;
+      page-break-inside: avoid;
+      max-width: none !important;
+    }
+
+    /* Headings */
+    h2 { color: #1a1a4a !important; font-size: 22px !important; }
+    h2 .accent { color: #0066aa !important; }
+    h3 { color: #0055aa !important; font-size: 16px !important; }
+    h3::before { background: #0055aa !important; }
+    h4 { color: #6030a0 !important; }
+
+    .section-label { color: #888888 !important; }
+    .section-intro {
+      color: #444444 !important;
+      border-left: 2px solid #aaaaaa !important;
+    }
+
+    /* Tables */
+    .ref-table th {
+      background: #1a1a4a !important;
+      color: white !important;
+    }
+    .ref-table td { color: #111111 !important; }
+    .ref-table tr:nth-child(even) td { background: #f0f0f0 !important; }
+    .ctrl { color: #0055aa !important; font-family: 'Courier New', monospace !important; }
+    .desc { color: #111111 !important; }
+
+    /* Feature cards */
+    .feature-card {
+      background: #f8f8f8 !important;
+      border: 1px solid #cccccc !important;
+      page-break-inside: avoid;
+    }
+    .feature-card strong { color: #111111 !important; }
+    .feature-card p { color: #444444 !important; }
+
+    /* Info boxes */
+    .info-box { page-break-inside: avoid; }
+    .info-box.tip   { background: #f0fff0 !important; border-color: #66aa66 !important; }
+    .info-box.warn  { background: #fff8f0 !important; border-color: #cc8833 !important; }
+    .info-box.note  { background: #f0f8ff !important; border-color: #3388cc !important; }
+    .info-box.danger{ background: #fff0f0 !important; border-color: #cc4444 !important; }
+    .info-box .icon { color: #333333 !important; }
+    .info-box p     { color: #111111 !important; }
+
+    /* Steps */
+    .step-num {
+      background: #e8eeff !important;
+      border-color: #3355aa !important;
+      color: #3355aa !important;
+    }
+    .step-body strong { color: #111111 !important; }
+    .step-body p      { color: #444444 !important; }
+
+    /* Bullets */
+    ul.feature-list li { color: #111111 !important; }
+    ul.feature-list li::before { color: #0055aa !important; }
+
+    /* Colour dots — keep them */
+    .colour-dot { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    .colour-row { color: #111111 !important; }
+
+    /* Code / kbd / ui-el */
+    code {
+      background: #f0f0f0 !important;
+      border-color: #cccccc !important;
+      color: #0055aa !important;
+    }
+    kbd {
+      background: #f0f0f0 !important;
+      border-color: #cccccc !important;
+      color: #0055aa !important;
+    }
+    .ui-el {
+      background: #f0e8ff !important;
+      border-color: #9966cc !important;
+      color: #6030a0 !important;
+    }
+
+    /* Divider */
+    .divider { border-color: #cccccc !important; }
+
+    /* Nav logo area (hidden) */
+    .nav-logo, .nav-section, .nav-item { display: none !important; }
+
+    /* Page breaks */
+    h2 { page-break-before: always; }
+    .hero + .section h2 { page-break-before: avoid; }
+    .feature-grid { page-break-inside: avoid; }
+    .steps { page-break-inside: avoid; }
+    .ref-table { page-break-inside: avoid; }
+
+    /* Footer */
+    .content > div:last-child { color: #888888 !important; }
+
+    @page {
+      margin: 1.5cm 2cm;
+      size: A4;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ── -->
+<nav class="sidebar">
+  <div class="nav-logo">
+    <h1>◉ Net Monitor</h1>
+    <span>USER MANUAL v1.0</span>
+  </div>
+
+  <div class="nav-section">Getting Started</div>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#overview">Overview</a>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#installation">Installation</a>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#first-run">First Run</a>
+
+  <div class="nav-section">Main Dashboard</div>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#dashboard">Dashboard Layout</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#gauges">Speed Gauges</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#charts">Charts</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#view-modes">View Modes</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#speed-test">Running Speed Tests</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#dns-monitor">DNS Monitoring</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#export">Exporting Data</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#themes">Themes &amp; Colours</a>
+
+  <div class="nav-section">Wireshark Monitor</div>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#wireshark">Overview</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ws-capture">Starting a Capture</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ws-filters">Display Filters</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ws-packets">Inspecting Packets</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ws-pcap">PCAP Files</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ws-stats">Statistics</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ws-ai">AI Query</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ws-report">Generating Reports</a>
+
+  <div class="nav-section">EtherApe Monitor</div>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#etherape">Overview</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ea-capture">Live Capture</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ea-topology">Topology View</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ea-flows">Flow Details</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ea-replay">PCAP Replay</a>
+  <a class="nav-item sub" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#ea-font">Font &amp; Display</a>
+
+  <div class="nav-section">Reference</div>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#protocols">Protocol Colours</a>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#troubleshooting">Troubleshooting</a>
+  <a class="nav-item" href="file:///C:/Users/colli/Downloads/network_monitor_manual_3.html#shortcuts">Quick Reference</a>
+</nav>
+
+<!-- ── Content ── -->
+<div class="content">
+
+<!-- Hero -->
+<div class="hero">
+  <div class="hero-tag">◈ Network Monitor — Complete User Manual</div>
+  <h1>Network<br><span>Monitor</span></h1>
+  <p>Real-time network intelligence — speed testing, live packet capture, topology visualisation, and AI-powered analysis in a single application.</p>
+  <div class="hero-badges">
+    <span class="badge badge-blue">Windows 10/11</span>
+    <span class="badge badge-purp">Wireshark Integration</span>
+    <span class="badge badge-green">Live Topology</span>
+    <span class="badge badge-amber">AI Analysis</span>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="overview" class="section">
+  <div class="section-label">01 — Getting Started</div>
+  <h2>What is <span class="accent">Network Monitor?</span></h2>
+  <p class="section-intro">Network Monitor is an all-in-one Windows desktop application for real-time network analysis, built around a dark futuristic interface with live gauges, packet capture, topology mapping, and AI-assisted investigation.</p>
+
+  <div class="feature-grid">
+    <div class="feature-card">
+      <span class="icon">⚡</span>
+      <strong>Speed Test Dashboard</strong>
+      <p>Live animated gauges showing download, upload, and ping with 5-minute automatic testing and historical charts.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">🦈</span>
+      <strong>Wireshark Monitor</strong>
+      <p>Full packet capture frontend with display filters, hex dump, stream following, statistics, and AI query.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">◉</span>
+      <strong>EtherApe Topology</strong>
+      <p>Real-time network topology visualiser showing hosts and flows with live traffic animation.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">⊙</span>
+      <strong>DNS Monitoring</strong>
+      <p>Continuous DNS resolution timing across 6 major hosts with history chart and jitter tracking.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">✦</span>
+      <strong>AI Analysis</strong>
+      <p>Ask Claude to explain captures in plain English. Generate professional HTML reports with multiple queries.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">⬇</span>
+      <strong>Data Export</strong>
+      <p>Export speed test history as CSV or JSON with flexible date range selection and folder picker.</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="installation" class="section">
+  <div class="section-label">01 — Getting Started</div>
+  <h2><span class="accent">Installation</span></h2>
+  <p class="section-intro">The installer handles all dependencies automatically. An internet connection is required during installation to download Wireshark and Nmap.</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <strong>Run NetworkMonitorSetup.exe as Administrator</strong>
+        <p>Right-click the installer and choose "Run as administrator". This is required to install Wireshark's Npcap driver.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <strong>Choose components</strong>
+        <p>All components are selected by default. Wireshark + Npcap is required for packet capture. Nmap enables network scanning features.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <strong>Wait for downloads</strong>
+        <p>Wireshark (~80 MB) and Nmap (~30 MB) will be downloaded and installed silently. This takes 2–5 minutes depending on connection speed.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <strong>Launch from Desktop or Start Menu</strong>
+        <p>A shortcut is created on your Desktop and in Start Menu → Network Monitor.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box warn">
+    <span class="icon">⚠</span>
+    <p><strong>Administrator rights required for capture.</strong> Packet capture (Wireshark Monitor and EtherApe) requires the application to be run as Administrator. Right-click the shortcut → Run as administrator.</p>
+  </div>
+
+  <h3>System Requirements</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Component</th><th>Minimum</th></tr>
+    <tr><td class="ctrl">OS</td><td class="desc">Windows 10 64-bit or later</td></tr>
+    <tr><td class="ctrl">RAM</td><td class="desc">4 GB (8 GB recommended for heavy captures)</td></tr>
+    <tr><td class="ctrl">Disk</td><td class="desc">500 MB free (plus ~200 MB for Wireshark)</td></tr>
+    <tr><td class="ctrl">Network</td><td class="desc">Any wired or wireless adapter supported by Npcap</td></tr>
+    <tr><td class="ctrl">Internet</td><td class="desc">Required for speed tests and AI analysis</td></tr>
+  </tbody></table>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="first-run" class="section">
+  <div class="section-label">01 — Getting Started</div>
+  <h2><span class="accent">First Run</span></h2>
+
+  <p>On first launch the application runs an initial speed test automatically. The main window displays five animated gauges across the top and six charts below.</p>
+
+  <div class="info-box note">
+    <span class="icon">ℹ</span>
+    <p>Speed test data is saved to a JSON file in your system temp folder and persists between sessions. You will see historical charts fill in over time as more tests run.</p>
+  </div>
+
+  <p>The app auto-runs a speed test every <strong>5 minutes</strong> in a background thread. You can trigger one manually at any time with the <span class="ui-el">▶ RUN SPEED TEST NOW</span> button.</p>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="dashboard" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Dashboard <span class="accent">Layout</span></h2>
+  <p class="section-intro">The main window is divided into three horizontal bands: the gauge row at the top, a button bar in the middle, and six charts at the bottom.</p>
+
+  <h3>Window Regions</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Region</th><th>Contents</th></tr>
+    <tr>
+      <td class="ctrl">Gauge row (top)</td>
+      <td class="desc">Five circular dials — Download, Upload, Ping, DNS, and the View Mode selector. All animate smoothly with easing.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Button bar (middle)</td>
+      <td class="desc">Export Data, Run Speed Test, Monitor DNS, Wireshark, EtherApe buttons. Colour swatches on the far right.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Chart area (bottom)</td>
+      <td class="desc">Six charts in a 2×3 grid: Download, Upload, Latency, Daily Averages, DNS History, and Statistics table.</td>
+    </tr>
+  </tbody></table>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="gauges" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Speed <span class="accent">Gauges</span></h2>
+  <p class="section-intro">The five dials at the top of the window provide an at-a-glance view of your current network performance. Each is a 270° neon sweep gauge with animated needles.</p>
+
+  <table class="ref-table">
+    <tbody><tr><th>Gauge</th><th>Unit</th><th>What it shows</th></tr>
+    <tr>
+      <td class="ctrl">Download ↓</td>
+      <td class="desc">Mbps</td>
+      <td class="desc">Last measured download bandwidth. Scale auto-adjusts to 130% of your historical maximum.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Upload ↑</td>
+      <td class="desc">Mbps</td>
+      <td class="desc">Last measured upload bandwidth.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Ping ◌</td>
+      <td class="desc">ms</td>
+      <td class="desc">Round-trip latency from the most recent speed test.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">DNS ⊙</td>
+      <td class="desc">ms</td>
+      <td class="desc">Average DNS resolution time across 6 hosts from the last DNS check. Updated only when you click Monitor DNS.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">View Mode</td>
+      <td class="desc">—</td>
+      <td class="desc">Rotary selector for chart time window. Click a segment to change view.</td>
+    </tr>
+  </tbody></table>
+
+  <div class="info-box tip">
+    <span class="icon">💡</span>
+    <p>The needles ease smoothly toward their target values. The large digital readout in the centre of each dial shows the exact current value.</p>
+  </div>
+
+  <h3>Needle Easing</h3>
+  <p>Gauges update every second with a 20% easing factor — the needle moves 20% of the remaining distance each tick, giving a smooth analog feel. On a manual "Run Speed Test", the needle snaps immediately to the new value.</p>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="charts" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>History <span class="accent">Charts</span></h2>
+
+  <table class="ref-table">
+    <tbody><tr><th>Chart</th><th>Description</th></tr>
+    <tr>
+      <td class="ctrl">Download</td>
+      <td class="desc">Bar chart (Today/History view) or neon line chart (weekly/monthly). Shows all tests in the current time window.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Upload</td>
+      <td class="desc">Same layout as Download, using the Upload colour.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Latency</td>
+      <td class="desc">Ping values for the selected time window.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Daily Averages</td>
+      <td class="desc">Always shows the last 14 days regardless of view mode. Grouped bars for Download and Upload side by side.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">DNS History</td>
+      <td class="desc">Time-series chart of all DNS check results. Shows 20 ms and 100 ms reference lines for quick assessment.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Statistics</td>
+      <td class="desc">Table of Avg / Max / Min / σ / Jitter for Download, Upload, Ping, and DNS in the current view window.</td>
+    </tr>
+  </tbody></table>
+
+  <div class="info-box note">
+    <span class="icon">ℹ</span>
+    <p><strong>Jitter</strong> is calculated as the mean absolute difference between consecutive ping samples — the standard VoIP/RFC 3550 definition. High jitter causes choppy audio/video calls.</p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="view-modes" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>View <span class="accent">Modes</span></h2>
+  <p class="section-intro">Click any segment of the View Mode dial (top-right) to change the time window displayed in the three main charts and the Statistics table.</p>
+
+  <table class="ref-table">
+    <tbody><tr><th>Mode</th><th>Time window</th><th>Chart style</th></tr>
+    <tr>
+      <td class="ctrl">Today</td>
+      <td class="desc">Midnight to now</td>
+      <td class="desc">Hourly bar chart (0:00–24:00 x-axis)</td>
+    </tr>
+    <tr>
+      <td class="ctrl">This Week</td>
+      <td class="desc">Start of current week to now</td>
+      <td class="desc">Neon line chart with date labels</td>
+    </tr>
+    <tr>
+      <td class="ctrl">This Month</td>
+      <td class="desc">1st of current month to now</td>
+      <td class="desc">Neon line chart with date labels</td>
+    </tr>
+    <tr>
+      <td class="ctrl">All Time</td>
+      <td class="desc">All recorded data</td>
+      <td class="desc">Neon line chart</td>
+    </tr>
+  </tbody></table>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="speed-test" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Running <span class="accent">Speed Tests</span></h2>
+
+  <p>Speed tests run automatically every 5 minutes. To run one immediately, click <span class="ui-el">▶ RUN SPEED TEST NOW</span> in the button bar.</p>
+
+  <p>The button label changes to <span class="ui-el">◌ RUNNING…</span> during the test. Results appear in the gauges and charts as soon as the test completes (typically 20–60 seconds).</p>
+
+  <h3>How Speed Tests Work</h3>
+  <p>The app uses the <strong>Ookla Speedtest CLI</strong> (<code>speedtest.exe</code>) with three fallback attempts:</p>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body"><strong>JSON mode</strong><p>Fastest and most accurate. Returns structured data directly.</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body"><strong>Plain text mode</strong><p>Falls back to parsing human-readable output if JSON fails.</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body"><strong>Bare run</strong><p>Last resort — runs speedtest.exe with no flags and parses any output found.</p></div>
+    </div>
+  </div>
+
+  <div class="info-box warn">
+    <span class="icon">⚠</span>
+    <p>Speed test results require an active internet connection. If all three attempts fail, check that <code>speedtest.exe</code> is present in the install folder and that your firewall is not blocking it.</p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="dns-monitor" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>DNS <span class="accent">Monitoring</span></h2>
+
+  <p>Click <span class="ui-el">⊙ MONITOR DNS</span> to run a DNS resolution check. The app resolves these six hosts and measures the wall-clock time for each:</p>
+
+  <ul class="feature-list">
+    <li>google.com</li>
+    <li>cloudflare.com</li>
+    <li>microsoft.com</li>
+    <li>amazon.com</li>
+    <li>bbc.co.uk</li>
+    <li>github.com</li>
+  </ul>
+
+  <p>The average of all successful resolutions is recorded and displayed on the DNS dial and in the DNS History chart. Up to 500 readings are retained.</p>
+
+  <h3>Interpreting DNS Times</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Range</th><th>Assessment</th></tr>
+    <tr><td class="ctrl">&lt; 20 ms</td><td class="desc">Excellent — fast local or ISP DNS</td></tr>
+    <tr><td class="ctrl">20–50 ms</td><td class="desc">Good — normal for most connections</td></tr>
+    <tr><td class="ctrl">50–100 ms</td><td class="desc">Moderate — consider using 8.8.8.8 or 1.1.1.1</td></tr>
+    <tr><td class="ctrl">&gt; 100 ms</td><td class="desc">Slow — DNS may be causing browsing delays</td></tr>
+  </tbody></table>
+
+  <div class="info-box tip">
+    <span class="icon">💡</span>
+    <p>High DNS times can make websites feel slow even when your broadband speed is fine. Try setting your DNS server to <code>1.1.1.1</code> (Cloudflare) or <code>8.8.8.8</code> (Google) in your network adapter settings.</p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="export" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Exporting <span class="accent">Data</span></h2>
+
+  <p>Click <span class="ui-el">⬇ EXPORT DATA</span> to open the export dialog.</p>
+
+  <h3>Export Dialog Options</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Option</th><th>Description</th></tr>
+    <tr>
+      <td class="ctrl">From / To date</td>
+      <td class="desc">Set the date range manually (YYYY-MM-DD HH:MM:SS format)</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Quick range</td>
+      <td class="desc">Today, 7 days, 30 days, or All — fills date fields instantly</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Format</td>
+      <td class="desc">CSV (Excel-compatible) or JSON</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Save to</td>
+      <td class="desc">Destination folder — defaults to app data folder, click Browse to change</td>
+    </tr>
+  </tbody></table>
+
+  <h3>Export File Contents</h3>
+  <p>Each row / object in the export contains: <code>timestamp</code>, <code>download_mbps</code>, <code>upload_mbps</code>, <code>ping_ms</code>.</p>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="themes" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Themes &amp; <span class="accent">Colours</span></h2>
+
+  <p>Three colour swatch buttons (<span class="ui-el">●</span>) appear on the far right of the gauge area, labelled CLR. Click any swatch to open a colour picker for that channel:</p>
+
+  <table class="ref-table">
+    <tbody><tr><th>Swatch</th><th>Controls</th></tr>
+    <tr><td class="ctrl">↓ Download</td><td class="desc">Colour of download gauge, line, and bars</td></tr>
+    <tr><td class="ctrl">↑ Upload</td><td class="desc">Colour of upload gauge, line, and bars</td></tr>
+    <tr><td class="ctrl">◌ Ping</td><td class="desc">Colour of ping gauge and latency chart</td></tr>
+  </tbody></table>
+
+  <p>Custom colours are saved to <code>speedtest_config.json</code> and persist between sessions.</p>
+
+  <h3>Built-in Themes</h3>
+  <div style="margin: 12px 0;">
+    <div class="colour-row"><div class="colour-dot" style="background:#00d4aa"></div><strong style="color:white;margin-right:4px">Ocean</strong> — Teal / Purple / Amber (default)</div>
+    <div class="colour-row"><div class="colour-dot" style="background:#ff6b6b"></div><strong style="color:white;margin-right:4px">Sunset</strong> — Coral / Yellow / Green</div>
+    <div class="colour-row"><div class="colour-dot" style="background:#39ff14"></div><strong style="color:white;margin-right:4px">Neon</strong> — Neon green / Hot red / Cyan</div>
+    <div class="colour-row"><div class="colour-dot" style="background:#74c7ec"></div><strong style="color:white;margin-right:4px">Pastel</strong> — Soft blue / Lavender / Peach</div>
+    <div class="colour-row"><div class="colour-dot" style="background:#e0e0e0"></div><strong style="color:white;margin-right:4px">Mono</strong> — Grey scale</div>
+  </div>
+  <p style="margin-top:8px">Clicking any CLR swatch overrides the current theme with a custom colour and stores it as a custom palette. To return to a built-in theme, the config file must be edited or deleted.</p>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="wireshark" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2><span class="accent">Wireshark</span> Monitor</h2>
+  <p class="section-intro">A full-featured dark-themed packet capture and inspection tool built on top of tshark (Wireshark's command-line engine). Accessed via the <span class="ui-el">🦈 WIRESHARK</span> button on the main dashboard.</p>
+
+  <div class="feature-grid">
+    <div class="feature-card">
+      <span class="icon">📡</span>
+      <strong>Live Capture</strong>
+      <p>Select any network interface and start capturing packets in real time with colour-coded protocol rows.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">🔍</span>
+      <strong>Display Filters</strong>
+      <p>Filter the visible packet list using Wireshark filter syntax without stopping the capture.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">📋</span>
+      <strong>Packet Detail</strong>
+      <p>Click any packet to see the full decoded protocol tree and hex dump side by side.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">📊</span>
+      <strong>Statistics</strong>
+      <p>Protocol hierarchy, conversations, endpoints, I/O graph, DNS stats, HTTP stats, and more.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">💾</span>
+      <strong>PCAP Files</strong>
+      <p>Open existing PCAP/PCAPNG files or save the current capture for later analysis.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">✦</span>
+      <strong>AI Query</strong>
+      <p>Ask Claude to explain what happened in the capture in plain English and export a PDF report.</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ws-capture" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Starting a <span class="accent">Capture</span></h2>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <strong>Select an interface</strong>
+        <p>Choose your network adapter from the Interface dropdown. Wi-Fi and Ethernet adapters are listed with friendly names. Run as Administrator if the list is empty.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <strong>(Optional) Set a Capture Filter</strong>
+        <p>Enter a BPF filter in the Capture Filter field before starting. Examples: <code>port 80</code>, <code>host 192.168.1.1</code>, <code>tcp</code>. This filters at the driver level and reduces overhead.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <strong>Click ▶ Start Capture</strong>
+        <p>Packets appear in the list in real time, colour-coded by protocol. The packet counter updates in the toolbar.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <strong>Click ◼ Stop when done</strong>
+        <p>The capture is saved automatically as a PCAP file. The status bar shows how many packets were recorded.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box danger">
+    <span class="icon">🔒</span>
+    <p><strong>Administrator required.</strong> Packet capture will fail silently or show an "access denied" error without admin rights. Right-click the application shortcut and choose "Run as administrator".</p>
+  </div>
+
+  <h3>Toolbar Buttons</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Button</th><th>Action</th></tr>
+    <tr><td class="ctrl">▶ Start Capture</td><td class="desc">Begin capturing on the selected interface</td></tr>
+    <tr><td class="ctrl">◼ Stop</td><td class="desc">Stop the capture and save to PCAP</td></tr>
+    <tr><td class="ctrl">⊘ Clear</td><td class="desc">Clear all packets from the list and delete the PCAP file</td></tr>
+    <tr><td class="ctrl">📂 Open PCAP</td><td class="desc">Load an existing PCAP or PCAPNG file</td></tr>
+    <tr><td class="ctrl">💾 Save PCAP</td><td class="desc">Save the current capture to a chosen location</td></tr>
+    <tr><td class="ctrl">✦ AI Query</td><td class="desc">Open the AI analysis window</td></tr>
+    <tr><td class="ctrl">Auto-scroll</td><td class="desc">Toggle automatic scrolling to the latest packet</td></tr>
+  </tbody></table>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ws-filters" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Display <span class="accent">Filters</span></h2>
+
+  <p>Display filters narrow the visible packet list <em>without</em> stopping the capture or deleting data. They use standard Wireshark filter syntax.</p>
+
+  <h3>Common Filter Examples</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Filter</th><th>Shows</th></tr>
+    <tr><td class="ctrl">tcp</td><td class="desc">All TCP packets</td></tr>
+    <tr><td class="ctrl">udp</td><td class="desc">All UDP packets</td></tr>
+    <tr><td class="ctrl">dns</td><td class="desc">All DNS queries and responses</td></tr>
+    <tr><td class="ctrl">http</td><td class="desc">Unencrypted HTTP traffic</td></tr>
+    <tr><td class="ctrl">tls</td><td class="desc">Encrypted TLS/HTTPS traffic</td></tr>
+    <tr><td class="ctrl">ip.addr == 192.168.1.1</td><td class="desc">Traffic to or from a specific IP</td></tr>
+    <tr><td class="ctrl">ip.src == 10.0.0.5</td><td class="desc">Traffic from a specific source IP</td></tr>
+    <tr><td class="ctrl">tcp.port == 443</td><td class="desc">Traffic on port 443 (HTTPS)</td></tr>
+    <tr><td class="ctrl">icmp</td><td class="desc">Ping packets</td></tr>
+    <tr><td class="ctrl">frame.len &gt; 1000</td><td class="desc">Large packets only</td></tr>
+  </tbody></table>
+
+  <p>Press <kbd>Enter</kbd> or click <span class="ui-el">Apply</span> to activate the filter. Click <span class="ui-el">✕ Clear</span> to remove it and show all packets.</p>
+
+  <h3>Right-Click Quick Filters</h3>
+  <p>Right-click any packet row to access quick filter options:</p>
+  <ul class="feature-list">
+    <li>Filter by Source IP — shows only traffic from that address</li>
+    <li>Filter by Destination IP — shows only traffic to that address</li>
+    <li>Filter by Protocol — shows only that protocol type</li>
+    <li>Follow TCP/UDP Stream — reconstructs the full conversation</li>
+    <li>Copy Source IP / Dest IP / Info — copies to clipboard</li>
+  </ul>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ws-packets" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Inspecting <span class="accent">Packets</span></h2>
+
+  <p>Click any row in the packet list to inspect it. The window splits into:</p>
+
+  <table class="ref-table">
+    <tbody><tr><th>Panel</th><th>Contents</th></tr>
+    <tr>
+      <td class="ctrl">Packet Details (left)</td>
+      <td class="desc">Decoded protocol tree — Ethernet frame → IP header → TCP/UDP → application layer. Expand nodes to see individual fields.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Hex Dump (right)</td>
+      <td class="desc">Raw bytes of the packet in hex with ASCII representation. Offsets shown on the left. Null bytes are dimmed.</td>
+    </tr>
+  </tbody></table>
+
+  <h3>Column Sorting</h3>
+  <p>Click any column header to sort the packet list by that field. Click again to reverse the sort. Sortable columns: No., Time, Source, Destination, Protocol, Length, Info.</p>
+
+  <h3>Colour Coding</h3>
+  <div id="protocols">
+  <div class="colour-row"><div class="colour-dot" style="background:#39ff14"></div> HTTP / HTTP2 — neon green</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#6bcb77"></div> TLS / SSL — soft green</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#ff9f43"></div> DNS / mDNS — amber</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#ffd93d"></div> DHCP — yellow</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#ff6b6b"></div> ICMP — coral red</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#00d4aa"></div> TCP — teal</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#a371f7"></div> UDP — purple</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#74c7ec"></div> ARP — light blue</div>
+  <div class="colour-row"><div class="colour-dot" style="background:#c8dff0"></div> Other — ice white</div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ws-stats" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Statistics <span class="accent">Menu</span></h2>
+
+  <p>The Statistics menu provides detailed analysis of the current capture. All statistics windows are non-blocking — the capture continues while they are open.</p>
+
+  <table class="ref-table">
+    <tbody><tr><th>Statistics Window</th><th>Description</th></tr>
+    <tr><td class="ctrl">Summary</td><td class="desc">File size, packet count, duration, average rate and packet size</td></tr>
+    <tr><td class="ctrl">Protocol Hierarchy</td><td class="desc">Tree breakdown of all protocols with frame/byte counts</td></tr>
+    <tr><td class="ctrl">Conversations — IPv4/TCP/UDP</td><td class="desc">All conversations with bytes A→B, B→A, total, and duration</td></tr>
+    <tr><td class="ctrl">Endpoints — IPv4/TCP/UDP</td><td class="desc">All endpoints with total Tx/Rx packet and byte counts</td></tr>
+    <tr><td class="ctrl">I/O Graph</td><td class="desc">Throughput (bytes/s) and packet rate (pkt/s) over time, plotted with neon lines</td></tr>
+    <tr><td class="ctrl">Packet Lengths</td><td class="desc">Distribution of packet sizes across standard buckets</td></tr>
+    <tr><td class="ctrl">DNS Statistics</td><td class="desc">Query types, response codes, and timing</td></tr>
+    <tr><td class="ctrl">HTTP Statistics</td><td class="desc">Request methods, response codes, and hosts</td></tr>
+  </tbody></table>
+
+  <h3>Analyse Menu</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Feature</th><th>Description</th></tr>
+    <tr><td class="ctrl">Expert Information</td><td class="desc">Automatic detection of errors, warnings, notes, and chat events — colour coded by severity</td></tr>
+    <tr><td class="ctrl">Follow TCP Stream</td><td class="desc">Reconstructs a TCP conversation in ASCII, showing client (teal) vs server (purple) data</td></tr>
+    <tr><td class="ctrl">Follow UDP/TLS Stream</td><td class="desc">Same as TCP Follow for UDP and TLS sessions</td></tr>
+    <tr><td class="ctrl">Decode As</td><td class="desc">Re-dissect a port as a different protocol (HTTP, TLS, DNS, etc.)</td></tr>
+  </tbody></table>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ws-pcap" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>PCAP <span class="accent">Files</span></h2>
+
+  <h3>Opening a PCAP</h3>
+  <p>Click <span class="ui-el">📂 Open PCAP</span> and select any <code>.pcap</code>, <code>.pcapng</code>, or <code>.cap</code> file. The file is loaded and all packets are displayed. You can then apply display filters and run statistics on the file.</p>
+
+  <h3>Saving a Capture</h3>
+  <p>Click <span class="ui-el">💾 Save PCAP</span> to save the current capture to a chosen location. The file is always saved in PCAP format and can be opened in Wireshark, tcpdump, or any other compatible tool.</p>
+
+  <div class="info-box note">
+    <span class="icon">ℹ</span>
+    <p>During a live capture, tshark automatically writes packets to a temporary PCAP file in your system temp folder. This is what gets loaded when you click Save PCAP.</p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ws-ai" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>AI <span class="accent">Query</span></h2>
+  <p class="section-intro">Click <span class="ui-el">✦ AI Query</span> to open the AI analysis window. This sends a summary of your capture to Claude and lets you ask questions in plain English.</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <strong>Enter your API key</strong>
+        <p>Paste your Anthropic API key in the key field. Get one free at <strong>console.anthropic.com</strong>. Click <span class="ui-el">Save Key</span> to remember it for future sessions.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <strong>Click a quick prompt or type your own</strong>
+        <p>Six quick prompts are provided: Summarise, Suspicious patterns, Top hosts, DNS lookups, Network errors, Connections established.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <strong>Click Ask AI or press Enter</strong>
+        <p>The capture summary (protocol breakdown, top IPs, sample packets, tshark stats) is sent to Claude. The response appears in the text area below.</p>
+      </div>
+    </div>
+  </div>
+
+  <h3>What Context Is Sent</h3>
+  <ul class="feature-list">
+    <li>Total packet count and capture duration</li>
+    <li>Full protocol breakdown with counts</li>
+    <li>Top 10 source and destination IPs by packet count</li>
+    <li>Average packet rate</li>
+    <li>First 40 and last 20 packets (full detail)</li>
+    <li>tshark protocol hierarchy, IPv4 conversations, DNS tree</li>
+  </ul>
+
+  <div class="info-box tip">
+    <span class="icon">💡</span>
+    <p>You do not need to stop the capture before using AI Query. The context is built from the packets currently visible in the list (including any active display filter).</p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ws-report" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Generating <span class="accent">Reports</span></h2>
+
+  <p>Build a multi-section HTML report from multiple AI queries:</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <strong>Ask a question and get an AI response</strong>
+        <p>Any question — summarise, security analysis, specific host investigation, etc.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <strong>Click ＋ Add to Report</strong>
+        <p>The question and answer are saved to the report queue. The counter updates: "Report: 2 entries".</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <strong>Ask more questions and add them</strong>
+        <p>Each query becomes its own section. Use the queue panel at the bottom to reorder (▲ ▼) or remove (✕) entries.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <strong>Click 📄 Generate Report</strong>
+        <p>Choose a save location. An HTML file is created and opened in your browser automatically.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <strong>Print to PDF from your browser</strong>
+        <p>In Chrome or Edge: File → Print → Destination: "Save as PDF". The report is print-optimised.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box note">
+    <span class="icon">ℹ</span>
+    <p>Reports are self-contained HTML files — no internet connection needed to open them. They include the capture stats table, timestamps for each query, and all AI responses with markdown formatting rendered correctly.</p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="etherape" class="section">
+  <div class="section-label">04 — EtherApe Monitor</div>
+  <h2><span class="accent">EtherApe</span> Monitor</h2>
+  <p class="section-intro">A real-time network topology visualiser that shows hosts as nodes and network flows as animated lines. Accessed via the <span class="ui-el">◉ ETHERAPE</span> button on the main dashboard.</p>
+
+  <div class="feature-grid">
+    <div class="feature-card">
+      <span class="icon">🌐</span>
+      <strong>Live Topology</strong>
+      <p>Hosts appear as nodes sized by traffic volume. Flows are animated with pulse dots showing data direction.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">🔬</span>
+      <strong>Flow Inspection</strong>
+      <p>Click any flow line on the canvas or in the table to see full IPs, protocol, packet count, data transferred, and average packet size.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">📁</span>
+      <strong>PCAP Replay</strong>
+      <p>Load a PCAP file and replay it at 0.1× to 16× speed (or unlimited) to visualise historical captures.</p>
+    </div>
+    <div class="feature-card">
+      <span class="icon">🔤</span>
+      <strong>Font Control</strong>
+      <p>Adjust font size (6–24) and family for all labels from toolbar 2. Changes apply to the whole window.</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ea-capture" class="section">
+  <div class="section-label">04 — EtherApe Monitor</div>
+  <h2>Live <span class="accent">Capture</span></h2>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <strong>Select an interface</strong>
+        <p>Choose your network adapter from the Interface dropdown. If the list is empty, the app needs Administrator rights.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <strong>(Optional) Set a BPF capture filter</strong>
+        <p>Enter a filter like <code>tcp</code> or <code>port 80</code> in the Capture Filter field to limit traffic. Applied at capture start.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <strong>Click ▶ Start</strong>
+        <p>The topology canvas populates as traffic is detected. Nodes and flows appear within seconds on an active network.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <strong>Click ◼ Stop to end the capture</strong>
+        <p>Existing nodes and flows fade gradually via traffic decay. Click ⊘ Clear to reset the view entirely.</p>
+      </div>
+    </div>
+  </div>
+
+  <h3>Protocol Filter</h3>
+  <p>The Protocol dropdown in toolbar 1 filters the <em>displayed</em> flows without stopping the capture. Options: ALL, TCP, UDP, DNS, HTTP, TLS, ICMP, ARP, DHCP.</p>
+
+  <h3>Display Options</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Checkbox</th><th>Effect</th></tr>
+    <tr><td class="ctrl">Labels</td><td class="desc">Show/hide IP address labels beneath each node</td></tr>
+    <tr><td class="ctrl">Legend</td><td class="desc">Show/hide the protocol colour legend in the top-left</td></tr>
+    <tr><td class="ctrl">Resolve DNS</td><td class="desc">Attempt to resolve IPs to hostnames (non-blocking, may take a moment)</td></tr>
+  </tbody></table>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ea-topology" class="section">
+  <div class="section-label">04 — EtherApe Monitor</div>
+  <h2>Topology <span class="accent">Canvas</span></h2>
+
+  <h3>Reading the Display</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Element</th><th>Meaning</th></tr>
+    <tr>
+      <td class="ctrl">Node size</td>
+      <td class="desc">Proportional to cumulative bytes transferred (log scale). Larger = more traffic.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Node colour</td>
+      <td class="desc">Protocol of the most recent flow involving that host.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Line thickness</td>
+      <td class="desc">Proportional to flow data volume (log scale).</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Pulse dots</td>
+      <td class="desc">Animated dots travelling along flow lines showing data direction.</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Glow effect</td>
+      <td class="desc">Each flow line has a wide transparent glow for visibility against the dark background.</td>
+    </tr>
+  </tbody></table>
+
+  <h3>Traffic Decay</h3>
+  <p>Flows and nodes that haven't received new packets gradually fade (0.92× decay per render tick at ~5 fps). This means inactive flows disappear from the canvas naturally, keeping the view focused on current activity.</p>
+
+  <h3>Limits</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Limit</th><th>Value</th></tr>
+    <tr><td class="ctrl">Maximum nodes</td><td class="desc">60 (oldest evicted when exceeded)</td></tr>
+    <tr><td class="ctrl">Maximum flows</td><td class="desc">150 (smallest flow evicted when exceeded)</td></tr>
+    <tr><td class="ctrl">Render rate</td><td class="desc">5 fps (200ms per frame — efficient, not heavy)</td></tr>
+    <tr><td class="ctrl">Table update rate</td><td class="desc">Every 2 seconds</td></tr>
+  </tbody></table>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ea-flows" class="section">
+  <div class="section-label">04 — EtherApe Monitor</div>
+  <h2>Flow <span class="accent">Details</span></h2>
+
+  <p>Two ways to inspect a flow:</p>
+
+  <h3>1 — Click a Flow Line on the Canvas</h3>
+  <p>Click anywhere near a flow line in the topology view. The app calculates point-to-segment distance and selects the nearest flow within a 0.04 unit threshold. The detail panel populates automatically, and the matching row in the Active Flows table is highlighted.</p>
+
+  <h3>2 — Click a Row in Active Flows Table</h3>
+  <p>Click any row in the Active Flows table (bottom-right panel). The flow detail panel below the table updates with full information.</p>
+
+  <h3>Flow Detail Panel Contents</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Field</th><th>Description</th></tr>
+    <tr><td class="ctrl">Protocol</td><td class="desc">Protocol tag (colour-coded to match the flow)</td></tr>
+    <tr><td class="ctrl">Source IP</td><td class="desc">Full untruncated source IP address</td></tr>
+    <tr><td class="ctrl">→ hostname</td><td class="desc">Resolved hostname (if DNS Resolve is enabled)</td></tr>
+    <tr><td class="ctrl">Destination IP</td><td class="desc">Full untruncated destination IP address</td></tr>
+    <tr><td class="ctrl">Packets</td><td class="desc">Total packet count for this flow</td></tr>
+    <tr><td class="ctrl">Data (approx)</td><td class="desc">Approximate bytes transferred (B / KB / MB / GB)</td></tr>
+    <tr><td class="ctrl">Avg pkt size</td><td class="desc">Average bytes per packet</td></tr>
+  </tbody></table>
+
+  <h3>Resizing Panels</h3>
+  <p>All three panel dividers (horizontal canvas vs tables split, hosts vs flows split, flows vs detail split) have raised visible sash handles. Drag them to resize. The panels remember their positions while the window is open.</p>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ea-replay" class="section">
+  <div class="section-label">04 — EtherApe Monitor</div>
+  <h2>PCAP <span class="accent">Replay</span></h2>
+
+  <p>Replay a previously captured PCAP file through the topology visualiser to investigate historical traffic.</p>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <strong>Click 📂 Open PCAP</strong>
+        <p>Browse for a .pcap, .pcapng, or .cap file. The filename appears in amber text in the toolbar once loaded.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <strong>Set replay speed</strong>
+        <p>Use the Speed spinner: 0.1×, 0.25×, 0.5×, 1× (real-time), 2×, 4×, 8×, 16×, or 0 (unlimited speed — no timing delays).</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <strong>Click ⏵ Replay</strong>
+        <p>The canvas clears and traffic replays. Progress shows in the status bar as "packet N / total (%)". The topology builds as packets are processed.</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <strong>Click ⏹ Stop Replay to halt</strong>
+        <p>The topology freezes at the point where replay was stopped. You can then inspect flows and run AI queries against the replayed data.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box note">
+    <span class="icon">ℹ</span>
+    <p>Live capture and PCAP replay are mutually exclusive — you cannot run both at the same time. Starting a replay with a live capture active will do nothing.</p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="ea-font" class="section">
+  <div class="section-label">04 — EtherApe Monitor</div>
+  <h2>Font &amp; <span class="accent">Display</span></h2>
+
+  <p>Font controls are on the right side of <strong>Toolbar 2</strong> (the BPF filter row). They apply to everything in the EtherApe window simultaneously.</p>
+
+  <table class="ref-table">
+    <tbody><tr><th>Control</th><th>Description</th></tr>
+    <tr>
+      <td class="ctrl">Size spinner</td>
+      <td class="desc">Font size 6–24. Type a value and press Enter, or click the spinbox arrows. Takes effect on the next render tick (~200ms).</td>
+    </tr>
+    <tr>
+      <td class="ctrl">Font dropdown</td>
+      <td class="desc">Choose from: monospace, Consolas, Courier New, DejaVu Sans Mono, Arial, Helvetica, Tahoma.</td>
+    </tr>
+  </tbody></table>
+
+  <p>Font changes apply to:</p>
+  <ul class="feature-list">
+    <li>Canvas node labels and protocol legend</li>
+    <li>Active Hosts and Active Flows treeview rows and headers</li>
+    <li>Flow detail text panel</li>
+    <li>All toolbar labels, buttons, and entry fields</li>
+    <li>Status bar</li>
+  </ul>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="troubleshooting" class="section">
+  <div class="section-label">05 — Reference</div>
+  <h2><span class="accent">Troubleshooting</span></h2>
+
+  <h3>Packet Capture Fails Immediately</h3>
+  <div class="info-box danger">
+    <span class="icon">🔒</span>
+    <p><strong>Most common cause: not running as Administrator.</strong> Right-click the app shortcut → Run as administrator. Npcap requires elevated privileges to capture packets.</p>
+  </div>
+  <p>If you are running as admin and capture still fails, check:</p>
+  <ul class="feature-list">
+    <li>Npcap is installed — check Add/Remove Programs</li>
+    <li>Try a different interface from the dropdown</li>
+    <li>The error dialog will show the exact tshark error message</li>
+  </ul>
+
+  <h3>Speed Test Shows "All Attempts Failed"</h3>
+  <ul class="feature-list">
+    <li>Check that <code>speedtest.exe</code> is in the application install folder</li>
+    <li>Ensure your firewall / antivirus is not blocking speedtest.exe</li>
+    <li>Check your internet connection</li>
+    <li>The console output (if running with console=True) will show detailed error messages</li>
+  </ul>
+
+  <h3>EtherApe Shows "No Traffic"</h3>
+  <ul class="feature-list">
+    <li>Make sure you clicked ▶ Start (not just opened the window)</li>
+    <li>Check the selected interface has active traffic — try your Wi-Fi or Ethernet adapter</li>
+    <li>Loopback interface only shows local traffic between processes on the same machine</li>
+    <li>If using a BPF filter, verify the filter syntax is correct</li>
+  </ul>
+
+  <h3>AI Query Returns "401 Unauthorized"</h3>
+  <ul class="feature-list">
+    <li>Your API key is missing or incorrect — re-enter it in the API key field</li>
+    <li>Get a key at <strong>console.anthropic.com</strong> → API Keys → Create Key</li>
+    <li>Check that you clicked <span class="ui-el">Save Key</span> after entering it</li>
+  </ul>
+
+  <h3>Report Generation Fails</h3>
+  <ul class="feature-list">
+    <li>The report requires at least one entry — click ＋ Add to Report after getting an AI response</li>
+    <li>Check you have write permission to the chosen save location</li>
+    <li>Try saving to the Desktop if the chosen folder fails</li>
+  </ul>
+
+  <h3>DNS Gauge Shows 0</h3>
+  <p>The DNS gauge only updates when you click <span class="ui-el">⊙ MONITOR DNS</span>. It does not update automatically — click it whenever you want a fresh reading.</p>
+
+  <h3>Application Freezes During Heavy Capture</h3>
+  <p>The Wireshark Monitor uses a batched update system that inserts packets in groups of 150 every 100ms. If the UI feels sluggish with very high traffic, try applying a display or capture filter to reduce the packet rate.</p>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div id="shortcuts" class="section">
+  <div class="section-label">05 — Reference</div>
+  <h2>Quick <span class="accent">Reference</span></h2>
+
+  <h3>Main Dashboard</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Element</th><th>Action</th></tr>
+    <tr><td class="ctrl">▶ RUN SPEED TEST NOW</td><td class="desc">Trigger an immediate speed test</td></tr>
+    <tr><td class="ctrl">⊙ MONITOR DNS</td><td class="desc">Run a DNS resolution check now</td></tr>
+    <tr><td class="ctrl">⬇ EXPORT DATA</td><td class="desc">Open export dialog (CSV or JSON)</td></tr>
+    <tr><td class="ctrl">🦈 WIRESHARK</td><td class="desc">Open Wireshark Monitor window</td></tr>
+    <tr><td class="ctrl">◉ ETHERAPE</td><td class="desc">Open EtherApe topology window</td></tr>
+    <tr><td class="ctrl">View dial segments</td><td class="desc">Click to switch chart time window</td></tr>
+    <tr><td class="ctrl">CLR swatches (●)</td><td class="desc">Click to open colour picker for that channel</td></tr>
+  </tbody></table>
+
+  <h3>Wireshark Monitor</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Element</th><th>Action</th></tr>
+    <tr><td class="ctrl">▶ Start Capture</td><td class="desc">Begin capturing on selected interface</td></tr>
+    <tr><td class="ctrl">◼ Stop</td><td class="desc">Stop capture</td></tr>
+    <tr><td class="ctrl">⊘ Clear</td><td class="desc">Clear packets and delete temp PCAP</td></tr>
+    <tr><td class="ctrl">Right-click packet</td><td class="desc">Context menu: follow stream, copy IP, quick filter</td></tr>
+    <tr><td class="ctrl"><kbd>Enter</kbd> in filter</td><td class="desc">Apply display filter</td></tr>
+    <tr><td class="ctrl">Column header click</td><td class="desc">Sort by that column (click again to reverse)</td></tr>
+    <tr><td class="ctrl">✦ AI Query</td><td class="desc">Open AI analysis window</td></tr>
+  </tbody></table>
+
+  <h3>EtherApe Monitor</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Element</th><th>Action</th></tr>
+    <tr><td class="ctrl">▶ Start / ◼ Stop</td><td class="desc">Start or stop live packet capture</td></tr>
+    <tr><td class="ctrl">⊘ Clear</td><td class="desc">Reset topology — clear all nodes and flows</td></tr>
+    <tr><td class="ctrl">📂 Open PCAP</td><td class="desc">Load a PCAP for replay</td></tr>
+    <tr><td class="ctrl">⏵ Replay / ⏹ Stop</td><td class="desc">Start or stop PCAP replay</td></tr>
+    <tr><td class="ctrl">Click flow line</td><td class="desc">Show flow detail panel for nearest flow</td></tr>
+    <tr><td class="ctrl">Click Active Flows row</td><td class="desc">Show flow detail panel for selected row</td></tr>
+    <tr><td class="ctrl">Drag sash handles</td><td class="desc">Resize panels (canvas, hosts, flows, detail)</td></tr>
+    <tr><td class="ctrl">Size / Font controls</td><td class="desc">Adjust font for entire window (toolbar 2, right side)</td></tr>
+    <tr><td class="ctrl">Protocol dropdown</td><td class="desc">Filter displayed flows by protocol</td></tr>
+    <tr><td class="ctrl">Sort host column</td><td class="desc">Click Active Hosts column header to sort</td></tr>
+  </tbody></table>
+
+  <hr class="divider">
+
+  <h3>Data File Locations</h3>
+  <table class="ref-table">
+    <tbody><tr><th>File</th><th>Location</th></tr>
+    <tr><td class="ctrl">speedtest_data.json</td><td class="desc"><code>%TEMP%\speedtest_monitor\</code> — all speed test and DNS history</td></tr>
+    <tr><td class="ctrl">speedtest_config.json</td><td class="desc"><code>%TEMP%\speedtest_monitor\</code> — colour theme and settings</td></tr>
+    <tr><td class="ctrl">nm_wireshark.pcap</td><td class="desc"><code>%TEMP%\</code> — current Wireshark capture (overwritten each session)</td></tr>
+    <tr><td class="ctrl">.nm_anthropic_key</td><td class="desc"><code>%USERPROFILE%\</code> — saved Anthropic API key</td></tr>
+  </tbody></table>
+</div>
+
+
+<!-- Footer -->
+<div class="section" style="border-bottom:none; padding-bottom: 60px;">
+  <div style="text-align:center; color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 1px;">
+    <div style="margin-bottom:8px; color: var(--border);">◈ ◈ ◈</div>
+    NETWORK MONITOR USER MANUAL &nbsp;·&nbsp; VERSION 1.0<br>
+    Built with Python · matplotlib · tkinter · tshark · Claude API
+  </div>
+</div>
+
+</div><!-- /content -->
+
+
+
+</body></html>

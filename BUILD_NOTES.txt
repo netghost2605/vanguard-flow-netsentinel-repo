@@ -1,0 +1,94 @@
+INSTALLER BUILD INSTRUCTIONS
+============================
+
+Files in this folder:
+  build_installer.bat    — run this to build everything
+  installer.nsi          — NSIS installer script
+  speedtest_monitor.spec — PyInstaller spec (already configured)
+  speedtest_monitor.py   — main application
+
+
+PREREQUISITES (one-time setup)
+================================
+
+1. Python 3.10+
+   https://www.python.org/downloads/
+   ✓ Tick "Add Python to PATH" during install
+
+2. NSIS 3.x (Nullsoft Scriptable Install System)
+   https://nsis.sourceforge.io/Download
+   Install with default options.
+
+3. NSIS inetc Plugin  ← REQUIRED for downloading Wireshark/Nmap
+   https://nsis.sourceforge.io/Inetc_plug-in
+   
+   Install steps:
+     a. Download inetc.zip from the link above
+     b. Extract it
+     c. Copy  Plugins\x86-unicode\INetC.dll
+        into  C:\Program Files (x86)\NSIS\Plugins\x86-unicode\
+     d. Copy  Plugins\amd64-unicode\INetC.dll
+        into  C:\Program Files (x86)\NSIS\Plugins\amd64-unicode\
+
+4. Files that must be in this folder before building:
+     speedtest.exe   — Ookla CLI speedtest
+                       https://www.speedtest.net/apps/cli
+     icon.ico        — (optional) application icon
+     bg.jpg          — background image (already present)
+
+
+HOW TO BUILD
+=============
+
+Simply double-click:  build_installer.bat
+
+It will:
+  1. Install Python dependencies (numpy, matplotlib, etc.)
+  2. Run PyInstaller to build SpeedtestMonitor.exe
+  3. Run NSIS to package everything into NetworkMonitorSetup.exe
+  4. Launch the installer automatically when done
+
+
+WHAT THE INSTALLER DOES ON THE TARGET MACHINE
+===============================================
+
+When a user runs NetworkMonitorSetup.exe it will:
+
+  ✓ Install SpeedtestMonitor.exe to:
+    C:\Program Files\NetworkMonitor\
+
+  ✓ Download and silently install Wireshark (latest)
+    — Includes Npcap driver for packet capture
+    — Skipped if Wireshark is already installed
+
+  ✓ Download and silently install Nmap 7.95
+    — Skipped if Nmap is already installed
+
+  ✓ Create Desktop shortcut
+
+  ✓ Create Start Menu folder with shortcut + uninstaller link
+
+  ✓ Register proper Add/Remove Programs entry with:
+    — Version number, publisher, install size
+    — One-click uninstall
+
+  ✓ Uninstaller removes only Network Monitor
+    — Wireshark and Nmap are left intact (user's choice)
+
+
+NOTES
+======
+
+- The installer requires an internet connection to download
+  Wireshark and Nmap. Both are ~100 MB combined.
+
+- Packet capture (Wireshark/EtherApe features) requires
+  the user to run Network Monitor as Administrator.
+
+- To update download URLs (e.g. newer Nmap version), edit
+  the !define lines near the top of installer.nsi
+
+- To sign the installer (recommended for distribution):
+  signtool sign /fd sha256 /t http://timestamp.digicert.com
+               /f yourcert.pfx /p yourpassword
+               NetworkMonitorSetup.exe

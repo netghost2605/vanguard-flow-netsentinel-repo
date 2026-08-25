@@ -1,0 +1,179 @@
+{
+  "api": {
+    "/api/agents": {
+      "keys": [
+        "agents"
+      ],
+      "status": 200
+    },
+    "/api/analysis": {
+      "keys": [
+        "capturing",
+        "kind",
+        "sections"
+      ],
+      "status": 200
+    },
+    "/api/attack_sim": {
+      "keys": [
+        "hosts",
+        "on"
+      ],
+      "status": 200
+    },
+    "/api/firewall": {
+      "keys": [
+        "backend",
+        "blocked",
+        "count",
+        "elevated",
+        "killswitch",
+        "logging",
+        "names",
+        "recent",
+        "rules"
+      ],
+      "status": 200
+    },
+    "/api/honeypot": {
+      "keys": [
+        "hits",
+        "running",
+        "tarpit_active",
+        "tarpit_enabled",
+        "tarpit_seconds",
+        "top",
+        "total",
+        "unique_ips"
+      ],
+      "status": 200
+    },
+    "/api/killswitch": {
+      "keys": [
+        "active"
+      ],
+      "status": 200
+    },
+    "/api/threats": {
+      "keys": [
+        "critical",
+        "located",
+        "now",
+        "threats",
+        "total",
+        "unlocated"
+      ],
+      "status": 200
+    },
+    "/api/topology3d": {
+      "keys": [
+        "attack_sim",
+        "block_events",
+        "flows",
+        "nodes",
+        "open",
+        "tick",
+        "vpn",
+        "vpn_active"
+      ],
+      "status": 200
+    }
+  },
+  "static": {
+    "/": {
+      "bytes": 24325,
+      "sha256": "c98f84371867bb1d14bd4af9c29b1ec9a827477c0ba8d2c7b6500715a0ccd6ac",
+      "status": 200
+    },
+    "/3d": {
+      "bytes": 195612,
+      "sha256": "8c0b2af5b6c32b3350b6d6e181ae8098927f820a212cc2183c329891af1440e1",
+      "status": 200
+    },
+    "/agents": {
+      "bytes": 5628,
+      "sha256": "2a74a8ddbc5de566e826e5d6608901ca4e952d9a2ee98fd1f90deff87b6a7c74",
+      "status": 200
+    },
+    "/analytics": {
+      "bytes": 7491,
+      "sha256": "9552ebe36403ec8cbc7bb4890056eba70db3b505cdbc08d5f6b579731ecd92c1",
+      "status": 200
+    },
+    "/day-map.jpg": {
+      "bytes": 130766,
+      "sha256": "8b3e92f34017b4b46d19f1226fbfe58bc34a77805767dc4d1444ed54f3c3b946",
+      "status": 200
+    },
+    "/guide": {
+      "bytes": 65137,
+      "sha256": "260bc448b293a7b001cac717103056ddd51b9f3f0059def89e91495eafcbb9db",
+      "status": 200
+    },
+    "/honeypot": {
+      "bytes": 16068,
+      "sha256": "76809d1031dd0558660e05d7b8cfa2491f878af587ba2236428d64fe52ef9e83",
+      "status": 200
+    },
+    "/icon-192.png": {
+      "bytes": 2215,
+      "sha256": "453b09998dd9372f8ea47645b7a73e452a029919de335c64e0c805b0410e4758",
+      "status": 200
+    },
+    "/icon-512.png": {
+      "bytes": 6435,
+      "sha256": "92380ebe3f15db048cab4ed4461b2a302661f9d71023aa2f50267d0d24b40c2e",
+      "status": 200
+    },
+    "/manifest.webmanifest": {
+      "bytes": 487,
+      "sha256": "1ceb790a87b0546fb862996b43fc4166dabb5a373848220f72aa8717a69956c0",
+      "status": 200
+    },
+    "/monitor": {
+      "bytes": 18114,
+      "sha256": "2c12fb6440b874da62c90e305bea65bb63c83e8c286af6822e893c810f283411",
+      "status": 200
+    },
+    "/radar-map.png": {
+      "bytes": 63870,
+      "sha256": "b65accb1772d433d423cbed49c10316d04cdd7224094914e04b498c41d89aae0",
+      "status": 200
+    },
+    "/sankey": {
+      "bytes": 31825,
+      "sha256": "681f338507458b4e2949bdb30f6851e01b1b5255762ce3d5b0cc25a8f1589c1a",
+      "status": 200
+    },
+    "/sonar.mp3": {
+      "bytes": 13627,
+      "sha256": "42f2cb6acc4d9b4587bb707ecc0d311f90cb287c2a341650f67e4e1ebb04c059",
+      "status": 200
+    },
+    "/sw.js": {
+      "bytes": 2059,
+      "sha256": "76e828dad85aa6f7c6166047b2fcf62953403e81ac95a5055a569ea3c2cc5243",
+      "status": 200
+    },
+    "/talkers": {
+      "bytes": 8234,
+      "sha256": "58da4b71a021d67569f29eb172837d8e638f59ee26d7b35f607a0b4fb4df5251",
+      "status": 200
+    },
+    "/threats": {
+      "bytes": 11137,
+      "sha256": "831c1ea75569f0682f03c8f99a63d837ebd84fb890a1df122550a8b13536de46",
+      "status": 200
+    },
+    "/vdi": {
+      "bytes": 5077,
+      "sha256": "d20d7707cfcd44e6309fa1edf48fdad41b20f3a8bb382ab47294c1cb3f662d43",
+      "status": 200
+    },
+    "/world-map.jpg": {
+      "bytes": 81603,
+      "sha256": "c70432b2445947bca92361ffa4927b5c9a82b68760c0ff34278a982329c61513",
+      "status": 200
+    }
+  }
+}

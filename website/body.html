@@ -1,0 +1,213 @@
+<header class="mast"><div class="wrap">
+  <div class="logo">Vanguard Flow <span>NetSentinel</span></div>
+  <nav>
+    <a href="#evidence">Evidence</a>
+    <a href="#watch">What it watches</a>
+    <a href="#pricing">Pricing</a>
+  </nav>
+  <a class="btn" href="#pricing">Download trial</a>
+</div></header>
+
+<div class="wrap hero">
+  <div class="eyebrow">Broadband measurement &amp; network forensics &middot; Windows</div>
+  <h1>Your provider says 500&nbsp;Mbps. <em>Prove what you actually get.</em></h1>
+  <p class="lede">NetSentinel tests your line around the clock, records every result, and
+  turns months of measurement into a dated report you can put in front of your provider,
+  your landlord, or an ombudsman.</p>
+  <div class="cta-row">
+    <a class="btn" href="#pricing">Download the 14-day trial</a>
+    <a class="btn ghost" href="#evidence">See what the report contains</a>
+    <span class="note">Windows 10/11 &middot; 64-bit</span>
+  </div>
+
+  <figure class="strip">
+    <figcaption class="strip-head">
+      <b>Fig. 1</b> &mdash; Download, 24&nbsp;h sample
+      <span class="sp">line rate 500 Mbps &middot; {{TESTS}} tests &middot; 5&nbsp;min interval</span>
+    </figcaption>
+    <div class="strip-body">
+      {{SVG}}
+      <div class="verdict">
+        <div class="k">Median measured</div>
+        <div class="big">{{PCT_ALL}}%</div>
+        <div class="sub">of the advertised rate across the sample. Between 17:00 and
+        23:30 the median fell to <b>{{PCT_PEAK}}%</b>.</div>
+        <div class="stamp">Below advertised rate<br>on {{BELOW}} of {{TESTS}} tests</div>
+      </div>
+    </div>
+  </figure>
+</div>
+
+<hr class="rule">
+
+<section id="evidence"><div class="wrap">
+  <div class="sec-head">
+    <h2>An argument you can hand over</h2>
+    <p>A screenshot of a speed test proves nothing. The evidence pack is eight pages of
+    dated measurement: what you were sold, what arrived, and exactly when it didn't.</p>
+  </div>
+  <div class="cols">
+    <div>
+      <span class="plate-ref">Plate A &mdash; report builder</span>
+      <div class="plate">{{PLATE_REPORT}}</div>
+      <p class="caption">Pick the period and the sections you want. Reports can also run
+      to a schedule and land in a folder you choose.</p>
+    </div>
+    <div>
+      <dl class="facts">
+        <div class="fact"><dt>Page 1</dt><dd><b>Availability and download.</b> Uptime,
+          outage count and duration, median, mean and spread, the full percentile range,
+          and how many tests fell below 90%, 75% and 50% of advertised.</dd></div>
+        <div class="fact"><dt>Peak hours</dt><dd>Median download between 17:00 and 23:00
+          set against the rest of the day &mdash; the same basis providers advertise on.</dd></div>
+        <div class="fact"><dt>Page 2</dt><dd><b>Upload and latency.</b> Percentiles against
+          advertised, ping median through to P99, and jitter.</dd></div>
+        <div class="fact"><dt>Pages 3&ndash;6</dt><dd>Download, upload and latency plotted
+          across the whole period with outages shaded, plus the distribution of every result.</dd></div>
+        <div class="fact"><dt>Pages 7&ndash;8</dt><dd>A day-by-day breakdown and a numbered
+          outage log with start, end and duration.</dd></div>
+      </dl>
+    </div>
+  </div>
+</div></section>
+
+<section class="band" id="watch"><div class="wrap">
+  <div class="sec-head">
+    <h2>And it shows you where the traffic went</h2>
+    <p>The same capture that proves your line is slow also shows what is using it: live
+    topology, per-host volumes, and real geography from real packets.</p>
+  </div>
+  <div style="margin-bottom:36px">
+    <span class="plate-ref">Plate B &mdash; main dashboard</span>
+    <div class="plate">{{PLATE_MAIN}}</div>
+    <p class="caption">Download, upload, latency and DNS on whatever interval you set,
+    with the full history kept on your machine.</p>
+  </div>
+  <div class="cols">
+    <div>
+      <span class="plate-ref">Plate C &mdash; world view</span>
+      <div class="plate">{{PLATE_WORLD}}</div>
+      <p class="caption">Every host placed at its real coordinates, on a globe lit by the
+      actual position of the sun.</p>
+    </div>
+    <div>
+      <span class="plate-ref">Plate D &mdash; sonar</span>
+      <div class="plate">{{PLATE_RADAR}}</div>
+      <p class="caption">Contacts by location, with an audible ping the first time a host
+      you have never seen before appears.</p>
+    </div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <div class="sec-head">
+    <h2>Measured from the wire</h2>
+    <p>Capture runs through Wireshark's engine, so the numbers come from actual packets
+    rather than an estimate.</p>
+  </div>
+  <div class="cols">
+    <div>
+      <span class="plate-ref">Plate E &mdash; capture analysis</span>
+      <div class="plate">{{PLATE_CAPTURE}}</div>
+      <p class="caption">Protocol breakdown, per-conversation volumes, and the flows behind
+      them.</p>
+    </div>
+    <div>
+      <span class="plate-ref">Plate F &mdash; connection quality</span>
+      <div class="plate">{{PLATE_QUALITY}}</div>
+      <p class="caption">Jitter, loss and stability scored over time, so intermittent
+      trouble shows up as a pattern rather than a bad afternoon.</p>
+    </div>
+  </div>
+  <div class="cols-3" style="margin-top:46px">
+    <div>
+      <h3>Remote sites</h3>
+      <p class="small">Run a small agent on another site and watch every connection from
+      one screen &mdash; speeds, CPU, memory, disk and temperature.</p>
+    </div>
+    <div>
+      <h3>Blocking and alerts</h3>
+      <p class="small">Block a host, or a whole country, at the Windows firewall. Get told
+      when the line drops, latency climbs, or something new appears.</p>
+    </div>
+    <div>
+      <h3>Scheduled reports</h3>
+      <p class="small">Hourly, daily or weekly, written to a folder you choose, with a
+      notification when each one lands.</p>
+    </div>
+  </div>
+</div></section>
+
+<hr class="rule">
+
+<section id="pricing"><div class="wrap">
+  <div class="sec-head">
+    <h2>Pricing</h2>
+    <p>Buy it once. It runs on your machine and your measurements stay there.</p>
+  </div>
+  <div class="tiers">
+    <div class="tier">
+      <h3>Trial</h3>
+      <p class="who">Long enough to catch a bad evening or two.</p>
+      <div class="price">Free</div>
+      <div class="per">14 days &middot; no card</div>
+      <ul>
+        <li>Every feature unlocked</li>
+        <li>Evidence pack included</li>
+        <li>Reports carry a trial mark</li>
+      </ul>
+      <a class="btn ghost" href="#">Download</a>
+    </div>
+    <div class="tier pick">
+      <h3>Home</h3>
+      <p class="who">One machine, for anyone arguing with their provider.</p>
+      <div class="price">&pound;39</div>
+      <div class="per">one-off &middot; incl. VAT</div>
+      <ul>
+        <li>Clean, unmarked evidence packs</li>
+        <li>Unlimited history</li>
+        <li>One remote agent</li>
+        <li>Updates for 12 months</li>
+      </ul>
+      <a class="btn" href="#">Buy Home</a>
+    </div>
+    <div class="tier">
+      <h3>Professional</h3>
+      <p class="who">For consultants reporting to a client.</p>
+      <div class="price">&pound;179</div>
+      <div class="per">per seat, per year</div>
+      <ul>
+        <li>Your logo on every report</li>
+        <li>Unlimited remote agents</li>
+        <li>Licensed for client work</li>
+        <li>Priority support</li>
+      </ul>
+      <a class="btn ghost" href="#">Buy Professional</a>
+    </div>
+  </div>
+  <p class="note" style="margin-top:22px">Licences are per machine and transferable. If the
+  evidence pack doesn't help your case within 30 days, ask for a refund.</p>
+</div></section>
+
+<footer><div class="wrap cols-3">
+  <div>
+    <b>Requirements</b>
+    <p class="small">Windows 10 or 11, 64-bit. Packet capture needs Wireshark installed
+    (free, from wireshark.org) &mdash; NetSentinel uses it rather than bundling it. Speed
+    testing needs a speed-test command-line tool on the machine.</p>
+  </div>
+  <div>
+    <b>Your data</b>
+    <p class="small">Everything is measured and stored on your own machine. No account, no
+    telemetry, nothing uploaded. The reports are files you own.</p>
+  </div>
+  <div>
+    <b>Honest limits</b>
+    <p class="small">This measures the connection as your machine sees it. That is a strong
+    record of what you receive, but it is not a regulator-certified test, and it cannot
+    diagnose faults inside your provider's network.</p>
+  </div>
+</div>
+<div class="wrap" style="margin-top:26px;font-family:var(--mono);font-size:12px">
+  &copy; 2026 Vanguard Flow &middot; Wireshark is a registered trademark of the Wireshark Foundation.
+</div></footer>

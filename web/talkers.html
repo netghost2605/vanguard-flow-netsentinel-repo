@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Top Talkers</title>
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;background:#050d1a;color:#c8dff0;font-family:Consolas,monospace;}
+  #bar{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:12px;
+    padding:8px 14px;background:rgba(4,10,24,0.96);border-bottom:1px solid #0a1e30;backdrop-filter:blur(4px);}
+  #bar a.back{text-decoration:none;color:#39ff14;font-weight:bold;font-size:12px;padding:4px 11px;
+    border:1px solid #1a4a2a;border-radius:6px;background:rgba(57,255,20,0.10);white-space:nowrap;}
+  #bar .ttl{font-size:13px;font-weight:bold;color:#4cc9f0;letter-spacing:1px;white-space:nowrap;}
+  #bar .sub{font-size:11px;color:#2a5a7a;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  #bar button{color:#3ec6ff;font-weight:bold;font-size:11px;padding:4px 11px;border:1px solid #1d5b80;
+    border-radius:6px;background:rgba(62,198,255,0.10);cursor:pointer;white-space:nowrap;}
+  #err{color:#ff5d73;font-size:11px;padding:6px 14px;}
+  #wrap{padding:6px 14px 40px;}
+  table{width:100%;border-collapse:collapse;font-size:12px;}
+  thead th{position:sticky;top:45px;background:#061426;color:#4f93dd;text-align:left;
+    font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:8px;border-bottom:1px solid #12283f;z-index:4;}
+  tbody td{padding:8px;border-bottom:1px solid #0c1c30;vertical-align:middle;}
+  tbody tr:hover{background:rgba(76,201,240,0.05);}
+  td.rank{color:#2a5a7a;font-weight:bold;width:34px;text-align:right;}
+  td.host .nm{color:#d9e8f5;font-weight:bold;}
+  td.host .ip{color:#3a6a8a;font-size:10px;}
+  td.org{color:#8fb4cc;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .proto{font-size:9px;font-weight:bold;letter-spacing:1px;border:1px solid;border-radius:4px;padding:2px 6px;}
+  td.bytes{min-width:150px;}
+  td.bytes .bt{font-weight:bold;color:#d9e8f5;margin-bottom:3px;}
+  td.bytes .bar{height:5px;background:#0a1e30;border-radius:3px;overflow:hidden;}
+  td.bytes .fill{height:100%;border-radius:3px;}
+  td.num{text-align:right;color:#9fc0d8;}
+  .tag{display:inline-block;font-size:9px;font-weight:bold;border:1px solid;border-radius:4px;
+    padding:1px 5px;margin-left:6px;vertical-align:middle;}
+  #empty{display:none;flex-direction:column;align-items:center;justify-content:center;
+    height:70vh;text-align:center;color:#74c7ec;gap:10px;}
+  #empty .big{font-size:26px;}
+  #empty .hint{font-size:11px;color:#2a5a7a;max-width:360px;line-height:1.8;
+    border:1px solid #0d2030;padding:10px 14px;border-radius:4px;}
+</style></head><body>
+<div id="bar">
+  <a class="back" href="/">&#8592; Back</a>
+  <span class="ttl">&#9638; TOP TALKERS</span>
+  <span class="sub" id="sub"></span>
+  <span id="vpnpill" title="" style="font:700 10px monospace;letter-spacing:1px;
+    padding:3px 8px;border-radius:6px;border:1px solid #234;color:#6a9ab8;
+    white-space:nowrap">&#9675; VPN</span>
+  <button id="pauseBtn" onclick="togglePause()">&#10073;&#10073; PAUSE</button>
+</div>
+<div id="err"></div>
+<div id="empty">
+  <div class="big">&#11041;</div>
+  <div style="color:#38b8f0;font-weight:bold">No traffic yet</div>
+  <div class="hint">Open <b style="color:#a371f7">&#9678; TOPOLOGY</b> in the main dashboard and start a capture.<br>
+    Busiest hosts appear here automatically, ranked by bytes.</div>
+</div>
+<div id="wrap" style="display:none">
+  <table>
+    <thead><tr>
+      <th style="text-align:right">#</th><th>Host</th><th>Org / Country</th>
+      <th>Proto</th><th>Traffic</th><th style="text-align:right">Packets</th><th style="text-align:right">Share</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+<script>
+var PAUSED=false;
+function fmtBytes(b){b=+b||0;var u=["B","KB","MB","GB","TB"],i=0;
+  while(b>=1024&&i<u.length-1){b/=1024;i++;}
+  return (b<10&&i>0?b.toFixed(1):Math.round(b))+" "+u[i];}
+// Protocol colours — identical map to the Flow Talkers (sankey) view.
+var PC={tcp:'#38b8f0',http:'#38b8f0',https:'#39ff14',tls:'#39ff14',ssl:'#39ff14',
+        udp:'#c084fc',quic:'#c084fc',dns:'#ff9f43',icmp:'#ff6b6b',ntp:'#ffd93d',other:'#7a94ad'};
+function protoColor(p){p=(p||'').toLowerCase();return PC[p]||PC.other;}
+function esc(s){var d=document.createElement("div");d.textContent=(s==null?"":String(s));return d.textContent;}
+function tag(txt,col){var s=document.createElement("span");s.className="tag";s.textContent=txt;
+  s.style.color=col;s.style.borderColor=col;return s;}
+function tdnum(txt){var d=document.createElement("td");d.className="num";d.textContent=txt;return d;}
+function paintVpn(d){
+  var el=document.getElementById('vpnpill'); if(!el) return;
+  var v=(d&&d.vpn)||{}, on=!!(d&&d.vpn_active);
+  el.textContent = on ? ('\ud83d\udd12 '+String(v.provider||'VPN').toUpperCase()+' ACTIVE')
+                      : '\u26a0 VPN INACTIVE';
+  el.style.color       = on ? '#39ff14' : '#ff9f43';
+  el.style.borderColor = on ? '#1a4a2a' : '#5a3a10';
+  el.style.background  = on ? 'rgba(10,60,20,.45)' : 'rgba(90,45,10,.45)';
+  el.title = (v.iface ? v.iface+' \u2014 ' : '')+(v.reason||'');
+}
+function render(d){
+  document.getElementById("err").textContent="";
+  paintVpn(d);
+  var nodes=(d.nodes||[]).slice().sort(function(a,b){return (b.bytes||0)-(a.bytes||0);});
+  var wrap=document.getElementById("wrap"), empty=document.getElementById("empty");
+  if(!nodes.length){empty.style.display="flex";wrap.style.display="none";
+    document.getElementById("sub").textContent="";return;}
+  empty.style.display="none";wrap.style.display="block";
+  var total=nodes.reduce(function(s,n){return s+(n.bytes||0);},0)||1;
+  var max=nodes[0].bytes||1;
+  document.getElementById("sub").textContent=nodes.length+" hosts \u00b7 "+fmtBytes(total)+" total \u00b7 updated "+new Date().toLocaleTimeString();
+  var tb=document.getElementById("tbody");tb.textContent="";
+  nodes.slice(0,100).forEach(function(n,i){
+    var tr=document.createElement("tr");
+    var r=document.createElement("td");r.className="rank";r.textContent=(i+1);tr.appendChild(r);
+    var h=document.createElement("td");h.className="host";
+    var nm=document.createElement("div");nm.className="nm";
+    nm.textContent=(n.flag?n.flag+" ":"")+esc(n.label||n.id);h.appendChild(nm);
+    var ip=document.createElement("div");ip.className="ip";ip.textContent=esc(n.id);h.appendChild(ip);
+    if(n.blocked)h.appendChild(tag("\u26d4 blocked","#ff4444"));
+    if(n.suspicious)h.appendChild(tag("\u26a0 suspicious","#ffb000"));
+    if(n.local)h.appendChild(tag("LAN","#39ff14"));
+    tr.appendChild(h);
+    var o=document.createElement("td");o.className="org";o.textContent=esc(n.org||n.country||"\u2014");tr.appendChild(o);
+    var p=document.createElement("td");var pb=document.createElement("span");pb.className="proto";
+    pb.textContent=(n.proto||"other").toUpperCase();var pc=protoColor(n.proto);
+    pb.style.color=pc;pb.style.borderColor=pc;p.appendChild(pb);tr.appendChild(p);
+    var bc=document.createElement("td");bc.className="bytes";
+    var bt=document.createElement("div");bt.className="bt";bt.textContent=fmtBytes(n.bytes);bc.appendChild(bt);
+    var bar=document.createElement("div");bar.className="bar";
+    var fill=document.createElement("div");fill.className="fill";
+    fill.style.width=Math.max(2,Math.round((n.bytes||0)/max*100))+"%";fill.style.background=pc;
+    bar.appendChild(fill);bc.appendChild(bar);tr.appendChild(bc);
+    tr.appendChild(tdnum((n.pkts||0).toLocaleString()));
+    tr.appendChild(tdnum((100*(n.bytes||0)/total).toFixed(1)+"%"));
+    tb.appendChild(tr);
+  });
+}
+function load(){
+  fetch("/api/topology3d",{cache:"no-store"})
+   .then(function(r){return r.json();})
+   .then(render)
+   .catch(function(e){document.getElementById("err").textContent="Error: "+e.message;});
+}
+function tick(){if(!PAUSED)load();}
+function togglePause(){PAUSED=!PAUSED;var b=document.getElementById("pauseBtn");
+  b.innerHTML=PAUSED?"\u25b6 RESUME":"\u2759\u2759 PAUSE";
+  b.style.color=PAUSED?"#39ff14":"#3ec6ff";b.style.borderColor=PAUSED?"#1a4a2a":"#1d5b80";
+  if(!PAUSED)load();}
+load();setInterval(tick,2000);
+</script>
+</body></html>

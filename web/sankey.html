@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Top Flow Talkers</title>
+<meta name="theme-color" content="#050d1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+ :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+ body{background:var(--bg);color:var(--text);
+   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+   padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px);min-height:100vh;
+   -webkit-font-smoothing:antialiased;max-width:600px;margin:0 auto;}
+ header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
+ header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
+ header h1{font-size:16px;font-weight:650;}
+ header .dot{margin-left:auto;width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
+ header .dot.live{background:#39ff14;box-shadow:0 0 8px #39ff14;}
+ .sub{font-size:11.5px;color:var(--tick);padding:0 2px 14px;}
+ .sec{font-size:11px;color:var(--tick);text-transform:uppercase;letter-spacing:.8px;margin:6px 2px 10px;}
+ .flow{margin-bottom:12px;}
+ .fhead{display:flex;align-items:center;gap:7px;font-size:12.5px;margin-bottom:5px;}
+ .fhead .pd{width:9px;height:9px;border-radius:50%;flex:none;}
+ .fhead .ep{max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;font-size:12px;}
+ .fhead .ar{color:var(--tick);flex:none;}
+ .fhead .vol{margin-left:auto;flex:none;color:var(--text);font-variant-numeric:tabular-nums;font-weight:600;font-size:12px;}
+ .track{height:8px;background:#0c1a2c;border-radius:5px;overflow:hidden;}
+ .fill{height:100%;border-radius:5px;min-width:5px;transition:width .4s ease;}
+ .map{width:100vw;margin-left:calc(50% - 50vw);background:radial-gradient(120% 95% at 50% 0%,#0b2138,#050d1a);border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:16px 8px;}
+ .map svg{width:100%;height:auto;max-height:80vh;display:block;}
+ .legend{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:12px;font-size:11px;color:var(--tick);}
+ .legend span{display:inline-flex;align-items:center;gap:5px;}
+ .legend i{width:10px;height:10px;border-radius:3px;display:inline-block;}
+ .barwrap{max-width:600px;margin:14px auto 0;}
+ .ribbon{transition:stroke-width .45s ease;}
+ .parts circle{pointer-events:none;}
+ .empty{color:var(--tick);text-align:center;padding:56px 20px;font-size:13px;line-height:1.75;}
+ footer{text-align:center;color:var(--tick);font-size:11px;margin-top:22px;opacity:.6;}
+
+#layout{display:grid;grid-template-columns:minmax(0,1fr) 430px;gap:12px;
+  align-items:start;max-width:100%;box-sizing:border-box;padding-right:12px}
+/* Grid children default to min-width:auto, so a wide SVG stretches the
+   whole grid past the viewport and pushes the side panel off screen. */
+#layout>*{min-width:0}
+#content{min-width:0;overflow:hidden}
+@media(max-width:1100px){#layout{grid-template-columns:1fr}}
+#side{display:flex;flex-direction:column;gap:10px;padding:0 12px 20px 0}
+.pnl{background:#0a1828;border:1px solid #12283e;border-radius:7px;overflow:hidden}
+.pnl h3{margin:0;padding:7px 10px;font-size:11px;letter-spacing:1px;color:#38b8f0;
+  background:#081422;border-bottom:1px solid #12283e;display:flex;align-items:center;gap:8px}
+.abtns{margin-left:auto;display:flex;gap:5px}
+.abtns button{background:#0d2235;border:1px solid #1f4a6a;color:#8ab8d0;
+  font:700 9px Consolas,monospace;padding:2px 7px;border-radius:4px;cursor:pointer}
+.abtns button:hover{background:#16324a;color:#fff}
+.tw{max-height:210px;overflow:auto;padding:6px 8px}
+#analysis,#detail{max-height:230px}
+.pnl table{width:100%;border-collapse:collapse;font-size:11px}
+.pnl th{text-align:left;color:#6a9ab8;font-weight:600;padding:3px 5px;
+  border-bottom:1px solid #12283e;position:sticky;top:0;background:#0a1828}
+.pnl td{padding:3px 5px;color:#c8dff0;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;max-width:130px}
+.pnl tr.sel td{background:#16324a}
+.pnl tr:hover td{background:#102336;cursor:pointer}
+.dim{color:#6a9ab8;font-size:11px;padding:6px 2px}
+.sev{font-weight:700;margin-right:6px}
+.HIGH{color:#ff4444}.MED{color:#ff9f43}.INFO{color:#6a9ab8}.OK{color:#38f0a8}
+.asec{color:#38b8f0;font-size:11px;margin:7px 0 3px;font-weight:700}
+.aitem{font-size:11px;color:#c8dff0;margin:0 0 5px}
+.aitem small{display:block;color:#8ab8d0}
+path.rib{cursor:pointer;transition:stroke-width .12s}
+path.rib:hover{stroke-width:14}
+
+/* The page was designed mobile-first (body capped at 600px, with .map using a
+   full-bleed breakout). With the desktop side panels that leaves the map a thin
+   strip, so on wide screens the cap is lifted and the breakout neutralised. */
+@media(min-width:1100px){
+  body{max-width:none;margin:0;padding:0 14px}
+  #layout{grid-template-columns:minmax(0,1fr) 430px}
+  #content .map{width:auto;margin-left:0;border-radius:8px;
+    border:1px solid var(--line);padding:14px 10px}
+  .barwrap{max-width:none}
+  #content .map svg{width:100%;height:auto;max-height:78vh}
+}
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="/">&#8592;</a>
+  <h1>Top Flow Talkers</h1>
+  <div class="dot" id="dot"></div>
+</header>
+<div class="sub" id="sub">Loading flows&#8230;</div>
+<div id="scrub" style="display:flex;align-items:center;gap:8px;padding:2px 2px 12px">
+  <button id="liveBtn" onclick="goLive()" style="font-size:10px;font-weight:700;color:#39ff14;background:rgba(57,255,20,0.08);border:1px solid #1a4a2a;border-radius:6px;padding:4px 9px;cursor:pointer;white-space:nowrap">LIVE</button>
+  <button id="atkBtn" onclick="toggleAtk()" style="font-size:10px;font-weight:700;color:#ff6a6a;background:rgba(255,60,40,0.08);border:1px solid #5a1a1a;border-radius:6px;padding:4px 9px;cursor:pointer;white-space:nowrap;opacity:0.6" title="Simulated hostile sources — drill only">&#9760; ATTACK SIM</button>
+  <button id="blockedpill" onclick="showFw()" title="Blocked hosts - click for the rules"
+    style="display:none;font-size:10px;font-weight:700;color:#ff6a6a;
+    background:rgba(255,60,40,0.10);border:1px solid #5a1a1a;border-radius:6px;
+    padding:4px 9px;cursor:pointer;white-space:nowrap">&#9940; 0 blocked</button>
+  <button id="fwlink" onclick="showFw()" title="View firewall rules"
+    style="font-size:10px;font-weight:700;color:#ffc46a;
+    background:rgba(200,150,40,0.10);border:1px solid #5a4a1a;border-radius:6px;
+    padding:4px 9px;cursor:pointer;white-space:nowrap">&#9940; FIREWALL</button>
+  <input id="scrubber" type="range" min="0" max="0" value="0" step="1" oninput="onScrub(this.value)" style="flex:1;accent-color:#39ff14;cursor:pointer">
+  <span id="scrubTime" style="font-size:11px;color:var(--tick);font-variant-numeric:tabular-nums;min-width:58px;text-align:right">buffering...</span>
+</div>
+<div id="vpnpill" title="" style="position:fixed;left:14px;top:96px;z-index:40;
+  pointer-events:none;font:700 10px monospace;letter-spacing:1px;padding:4px 9px;
+  border-radius:6px;border:1px solid #234;color:#6a9ab8">○ VPN — checking…</div>
+<div id="blasts" style="position:fixed;right:14px;top:96px;z-index:40;pointer-events:none"></div>
+<div id="fwoverlay" style="display:none;position:fixed;left:50%;top:50%;
+  transform:translate(-50%,-50%);z-index:70;width:min(720px,90vw);max-height:80vh;
+  background:rgba(4,12,24,.98);border:1px solid #1f5a7a;border-radius:10px;
+  box-shadow:0 18px 60px rgba(0,0,0,.75);font-family:Consolas,monospace;overflow:hidden">
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+    background:rgba(10,24,40,.95);border-bottom:1px solid #163a52">
+    <span style="color:#ff9f43;font-size:12px;font-weight:bold;letter-spacing:1.5px">&#9940; FIREWALL RULES</span>
+    <span id="fwsub" style="color:#6a9ab8;font-size:11px;flex:1"></span>
+    <button onclick="fwRefresh()" style="background:#0d2235;border:1px solid #1f5a7a;
+      color:#8ab8d0;font-family:inherit;font-size:11px;padding:3px 10px;border-radius:5px;
+      cursor:pointer">&#10227; refresh</button>
+    <button onclick="hideFw()" style="background:#0d2235;border:1px solid #1f5a7a;
+      color:#8ab8d0;font-family:inherit;font-size:11px;padding:3px 10px;border-radius:5px;
+      cursor:pointer">&#10005; close</button>
+  </div>
+  <div id="fwbody" style="padding:12px 14px;color:#c8dff0;font-size:12px;
+    overflow-y:auto;max-height:68vh"></div>
+</div>
+<div id="layout">
+  <div id="content"></div>
+  <aside id="side">
+    <div class="pnl"><h3>Active Hosts</h3><div class="tw"><table id="tHosts"></table></div></div>
+    <div class="pnl"><h3>Active Flows</h3><div class="tw"><table id="tFlows"></table></div></div>
+    <div class="pnl">
+      <h3>Analysis
+        <span class="abtns">
+          <button onclick="runAnalysis('behav')">&#9888; BEHAV</button>
+          <button onclick="runAnalysis('traffic')">&#9678; TRAFFIC</button>
+          <button onclick="runAnalysis('ids')">&#9873; IDS</button>
+        </span>
+      </h3>
+      <div class="tw" id="analysis"><div class="dim">Pick an analysis.</div></div>
+    </div>
+    <div class="pnl"><h3>Flow Detail</h3>
+      <div class="tw" id="detail"><div class="dim">Click a ribbon or a flow row.</div></div>
+    </div>
+  </aside>
+</div>
+<footer id="foot"></footer>
+<script>
+var $=function(i){return document.getElementById(i);};
+var PC={tcp:'#38b8f0',http:'#38b8f0',https:'#39ff14',tls:'#39ff14',ssl:'#39ff14',
+        udp:'#c084fc',quic:'#c084fc',dns:'#ff9f43',icmp:'#ff6b6b',ntp:'#ffd93d',other:'#7a94ad'};
+function pcol(p){p=(p||'').toLowerCase();return PC[p]||PC.other;}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function human(b){b=b||0;if(b>=1073741824)return (b/1073741824).toFixed(1)+' GB';if(b>=1048576)return (b/1048576).toFixed(1)+' MB';if(b>=1024)return (b/1024).toFixed(0)+' KB';return b+' B';}
+
+function barList(top,maxB,nl){
+  var h='<div class="sec">Top flows by volume</div>';
+  top.forEach(function(f){
+    var pct=Math.max(4,(f.bytes/maxB)*100),col=f.attack?(f.attack_state==='blocked'?'#ff3020':'#ff6a2a'):pcol(f.proto);
+    h+='<div class="flow" onclick="blockFlow(\''+f.dst+'\')" style="cursor:pointer"><div class="fhead">'
+      +'<i class="pd" style="background:'+col+'"></i>'
+      +'<span class="ep">'+esc(nl[f.src]||f.src)+'</span>'
+      +'<span class="ar">&#8594;</span>'
+      +'<span class="ep">'+esc(nl[f.dst]||f.dst)+'</span>'
+      +'<span class="vol">'+human(f.bytes)+'</span></div>'
+      +'<div class="track"><div class="fill" style="width:'+pct.toFixed(1)+'%;background:'+col+'"></div></div>'
+      +'</div>';
+  });
+  return h;
+}
+
+function sankeyMap(flows,nl){
+  var srcTot={},dstTot={};
+  flows.forEach(function(f){srcTot[f.src]=(srcTot[f.src]||0)+f.bytes;dstTot[f.dst]=(dstTot[f.dst]||0)+f.bytes;});
+  var srcs=Object.keys(srcTot).sort(function(a,b){return srcTot[b]-srcTot[a];});
+  var dsts=Object.keys(dstTot).sort(function(a,b){return dstTot[b]-dstTot[a];});
+  var maxB=Math.max.apply(null,flows.map(function(f){return f.bytes;}).concat([1]));
+  var RW=30,MINW=4,gap=16;
+  function rw(b){return Math.max(MINW,(b/maxB)*RW);}   /* capped: biggest ribbon = RW px */
+  var sh={},dh={};srcs.forEach(function(k){sh[k]=0;});dsts.forEach(function(k){dh[k]=0;});
+  flows.forEach(function(f){sh[f.src]+=rw(f.bytes);dh[f.dst]+=rw(f.bytes);});
+  function colH(keys,hh){var s=0;keys.forEach(function(k){s+=hh[k];});return s+Math.max(0,(keys.length-1))*gap;}
+  var H=Math.max(colH(srcs,sh),colH(dsts,dh))+16;
+  var W=460,PAD=6,colW=9,leftX=PAD,rightX=W-PAD-colW;
+  function lay(keys,hh){var tot=colH(keys,hh);var y=(H-tot)/2;var pos={};keys.forEach(function(k){pos[k]={y0:y,h:hh[k],cur:y};y+=hh[k]+gap;});return pos;}
+  var sp=lay(srcs,sh),dp=lay(dsts,dh);
+  var s='<svg viewBox="0 0 '+W+' '+H.toFixed(0)+'" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">';
+  // Real alpha and gradients - this is what the desktop view has and a canvas
+  // with stipple can never reproduce.
+  s+='<defs><filter id="glow" x="-30%" y="-30%" width="160%" height="160%">'
+    +'<feGaussianBlur stdDeviation="3.2" result="b"/>'
+    +'<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>'
+    +'</filter>';
+  var gseen={};
+  flows.forEach(function(f,i){
+    var c=pcol(f.proto), id='g'+i;
+    if(gseen[id])return; gseen[id]=1;
+    s+='<linearGradient id="'+id+'" x1="0" y1="0" x2="1" y2="0">'
+      +'<stop offset="0%" stop-color="'+c+'" stop-opacity="0.85"/>'
+      +'<stop offset="50%" stop-color="'+c+'" stop-opacity="0.42"/>'
+      +'<stop offset="100%" stop-color="'+c+'" stop-opacity="0.85"/>'
+      +'</linearGradient>';
+  });
+  s+='</defs>';
+  flows.forEach(function(f){
+    var a=sp[f.src],b=dp[f.dst];if(!a||!b)return;
+    var w=rw(f.bytes),y1=a.cur+w/2,y2=b.cur+w/2;a.cur+=w;b.cur+=w;
+    var x1=leftX+colW,x2=rightX,mx=(x1+x2)/2;
+    var _d='M'+x1+' '+y1.toFixed(1)+' C'+mx+' '+y1.toFixed(1)+', '+mx+' '+y2.toFixed(1)
+           +', '+x2+' '+y2.toFixed(1);
+    var _c=(f.attack||f.blocked)?'#ff3020':pcol(f.proto);
+    var _fi=flows.indexOf(f);
+    s+='<path d="'+_d+'" stroke="url(#g'+_fi+')" stroke-width="'+w.toFixed(1)
+      +'" fill="none" stroke-linecap="round" filter="url(#glow)" class="rib"'
+      +' data-src="'+esc(f.src)+'" data-dst="'+esc(f.dst)+'" data-proto="'+esc(f.proto)
+      +'" data-bytes="'+f.bytes+'" data-pkts="'+(f.pkts||0)+'"/>';
+    s+='<path d="'+_d+'" stroke="'+_c+'" stroke-width="'+Math.max(0.9,w*0.20).toFixed(1)
+      +'" fill="none" stroke-linecap="round" stroke-opacity="0.95" pointer-events="none"/>';
+      +'" class="ribbon" fill="none" stroke="'+(f.attack?(f.attack_state==='blocked'?'#ff3020':'#ff6a2a'):pcol(f.proto))
+      +'" stroke-width="'+w.toFixed(1)+'" stroke-opacity="'+(f.attack?0.95:0.62)+'"'
+      +(f.attack&&f.attack_state==='blocked'?' stroke-dasharray="6 4"':'')
+      +' stroke-linecap="round"/>';
+  });
+  srcs.forEach(function(k){var p=sp[k];
+    s+='<rect x="'+leftX+'" y="'+p.y0.toFixed(1)+'" width="'+colW+'" height="'+p.h.toFixed(1)+'" rx="3" fill="#2f7fd0"/>';
+    s+='<text x="'+(leftX+colW+6)+'" y="'+(p.y0+p.h/2+3.4).toFixed(1)+'" fill="#c8dff0" stroke="#08111e" stroke-width="2.8" paint-order="stroke" font-size="10" font-family="monospace">'+esc((nl[k]||k)).slice(0,14)+'</text>';
+  });
+  dsts.forEach(function(k){var p=dp[k];
+    s+='<rect x="'+rightX+'" y="'+p.y0.toFixed(1)+'" width="'+colW+'" height="'+p.h.toFixed(1)+'" rx="3" fill="#c084fc"/>';
+    s+='<text x="'+(rightX-6)+'" y="'+(p.y0+p.h/2+3.4).toFixed(1)+'" fill="#c8dff0" stroke="#08111e" stroke-width="2.8" paint-order="stroke" font-size="10" font-family="monospace" text-anchor="end">'+esc((nl[k]||k)).slice(0,14)+'</text>';
+  });
+  s+='</svg>';
+  return s;
+}
+
+var _partAnim=null,_parts=[];
+function setupParticles(){
+  if(_partAnim){cancelAnimationFrame(_partAnim);_partAnim=null;}
+  _parts=[];
+  var svg=document.querySelector('.map svg'); if(!svg)return;
+  var NS='http://www.w3.org/2000/svg';
+  var g=document.createElementNS(NS,'g'); g.setAttribute('class','parts'); svg.appendChild(g);
+  var ribbons=svg.querySelectorAll('path.ribbon');
+  for(var i=0;i<ribbons.length;i++){var p=ribbons[i],len=0;
+    try{len=p.getTotalLength();}catch(e){continue;} if(!len)continue;
+    var col=p.getAttribute('stroke')||'#eaf6ff', wdt=parseFloat(p.getAttribute('stroke-width'))||3;
+    var n=Math.max(2,Math.min(4,Math.round(len/95)));
+    for(var j=0;j<n;j++){var c=document.createElementNS(NS,'circle');
+      c.setAttribute('r',Math.max(1.6,Math.min(3.2,wdt*0.42)).toFixed(1));
+      c.setAttribute('fill',col); c.setAttribute('stroke','#eaf6ff'); c.setAttribute('stroke-width','0.5');
+      g.appendChild(c);
+      _parts.push({el:c,path:p,len:len,phase:j/n,sp:0.00012+Math.random()*0.00006});
+    }
+  }
+  if(!_parts.length)return;
+  var t0=performance.now();
+  function frame(t){
+    if(document.hidden){_partAnim=requestAnimationFrame(frame);return;}
+    var dt=t-t0;
+    for(var k=0;k<_parts.length;k++){var pt=_parts[k];
+      var u=((pt.phase+dt*pt.sp)%1), pos=pt.path.getPointAtLength(u*pt.len);
+      pt.el.setAttribute('cx',pos.x.toFixed(1)); pt.el.setAttribute('cy',pos.y.toFixed(1));
+      pt.el.setAttribute('opacity',(0.28+0.62*Math.sin(u*Math.PI)).toFixed(2));
+    }
+    _partAnim=requestAnimationFrame(frame);
+  }
+  _partAnim=requestAnimationFrame(frame);
+}
+
+function hideFw(){var e=document.getElementById('fwoverlay'); if(e)e.style.display='none';}
+function fwEsc(s){var d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function fwRefresh(){
+  var el=document.getElementById('fwbody'); if(!el)return;
+  el.innerHTML='<div style="color:#6a9ab8">Reading the firewall\u2026</div>';
+  fetch('/api/firewall',{cache:'no-store'}).then(function(r){return r.json();})
+   .then(function(d){
+     if(d.error){ el.innerHTML='<div style="color:#ff4444">'+fwEsc(d.error)+'</div>'; return; }
+     var sub=document.getElementById('fwsub');
+     if(sub) sub.textContent=(d.backend||'no backend')
+        +(d.elevated?'':'  \u2014 NOT ELEVATED, rules cannot be written');
+     var h='';
+     h+='<div style="display:flex;gap:18px;margin-bottom:10px;flex-wrap:wrap">'
+       +'<span>Blocked hosts <b style="color:#ff4444">'+(d.count||0)+'</b></span>'
+       +'<span>Kill switch <b style="color:'+(d.killswitch?'#ff4444':'#38f0a8')+'">'
+       +(d.killswitch?'ACTIVE':'off')+'</b></span>'
+       +'<span>Drop logging <b style="color:'+(d.logging?'#38f0a8':'#6a9ab8')+'">'
+       +(d.logging?'on':'off')+'</b></span>'
+       +'<span>Backend <b>'+fwEsc(d.backend||'none')+'</b></span></div>';
+     if(!d.elevated){
+       h+='<div style="color:#ff9f43;margin-bottom:10px">Not running elevated \u2014 '
+         +'blocking will fail silently until you restart as '
+         +'Administrator (or root).</div>';
+     }
+     if(!(d.blocked||[]).length){
+       h+='<div style="color:#6a9ab8">No hosts are currently blocked by this app.</div>';
+     }else{
+       h+='<table style="width:100%;border-collapse:collapse">'
+         +'<tr><th style="text-align:left;color:#6a9ab8;font-weight:600;padding:3px 6px;'
+         +'border-bottom:1px solid #12283e">Blocked address</th>'
+         +'<th style="text-align:left;color:#6a9ab8;font-weight:600;padding:3px 6px;'
+         +'border-bottom:1px solid #12283e">Rule name</th></tr>';
+       (d.blocked||[]).forEach(function(ip){
+         h+='<tr><td style="padding:3px 6px">'+fwEsc(ip)+'</td>'
+           +'<td style="padding:3px 6px;color:#6a9ab8">NM_BLOCK_'
+           +fwEsc(String(ip).replace(/\./g,'_'))+'</td></tr>';
+       });
+       h+='</table>';
+     }
+     var other=(d.rules||[]).filter(function(r){return r.indexOf('NM_BLOCK_')!==0;});
+     if(other.length){
+       h+='<div style="margin-top:12px;color:#38b8f0">Other rules created by this app</div>';
+       other.forEach(function(r){ h+='<div style="color:#c8dff0">'+fwEsc(r)+'</div>'; });
+     }
+     if((d.recent||[]).length){
+       h+='<div style="margin-top:12px;color:#38b8f0">Written in the last 10 minutes</div>';
+       (d.recent||[]).forEach(function(e){
+         h+='<div style="color:#c8dff0">'+fwEsc(e.ip)+'  '
+           +'<span style="color:#6a9ab8">'+fwEsc(e.reason||'')+'</span></div>';
+       });
+     }
+     el.innerHTML=h;
+   })
+   .catch(function(e){ el.innerHTML='<div style="color:#ff4444">'+fwEsc(e.message)+'</div>'; });
+}
+function showFw(){
+  var e=document.getElementById('fwoverlay'); if(!e)return;
+  e.style.display='block'; fwRefresh();
+}
+document.addEventListener('keydown',function(ev){ if(ev.key==='Escape') hideFw(); });
+
+var _lastFlows=[], _lastNodes={};
+function fmtB(b){
+  b=Number(b||0); var u=['B','KB','MB','GB','TB'],i=0;
+  while(b>=1024&&i<u.length-1){b/=1024;i++;}
+  return (b>=10||i===0?Math.round(b):b.toFixed(1))+u[i];
+}
+function fillHosts(nodes){
+  var t=document.getElementById('tHosts'); if(!t)return;
+  var rows=Object.keys(nodes).map(function(k){return nodes[k];})
+            .sort(function(a,b){return (b.bytes||0)-(a.bytes||0);}).slice(0,60);
+  t.innerHTML='<tr><th>IP / Host</th><th>Name</th><th>Pkts</th><th>Bytes</th><th>Proto</th></tr>'
+    +rows.map(function(n){
+      return '<tr><td>'+esc(n.id)+'</td><td>'+esc(n.label||n.rdns||'')+'</td>'
+        +'<td>'+(n.pkts||0)+'</td><td>'+fmtB(n.bytes)+'</td>'
+        +'<td>'+esc(String(n.proto||'').toUpperCase())+'</td></tr>';
+    }).join('');
+}
+function fillFlows(flows){
+  var t=document.getElementById('tFlows'); if(!t)return;
+  var rows=flows.slice().sort(function(a,b){return b.bytes-a.bytes;}).slice(0,80);
+  t.innerHTML='<tr><th>Source</th><th>Destination</th><th>Proto</th><th>Pkts</th><th>Bytes</th></tr>'
+    +rows.map(function(f,i){
+      return '<tr onclick="showDetail('+i+')"><td>'+esc(f.src)+'</td><td>'+esc(f.dst)+'</td>'
+        +'<td>'+esc(String(f.proto||'').toUpperCase())+'</td><td>'+(f.pkts||0)+'</td>'
+        +'<td>'+fmtB(f.bytes)+'</td></tr>';
+    }).join('');
+  _lastFlows=rows;
+}
+function showDetail(i){
+  var f=_lastFlows[i]; if(!f)return;
+  detailFor(f.src,f.dst,f.proto,f.bytes,f.pkts);
+}
+function detailFor(src,dst,proto,bytes,pkts){
+  var el=document.getElementById('detail'); if(!el)return;
+  function who(ip){
+    var n=_lastNodes[ip]||{}, bits=[esc(ip)];
+    if(n.label&&n.label!==ip) bits.push(esc(n.label));
+    var loc=[n.city,n.country].filter(Boolean).join(' / ');
+    if(loc) bits.push(esc(loc));
+    if(n.org) bits.push(esc(n.org));
+    return bits.join('<br>&nbsp;&nbsp;');
+  }
+  var flags=[], nd=_lastNodes[dst]||{};
+  if(nd.blocked) flags.push('<span class="HIGH">BLOCKED by firewall</span>');
+  if(nd.suspicious) flags.push('<span class="MED">flagged suspicious</span>');
+  el.innerHTML='<div class="aitem"><b>SOURCE</b><br>&nbsp;&nbsp;'+who(src)+'</div>'
+    +'<div class="aitem"><b>DESTINATION</b><br>&nbsp;&nbsp;'+who(dst)+'</div>'
+    +'<div class="aitem">PROTOCOL &nbsp;'+esc(String(proto||'?').toUpperCase())+'</div>'
+    +'<div class="aitem">PACKETS &nbsp;&nbsp;'+(pkts||0)+'</div>'
+    +'<div class="aitem">VOLUME &nbsp;&nbsp;&nbsp;'+fmtB(bytes)+'</div>'
+    +(flags.length?'<div class="aitem">'+flags.join('<br>')+'</div>':'');
+}
+function runAnalysis(kind){
+  var el=document.getElementById('analysis');
+  el.innerHTML='<div class="dim">Running '+kind+' analysis\u2026</div>';
+  fetch('/api/analysis?kind='+kind,{cache:'no-store'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var out='<div class="dim">'+(d.hosts||0)+' hosts, '+(d.flows||0)+' flows'
+        +(d.capturing?'':' \u2014 capture not running')+'</div>';
+      (d.sections||[]).forEach(function(sec){
+        out+='<div class="asec">'+esc(sec.section)+'</div>';
+        (sec.items||[]).forEach(function(it){
+          out+='<div class="aitem"><span class="sev '+esc(it.severity)+'">'
+            +esc(it.severity)+'</span>'+esc(it.host)
+            +'<small>'+esc(it.detail)+'</small></div>';
+        });
+      });
+      el.innerHTML=out;
+    })
+    .catch(function(e){ el.innerHTML='<div class="dim HIGH">'+esc(e.message)+'</div>'; });
+}
+function wireRibbons(){
+  Array.prototype.forEach.call(document.querySelectorAll('path.rib'), function(p){
+    p.addEventListener('click', function(){
+      detailFor(p.getAttribute('data-src'), p.getAttribute('data-dst'),
+                p.getAttribute('data-proto'), +p.getAttribute('data-bytes'),
+                +p.getAttribute('data-pkts'));
+    });
+  });
+}
+function render(data){
+  var flows=(data.flows||[]).filter(function(f){return f.bytes>0;});
+  var nl={};(data.nodes||[]).forEach(function(n){nl[n.id]=n.label||n.id;});
+  if(!flows.length){
+    $('content').innerHTML='<div class="empty">'+(_atkOn
+      ? 'Attack drill running \u2014 waiting for the first hostile\u2026'
+      : 'No active flows yet.<br>Start an EtherApe capture on the desktop, then this updates live.')+'</div>';
+    $('foot').textContent='';return;
+  }
+  flows.sort(function(a,b){return b.bytes-a.bytes;});
+  // Hostiles carry far fewer bytes than ordinary traffic, so ranking by volume
+  // alone dropped them off the end of the list entirely. Always show them.
+  var _atk=flows.filter(function(f){return f.attack;});
+  var _rest=flows.filter(function(f){return !f.attack;});
+  var top=_atk.concat(_rest).slice(0,18);
+  var maxB=1; top.forEach(function(f){if(f.bytes>maxB)maxB=f.bytes;});
+  var protos={};top.forEach(function(f){protos[(f.proto||'other').toLowerCase()]=1;});
+  var leg='<div class="legend">'+Object.keys(protos).map(function(p){
+    return '<span><i style="background:'+pcol(p)+'"></i>'+esc(p.toUpperCase())+'</span>';}).join('')+'</div>';
+  _lastNodes={}; (data.nodes||[]).forEach(function(n){ if(n&&n.id) _lastNodes[n.id]=n; });
+  fillHosts(_lastNodes);
+  fillFlows(flows);
+  var _map=_atk.concat(_rest).slice(0,12);
+  var html='<div class="map">'+sankeyMap(_map,nl)+'</div>'+leg
+    +'<div class="barwrap">'+barList(top,maxB,nl)+'</div>';
+  $('content').innerHTML=html;
+  wireRibbons();
+  setupParticles();
+  var total=flows.reduce(function(s,f){return s+f.bytes;},0);
+  $('foot').textContent='Total captured: '+human(total)+'  \u00b7  updates every 5s';
+}
+var _atkOn=false,_blasts=[],_seenBlk={};
+function paintVpn(d){
+  var el=$('vpnpill'); if(!el) return;
+  var v=(d&&d.vpn)||{}, on=!!(d&&d.vpn_active);
+  el.textContent = on ? ('\ud83d\udd12 '+String(v.provider||'VPN').toUpperCase()+' ACTIVE')
+                      : '\u26a0 VPN INACTIVE';
+  el.style.color       = on ? '#39ff14' : '#ff9f43';
+  el.style.borderColor = on ? '#1a4a2a' : '#5a3a10';
+  el.style.background  = on ? 'rgba(10,60,20,.45)' : 'rgba(90,45,10,.45)';
+  el.title = (v.iface ? v.iface+' \u2014 ' : '')+(v.reason||'');
+}
+function paintAtk(){var b=$('atkBtn');if(!b)return;
+  b.style.opacity=_atkOn?'1':'0.6';
+  b.innerHTML=_atkOn?'\u2620 ATTACK: ON':'\u2620 ATTACK SIM';}
+function toggleAtk(){
+  fetch('/api/attack_sim?set=toggle',{cache:'no-store'}).then(function(r){return r.json();})
+   .then(function(d){_atkOn=!!d.on;paintAtk();})
+   .catch(function(e){console.warn('[attack] toggle failed',e);});
+}
+function blastFrom(d){
+  // Same block-event stream the radar detonates on: a flash here means a
+  // firewall rule was written, drill or real.
+  try{
+    (d.block_events||[]).forEach(function(e){
+      var k=e.ip+'@'+e.ts; if(_seenBlk[k])return; _seenBlk[k]=1;
+      _blasts.push({ip:e.ip,city:e.city||e.ip,reason:e.reason||'',t0:Date.now()});
+    });
+    if(_blasts.length>8)_blasts=_blasts.slice(-8);
+  }catch(err){}
+}
+function drawBlasts(){
+  var host=$('blasts'); if(!host)return;
+  var now=Date.now();
+  _blasts=_blasts.filter(function(b){return now-b.t0<2600;});
+  host.innerHTML=_blasts.map(function(b){
+    var age=(now-b.t0)/2600, op=Math.max(0,1-age);
+    return '<div style="opacity:'+op.toFixed(2)+';margin-bottom:4px;padding:5px 9px;'
+      +'border:1px solid #7a1f1f;border-radius:6px;background:rgba(120,20,10,'+(0.42*op).toFixed(2)+');'
+      +'color:#ffb3a0;font-size:11px;white-space:nowrap">\u2620 BLOCKED '
+      +esc(b.city)+' <span style="color:#ff8a7a">'+esc(b.ip)+'</span>'
+      +(b.reason?' <span style="color:#c98">'+esc(b.reason)+'</span>':'')+'</div>';
+  }).join('');
+}
+setInterval(drawBlasts,120);
+var _frames=[],_live=true,MAXFRAMES=240;
+function _clk(dt){function p(n){return (n<10?'0':'')+n;}return p(dt.getHours())+':'+p(dt.getMinutes())+':'+p(dt.getSeconds());}
+function _liveBtnUpd(){var b=$('liveBtn');if(!b)return;b.style.color=_live?'#39ff14':'#6a9ab8';b.style.borderColor=_live?'#1a4a2a':'#1d3a55';b.textContent=_live?'LIVE':'GO LIVE';}
+function pushFrame(d){
+  _frames.push({t:new Date(),d:d});
+  if(_live){while(_frames.length>MAXFRAMES)_frames.shift();}
+  else if(_frames.length>2000){_frames.shift();}
+  var sc=$('scrubber');if(!sc)return;
+  sc.max=Math.max(0,_frames.length-1);
+  sc.disabled=(_frames.length<2);
+  if(_live){sc.value=sc.max;$('scrubTime').textContent=(_frames.length<2?'buffering...':'live');}
+}
+function onScrub(v){
+  v=parseInt(v,10);_live=(v>=_frames.length-1);
+  var fr=_frames[v];if(!fr)return;
+  render(fr.d);_liveBtnUpd();
+  $('scrubTime').textContent=_live?'live':_clk(fr.t);
+}
+function goLive(){
+  _live=true;while(_frames.length>MAXFRAMES)_frames.shift();
+  var sc=$('scrubber');if(sc){sc.max=Math.max(0,_frames.length-1);sc.value=sc.max;}
+  var fr=_frames[_frames.length-1];if(fr)render(fr.d);
+  $('scrubTime').textContent='live';_liveBtnUpd();
+}
+async function blockFlow(ip){
+  if(!/^\d+\.\d+\.\d+\.\d+$/.test(ip)){alert('Only IPv4 destinations can be blocked ('+ip+').');return;}
+  if(!confirm('Block ALL traffic to '+ip+' via Windows Firewall?'))return;
+  try{var r=await fetch('/api/block',{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({ip:ip})});
+    var d=await r.json();
+    alert(d.ok?('Blocked '+ip+' \u2014 firewall rule added.'):('Block failed: '+(d.error||'unknown')));}
+  catch(e){alert('Error: '+e.message);}
+}
+async function refresh(){
+  try{
+    var r=await fetch('/api/topology3d',{cache:'no-store'});
+    var d=await r.json();
+    $('dot').classList.add('live');
+    var nf=(d.flows||[]).filter(function(f){return f.bytes>0;}).length,nn=(d.nodes||[]).length;
+    $('sub').textContent=nn+' hosts  \u00b7  '+nf+' active flows'+(d.open===false?'  \u00b7  capture not running':'');
+    blastFrom(d); paintVpn(d);
+  var _bp=document.getElementById('blockedpill');
+  if(_bp){
+    var _nb=d.total_blocked||0;
+    _bp.style.display=_nb?'inline-block':'none';
+    _bp.innerHTML='\u26d4 '+_nb+' blocked';
+  }
+    if(typeof d.attack_sim==='boolean'&&d.attack_sim!==_atkOn){_atkOn=d.attack_sim;paintAtk();}
+    pushFrame(d);
+    if(_live) render(d);
+  }catch(e){$('sub').textContent='Desktop app unreachable \u2014 same Wi\u2011Fi?';$('dot').classList.remove('live');}
+}
+refresh(); setInterval(refresh,5000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)refresh();});
+</script>
+</body>
+</html>

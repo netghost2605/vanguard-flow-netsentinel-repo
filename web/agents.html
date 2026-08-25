@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Remote Agents</title><style>
+ *{box-sizing:border-box}
+ body{margin:0;background:#040c18;color:#c8dff0;font:13px Consolas,monospace}
+ header{position:sticky;top:0;background:rgba(6,13,26,.94);border-bottom:1px solid #12283e;
+   padding:10px 14px;display:flex;align-items:center;gap:12px;z-index:5}
+ h1{margin:0;font-size:13px;letter-spacing:2px;color:#38f0a8}
+ .sub{color:#6a9ab8;font-size:11px}
+ a.back{color:#38b8f0;text-decoration:none;border:1px solid #1a3a5a;border-radius:5px;
+   padding:3px 9px;font-size:11px}
+ .wrap{padding:14px;display:grid;gap:12px;
+   grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+ .card{background:#0a1828;border:1px solid #1a3050;border-radius:9px;padding:12px 14px}
+ .card.off{border-color:#5a1a1a}
+ .name{font-size:14px;font-weight:bold;color:#c8dff0}
+ .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px}
+ .host{color:#6a9ab8;font-size:11px;margin:2px 0 9px}
+ .err{color:#ff4444;font-size:11px;margin-bottom:8px}
+ .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
+ .m .l{color:#6a9ab8;font-size:9px;letter-spacing:1px}
+ .m .v{font-size:17px;font-weight:bold}
+ .sys{display:flex;flex-wrap:wrap;gap:12px;margin:6px 0}
+ .sys span{font-size:10px;color:#6a9ab8}
+ .sys b{font-weight:bold}
+ .foot{color:#2a4060;font-size:10px;border-top:1px solid #12283e;padding-top:7px;margin-top:8px}
+ .spark{width:100%;height:34px;display:block;margin:4px 0 2px}
+ .empty{padding:40px 16px;color:#6a9ab8}
+ .run{color:#ff9f43;font-size:10px;margin-left:8px}
+</style></head><body>
+<header>
+  <a class="back" href="/3d">&larr; Back</a>
+  <h1>&#9673; REMOTE AGENTS</h1>
+  <span class="sub" id="sub">loading&hellip;</span>
+</header>
+<div class="wrap" id="wrap"></div>
+<script>
+function esc(s){var d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function num(v,unit,dp){ if(v===null||v===undefined) return '\u2014';
+  var n=Number(v); if(isNaN(n)) return esc(v);
+  return n.toFixed(dp===undefined?1:dp)+(unit||''); }
+function dur(sec){ sec=Number(sec||0); var d=Math.floor(sec/86400), h=Math.floor(sec%86400/3600),
+  m=Math.floor(sec%3600/60); return d? d+'d '+h+'h' : (h? h+'h '+m+'m' : m+'m'); }
+function spark(vals,colour){
+  if(!vals||vals.length<2) return '';
+  var w=300,h=34,mx=Math.max.apply(null,vals),mn=Math.min.apply(null,vals);
+  var rng=(mx-mn)||1, pts=vals.map(function(v,i){
+    return (i/(vals.length-1)*w).toFixed(1)+','+(h-((v-mn)/rng)*(h-4)-2).toFixed(1); });
+  return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
+    +'<polyline fill="none" stroke="'+colour+'" stroke-width="1.6" points="'+pts.join(' ')+'"/></svg>';
+}
+function health(v){ if(v===null||v===undefined) return '#6a9ab8';
+  return v>=90?'#ff4444':(v>=75?'#ff9f43':'#38f0a8'); }
+function render(d){
+  var ags=(d&&d.agents)||[];
+  var on=ags.filter(function(a){return a.online;}).length;
+  document.getElementById('sub').textContent =
+    ags.length ? (ags.length+' configured \u00b7 '+on+' online') : '';
+  var w=document.getElementById('wrap');
+  if(!ags.length){
+    w.innerHTML='<div class="empty">No remote agents configured.<br><br>'
+      +'Add them in the desktop app (Agents window) and they appear here.</div>';
+    return;
+  }
+  w.innerHTML=ags.map(function(a){
+    var ok=!!a.online;
+    var sys=[];
+    [['CPU','cpu_percent','%'],['MEM','mem_percent','%'],
+     ['DISK','disk_percent','%'],['TEMP','temp_c','\u00b0C']].forEach(function(p){
+      if(a[p[1]]!==null&&a[p[1]]!==undefined)
+        sys.push('<span>'+p[0]+' <b style="color:'+health(a[p[1]])+'">'
+                 +num(a[p[1]],p[2],1)+'</b></span>');
+    });
+    var foot=[];
+    if(a.last_test) foot.push('last test '+esc(String(a.last_test).slice(0,19).replace('T',' ')));
+    if(a.samples) foot.push(a.samples+' samples');
+    if(a.interval_minutes) foot.push('every '+a.interval_minutes+' min');
+    if(a.version) foot.push('agent '+esc(a.version));
+    if(a.uptime_seconds) foot.push('up '+dur(a.uptime_seconds));
+    return '<div class="card'+(ok?'':' off')+'">'
+      +'<div class="name"><span class="dot" style="background:'+(ok?'#38f0a8':'#ff4444')+'"></span>'
+      +esc(a.label||a.url)+(a.running_test?'<span class="run">test running\u2026</span>':'')+'</div>'
+      +'<div class="host">'+esc(a.hostname||'')+(a.ip?' \u00b7 '+esc(a.ip):'')
+      +(a.platform?' \u00b7 '+esc(a.platform):'')+'</div>'
+      +(ok?'':'<div class="err">'+esc(a.error||'offline')+'</div>')
+      +'<div class="metrics">'
+      +'<div class="m"><div class="l">DOWNLOAD</div><div class="v" style="color:#38f0a8">'+num(a.download,'')+'</div></div>'
+      +'<div class="m"><div class="l">UPLOAD</div><div class="v" style="color:#a371f7">'+num(a.upload,'')+'</div></div>'
+      +'<div class="m"><div class="l">PING</div><div class="v" style="color:#ff9f43">'+num(a.ping,'',0)+'</div></div>'
+      +'<div class="m"><div class="l">DNS</div><div class="v" style="color:#38b8f0">'+num(a.dns,'',0)+'</div></div>'
+      +'</div>'
+      +(sys.length?'<div class="sys">'+sys.join('')+'</div>':'')
+      +spark(a.history,'#38f0a8')
+      +(foot.length?'<div class="foot">'+foot.join(' \u00b7 ')+'</div>':'')
+      +'</div>';
+  }).join('');
+}
+function refresh(){
+  fetch('/api/agents',{cache:'no-store'}).then(function(r){return r.json();})
+    .then(render).catch(function(e){
+      document.getElementById('sub').textContent='error: '+e.message; });
+}
+refresh(); setInterval(refresh, 15000);
+</script></body></html>

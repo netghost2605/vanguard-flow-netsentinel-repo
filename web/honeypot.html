@@ -1,0 +1,323 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Honeypot &#8212; NetSentinel</title>
+<style>
+:root{--bg:#040c18;--panel:#0a1828;--line:#12283e;--ink:#c8dff0;--dim:#6a9ab8;
+  --mint:#38f0a8;--amber:#ff9f43;--red:#ff3020;--blue:#38b8f0;--violet:#b388ff}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+  font-family:Consolas,DejaVu Sans Mono,monospace;font-size:13px;overflow:hidden}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;
+  background:var(--panel);border-bottom:2px solid var(--mint)}
+header .t{color:var(--mint);font-weight:bold;font-size:15px;letter-spacing:1.5px}
+header .s{color:var(--dim);font-size:12px}
+header a{margin-left:auto;color:var(--dim);text-decoration:none;font-size:12px}
+#bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px 14px;
+  background:rgba(8,18,32,.85);border-bottom:1px solid var(--line)}
+button{background:#0d2235;border:1px solid #1f5a7a;color:#8ab8d0;font:inherit;
+  font-size:11px;font-weight:bold;padding:5px 11px;border-radius:5px;cursor:pointer;
+  letter-spacing:.5px}
+button:hover:not(:disabled){filter:brightness(1.35)}
+button:disabled{opacity:.4;cursor:default}
+.b-start{border-color:var(--mint);color:var(--mint)}
+.b-stop{border-color:var(--amber);color:var(--amber)}
+.b-test{border-color:#ff6bff;color:#ff6bff}
+.b-block{border-color:var(--red);color:var(--red)}
+.b-ai{border-color:var(--violet);color:var(--violet)}
+label.chk{display:flex;align-items:center;gap:5px;color:var(--amber);font-size:11px;
+  cursor:pointer;user-select:none}
+#msg{color:var(--dim);font-size:11px;margin-left:auto;max-width:46%;text-align:right}
+#msg.err{color:var(--amber)}
+#ports{padding:5px 14px;color:var(--dim);font-size:10.5px;line-height:1.5;
+  border-bottom:1px solid var(--line);background:rgba(6,14,26,.6)}
+#wrap{display:flex;height:calc(100% - 132px)}
+#left{flex:1;min-width:0;display:flex;flex-direction:column}
+#cards{display:flex;gap:8px;padding:8px 12px}
+.card{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  padding:7px;text-align:center}
+.card .v{font-size:19px;font-weight:bold}
+.card .k{color:var(--dim);font-size:9.5px;text-transform:uppercase}
+#tw{flex:1;overflow:auto;padding:0 12px 10px}
+table{width:100%;border-collapse:collapse;background:var(--panel);
+  border:1px solid var(--line);border-radius:6px;overflow:hidden}
+th{position:sticky;top:0;text-align:left;color:var(--dim);font-weight:600;
+  padding:6px 8px;background:#040c1a;font-size:10.5px;letter-spacing:.4px}
+td{padding:5px 8px;border-bottom:1px solid #0d1f30;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;max-width:220px}
+tr.sel td{background:#0a3060}
+tr[data-ip]{cursor:pointer}
+#ai{display:none;margin:0 12px 10px;background:var(--panel);
+  border:1px solid #1f4a6a;border-radius:6px;padding:9px 11px;
+  white-space:pre-wrap;line-height:1.5;font-size:12px;max-height:170px;overflow:auto}
+#ai b{color:var(--violet)}
+#right{width:390px;border-left:1px solid var(--line);position:relative;
+  background:#040c18}
+canvas{display:block;width:100%;height:100%}
+#tip{position:absolute;display:none;background:rgba(4,12,24,.97);
+  border:1px solid var(--red);border-radius:6px;padding:6px 9px;font-size:11px;
+  pointer-events:none;max-width:250px;z-index:9}
+.empty{color:var(--dim);text-align:center;padding:26px 8px;line-height:1.6}
+</style></head><body>
+<header>
+  <span class="t">&#127855; HONEYPOT</span>
+  <span class="s" id="state">connecting&#8230;</span>
+  <a href="/">&#8592; back</a>
+</header>
+
+<div id="bar">
+  <button class="b-start" id="bStart" onclick="ctl('start')">&#9654; START</button>
+  <button class="b-stop"  id="bStop"  onclick="ctl('stop')">&#9632; STOP</button>
+  <button class="b-test"  id="bTest"  onclick="ctl('test')">&#129514; TEST</button>
+  <button                 id="bRef"   onclick="load(true)">&#10227; REFRESH</button>
+  <button class="b-block" id="bBlock" onclick="blockSelected()">&#9940; BLOCK SELECTED</button>
+  <button class="b-ai"    id="bAi"    onclick="runAi()">&#10022; AI ANALYSIS</button>
+  <label class="chk"><input type="checkbox" id="cAuto" onchange="setAuto()"> Auto-block after 2 hits</label>
+  <span id="msg"></span>
+</div>
+<div id="ports">decoy ports&#8230;</div>
+
+<div id="wrap">
+  <div id="left">
+    <div id="cards">
+      <div class="card"><div class="v" id="c-status">&#8212;</div><div class="k">Status</div></div>
+      <div class="card"><div class="v" style="color:var(--mint)" id="c-total">0</div><div class="k">Hits</div></div>
+      <div class="card"><div class="v" style="color:var(--amber)" id="c-uniq">0</div><div class="k">Sources</div></div>
+      <div class="card"><div class="v" style="color:var(--blue)" id="c-ports">0</div><div class="k">Decoys</div></div>
+      <div class="card"><div class="v" id="c-life">0</div><div class="k">All time</div></div>
+    </div>
+    <div id="ai"></div>
+    <div id="tw">
+      <table><thead><tr><th>Time</th><th>Source</th><th>Origin</th><th>Port</th>
+        <th>Service</th><th>Looks like</th><th>First bytes</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="7" class="empty">Loading&#8230;</td></tr></tbody></table>
+    </div>
+  </div>
+  <div id="right"><canvas id="cv"></canvas><div id="tip"></div></div>
+</div>
+
+<script>
+var selected = {};        // ip -> true
+var threats = [], blips = [], mapImg = null, mapReady = false, dpr = 1;
+var cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+var T0 = performance.now();
+
+function esc(s){var d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function fmt(ts){try{return new Date(ts*1000).toLocaleTimeString();}catch(e){return '';}}
+function say(t, isErr){
+  var m=document.getElementById('msg');
+  m.textContent=t||''; m.className=isErr?'err':'';
+}
+
+// ── controls ───────────────────────────────────────────────────────────────
+function ctl(action, extra){
+  var body=Object.assign({action:action}, extra||{});
+  say(action+'\u2026');
+  return fetch('/api/honeypot/control',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      say(d.ok?(d.msg||'ok'):(d.error||'failed'), !d.ok);
+      load(true);
+      return d;
+    })
+    .catch(function(e){ say(e.message,true); });
+}
+function setAuto(){ ctl('autoblock',{on:document.getElementById('cAuto').checked}); }
+function blockSelected(){
+  var ips=Object.keys(selected);
+  if(!ips.length){ say('Select one or more rows in the table first.',true); return; }
+  ctl('block',{ips:ips}).then(function(){ selected={}; });
+}
+function runAi(){
+  say('analysing\u2026');
+  fetch('/api/honeypot/control',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'ai'})})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var el=document.getElementById('ai');
+      el.style.display='block';
+      if(d.ok){ el.innerHTML='<b>\u2726 AI ASSESSMENT</b>\n'+esc(d.text); say('done'); }
+      else { el.innerHTML='<b>\u2726 AI ASSESSMENT</b>\n'+esc(d.error); say(d.error,true); }
+    }).catch(function(e){ say(e.message,true); });
+}
+
+// ── radar (same projection as the sonar view) ──────────────────────────────
+function geoXY(lat,lon,cx,cy,R){
+  var x=cx+(lon/180)*R, y=cy-(lat/90)*R;
+  var dx=x-cx,dy=y-cy,d=Math.hypot(dx,dy),lim=R*0.94;
+  if(d>lim){x=cx+dx/d*lim;y=cy+dy/d*lim;}
+  return {x:x,y:y};
+}
+function preloadMap(){
+  if(mapImg)return;
+  var img=new Image();
+  img.onload=function(){mapReady=true;};
+  img.onerror=function(){mapReady=false;};
+  img.src='/radar-map.png';
+  mapImg=img;
+}
+function resize(){
+  var r=document.getElementById('right').getBoundingClientRect();
+  dpr=window.devicePixelRatio||1;
+  cv.width=Math.max(1,Math.round(r.width*dpr));
+  cv.height=Math.max(1,Math.round(r.height*dpr));
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize',resize);
+
+function draw(){
+  var W=cv.width/dpr, H=cv.height/dpr, T=(performance.now()-T0)/1000;
+  ctx.clearRect(0,0,W,H);
+  var cx=W/2, cy=H/2, R=Math.min(W,H)*0.42;
+  if(R<30){requestAnimationFrame(draw);return;}
+
+  preloadMap();
+  if(mapReady){
+    ctx.save();
+    ctx.beginPath();ctx.arc(cx,cy,R,0,Math.PI*2);ctx.clip();
+    ctx.globalAlpha=0.5;ctx.drawImage(mapImg,cx-R,cy-R,R*2,R*2);
+    ctx.globalAlpha=1;ctx.restore();
+  }
+  ctx.strokeStyle='#0a5a28';ctx.lineWidth=1;
+  for(var i=1;i<=4;i++){ctx.beginPath();ctx.arc(cx,cy,R*i/4,0,Math.PI*2);ctx.stroke();}
+  ctx.beginPath();ctx.moveTo(cx-R,cy);ctx.lineTo(cx+R,cy);
+  ctx.moveTo(cx,cy-R);ctx.lineTo(cx,cy+R);ctx.stroke();
+  ctx.globalAlpha=0.7;ctx.strokeStyle='#00cc44';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.arc(cx,cy,R+4,0,Math.PI*2);ctx.stroke();
+  for(var deg=0;deg<360;deg+=10){
+    var a=deg*Math.PI/180-Math.PI/2,maj=deg%30===0;
+    ctx.globalAlpha=maj?0.65:0.3;ctx.lineWidth=maj?1.5:0.7;
+    ctx.beginPath();
+    ctx.moveTo(cx+Math.cos(a)*(R+4),cy+Math.sin(a)*(R+4));
+    ctx.lineTo(cx+Math.cos(a)*(R+(maj?13:8)),cy+Math.sin(a)*(R+(maj?13:8)));
+    ctx.stroke();
+  }
+  var ang=(T*0.9)%(Math.PI*2);
+  for(var s=20;s>=0;s--){
+    var aa=ang-(s/20)*Math.PI*0.55, al=(1-s/20)*0.42;
+    ctx.globalAlpha=al;ctx.strokeStyle='rgba(0,255,80,'+al+')';
+    ctx.lineWidth=s===0?1.6:0.7;
+    ctx.beginPath();ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+Math.cos(aa)*(R+4),cy+Math.sin(aa)*(R+4));ctx.stroke();
+  }
+  ctx.globalAlpha=0.07;ctx.fillStyle='#00ff50';
+  ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,R+4,ang-0.5,ang);
+  ctx.closePath();ctx.fill();
+
+  ctx.globalAlpha=0.95;ctx.fillStyle='#38b8f0';
+  ctx.beginPath();ctx.arc(cx,cy,4,0,Math.PI*2);ctx.fill();
+  ctx.globalAlpha=0.35;ctx.strokeStyle='#38b8f0';ctx.lineWidth=1;
+  ctx.beginPath();ctx.arc(cx,cy,9,0,Math.PI*2);ctx.stroke();
+
+  blips=[];var nogeo=0;
+  threats.forEach(function(t,i){
+    var bx,by,ba;
+    if(typeof t.lat==='number'&&typeof t.lon==='number'){
+      var p=geoXY(t.lat,t.lon,cx,cy,R);bx=p.x;by=p.y;
+      ba=Math.atan2(by-cy,bx-cx);
+    }else{
+      nogeo++;
+      var h=0,ip=t.ip||'';
+      for(var k=0;k<ip.length;k++)h=(h*31+ip.charCodeAt(k))>>>0;
+      ba=((h>>>4)%3600)/3600*Math.PI*2;
+      bx=cx+Math.cos(ba)*R*0.12;by=cy+Math.sin(ba)*R*0.12;
+    }
+    var crit=t.sev==='critical';
+    var col=crit?'#ff3020':'#ff9f43';
+    var sz=Math.max(4,Math.min(12,3+Math.sqrt(t.count||1)*2.4));
+    var ad=((ba-ang)%(Math.PI*2)+Math.PI*2)%(Math.PI*2);
+    var pa=Math.max(0.38,1-ad/(Math.PI*2)*0.85);
+    blips.push({bx:bx,by:by,sz:sz+4,t:t});
+    ctx.globalAlpha=pa*0.22;ctx.fillStyle=col;
+    ctx.beginPath();ctx.arc(bx,by,sz+6,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=pa;ctx.fillStyle=col;
+    ctx.beginPath();ctx.arc(bx,by,sz*0.45,0,Math.PI*2);ctx.fill();
+    if(crit){
+      var ph=(T*0.9+i*0.3)%1;
+      ctx.globalAlpha=(1-ph)*pa*0.8;ctx.strokeStyle=col;ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.arc(bx,by,sz*0.45+ph*22,0,Math.PI*2);ctx.stroke();
+    }
+  });
+  ctx.globalAlpha=1;ctx.fillStyle='#6a9ab8';ctx.font='10px monospace';
+  ctx.textAlign='left';
+  ctx.fillText('honeypot sources: '+threats.length,8,14);
+  if(nogeo)ctx.fillText(nogeo+' awaiting geo',8,27);
+  requestAnimationFrame(draw);
+}
+
+cv.addEventListener('mousemove',function(e){
+  var r=cv.getBoundingClientRect(),tip=document.getElementById('tip');
+  var mx=e.clientX-r.left,my=e.clientY-r.top,hit=null;
+  for(var i=0;i<blips.length;i++){
+    if(Math.hypot(mx-blips[i].bx,my-blips[i].by)<=blips[i].sz+4){hit=blips[i];break;}
+  }
+  if(!hit){tip.style.display='none';return;}
+  var t=hit.t;
+  tip.innerHTML='<b style="color:#ff6a5a">'+esc(t.ip)+'</b><br>'
+    +'<span style="color:#6a9ab8">'
+    +esc([t.city,t.country].filter(Boolean).join(', ')||'locating\u2026')+'</span><br>'
+    +esc(t.detail||'');
+  tip.style.display='block';
+  tip.style.left=Math.min(mx+12,r.width-256)+'px';
+  tip.style.top=(my+12)+'px';
+});
+cv.addEventListener('mouseleave',function(){document.getElementById('tip').style.display='none';});
+
+// ── data ───────────────────────────────────────────────────────────────────
+function load(quiet){
+  fetch('/api/honeypot',{cache:'no-store'}).then(function(r){return r.json();})
+  .then(function(d){
+    var run=!!d.running;
+    document.getElementById('state').textContent=
+      (run?'running':'stopped')+' \u00b7 '+(d.total||0)+' hits';
+    var cs=document.getElementById('c-status');
+    cs.textContent=run?'RUNNING':'STOPPED';
+    cs.style.color=run?'var(--mint)':'var(--dim)';
+    document.getElementById('c-total').textContent=d.total||0;
+    document.getElementById('c-uniq').textContent=d.unique_ips||0;
+    document.getElementById('c-ports').textContent=
+      (d.ports||[]).length+(d.udp_ports||[]).length;
+    document.getElementById('c-life').textContent=(d.persisted||{}).total||0;
+    document.getElementById('bStart').disabled=run;
+    document.getElementById('bStop').disabled=!run;
+    document.getElementById('bTest').disabled=!run;
+    document.getElementById('ports').textContent=
+      'TCP ('+(d.ports||[]).length+'): '+(d.ports||[]).join(', ')+
+      '   \u00b7   UDP ('+(d.udp_ports||[]).length+'): '+(d.udp_ports||[]).join(', ');
+
+    var counts={};(d.top||[]).forEach(function(t){counts[t[0]]=t[1];});
+    var rows=(d.hits||[]).slice().reverse();
+    var tb=document.getElementById('rows');
+    if(!rows.length){
+      tb.innerHTML='<tr><td colspan="7" class="empty">No hits yet.<br>'
+        +'Quiet is normal \u2014 a hit here is always a scan or an attack.</td></tr>';
+    }else{
+      tb.innerHTML=rows.map(function(h){
+        var origin=h.known?'<span style="color:#6a9ab8">known LAN</span>'
+                          :'<span style="color:#ff9f43">external</span>';
+        return '<tr data-ip="'+esc(h.ip)+'" class="'+(selected[h.ip]?'sel':'')+'">'
+          +'<td>'+fmt(h.time)+'</td><td>'+esc(h.ip)+'</td><td>'+origin+'</td>'
+          +'<td>'+esc(h.port)+'/'+esc(h.proto||'tcp')+'</td>'
+          +'<td style="color:var(--amber)">'+esc(h.service)+'</td>'
+          +'<td style="color:var(--violet)">'+esc(h.tool||'')+'</td>'
+          +'<td style="color:var(--dim)">'+esc(h.sample)+'</td></tr>';
+      }).join('');
+      Array.prototype.forEach.call(tb.querySelectorAll('tr[data-ip]'),function(tr){
+        tr.onclick=function(){
+          var ip=tr.getAttribute('data-ip');
+          if(selected[ip])delete selected[ip];else selected[ip]=true;
+          load(true);
+        };
+      });
+    }
+    if(quiet!==true&&!run)say('');
+  }).catch(function(e){ say(e.message,true); });
+
+  fetch('/api/threats',{cache:'no-store'}).then(function(r){return r.json();})
+   .then(function(d){ threats=d.threats||[]; }).catch(function(){});
+}
+resize(); draw(); load(); setInterval(load,3000);
+</script>
+</body></html>
