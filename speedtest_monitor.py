@@ -2432,7 +2432,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-4431b665'
+_NM_BUILD_ID = 'b-b2a464b9'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -7923,6 +7923,33 @@ class SpeedTestMonitor:
         wp_entry.pack(side='left', padx=(0, 6), ipady=3)
         lbl(wp_frame, 'Browser dashboard  (restart to apply)', fg='#2a4a6a').pack(side='left')
 
+        # ── ISP Evidence Pack (advertised speed) ────────────────────────────
+        tk.Label(win, text='  ISP Evidence Pack', fg=ACC, bg='#060f1c',
+                 font=(_NM_MONO, 9, 'bold')).pack(fill='x', pady=(10, 0))
+        tk.Frame(win, bg='#060f1c', height=1).pack(fill='x')
+        adf = tk.Frame(win, bg=BG2); adf.pack(fill='x', padx=10, pady=6)
+        adf.columnconfigure(1, weight=1)
+
+        lbl(adf, 'Advertised download').grid(row=0, column=0, sticky='w', padx=(4, 6), pady=3)
+        adv_dl_frame = tk.Frame(adf, bg=BG2); adv_dl_frame.grid(row=0, column=1, sticky='w')
+        adv_dl_entry = mk_entry(adv_dl_frame, width=8)
+        adv_dl_entry.insert(0, str(self.config.get('advertised_down', '') or ''))
+        adv_dl_entry.pack(side='left', padx=(0, 6), ipady=3)
+        lbl(adv_dl_frame, 'Mbps', fg='#2a4a6a').pack(side='left')
+
+        lbl(adf, 'Advertised upload').grid(row=1, column=0, sticky='w', padx=(4, 6), pady=3)
+        adv_ul_frame = tk.Frame(adf, bg=BG2); adv_ul_frame.grid(row=1, column=1, sticky='w')
+        adv_ul_entry = mk_entry(adv_ul_frame, width=8)
+        adv_ul_entry.insert(0, str(self.config.get('advertised_up', '') or ''))
+        adv_ul_entry.pack(side='left', padx=(0, 6), ipady=3)
+        lbl(adv_ul_frame, 'Mbps', fg='#2a4a6a').pack(side='left')
+
+        lbl(adf, 'What your plan promises. Used by the ⏏ Evidence Pack PDF to '
+                 'compare against what you actually measured — leave both blank '
+                 'to skip that comparison.',
+            fg='#2a4a6a', wraplength=480, justify='left').grid(
+            row=2, column=1, sticky='w', padx=(0, 4), pady=(2, 4))
+
         # ── Tools folder (MobaXterm) ──────────────────────────────────────────
         tk.Label(win, text='  Tools', fg=ACC, bg='#060f1c',
                  font=(_NM_MONO, 9, 'bold')).pack(fill='x', pady=(10, 0))
@@ -8187,6 +8214,14 @@ class SpeedTestMonitor:
             self.config['speedtest_path'] = st_entry.get().strip()
             self.config['tshark_path']    = tsh_entry.get().strip()
             self.config['dns_hosts']      = dns_entry.get().strip()
+            try:
+                self.config['advertised_down'] = float(adv_dl_entry.get().strip() or 0)
+            except ValueError:
+                self.config['advertised_down'] = 0
+            try:
+                self.config['advertised_up'] = float(adv_ul_entry.get().strip() or 0)
+            except ValueError:
+                self.config['advertised_up'] = 0
             try:
                 iv = int(iv_entry.get().strip())
                 self.config['interval_minutes'] = max(1, min(iv, 1440))
@@ -18590,7 +18625,7 @@ class UserGuideWindow:
                    'Use Browse to locate manually, then Test to verify. '
                    'Used by both Wireshark Monitor and EtherApe.'),
             ('h2', 'Colour Theme'),
-            ('p',  'Choose from five preset colour themes. Each option shows a three-square swatch '
+            ('p',  'Choose from twelve preset colour themes. Each option shows a three-square swatch '
                    'previewing the download, upload and ping colours. Saving applies the theme '
                    'immediately to all gauges and charts. Custom colour overrides are cleared '
                    'when you pick a preset theme.'),
@@ -18599,6 +18634,11 @@ class UserGuideWindow:
                    'google.com, 1.1.1.1, my-server.local. Leave blank to use the six built-in '
                    'defaults. Click Reset to defaults to clear any custom list. '
                    'Changes take effect from the next DNS check.'),
+            ('h2', 'ISP Evidence Pack (advertised speeds)'),
+            ('p',  'Enter the download and upload speeds (Mbps) your ISP advertises. The '
+                   '⎙ Evidence Pack PDF uses these to show what percentage of the advertised '
+                   'rate you actually measured. Leave both blank or at 0 to skip that '
+                   'comparison in the pack.'),
             ('h2', 'Remote client licences'),
             ('p',  'The "Require licence key for remote clients" switch and the '
                    '"Manage licences..." button control who may connect a remote client to this '

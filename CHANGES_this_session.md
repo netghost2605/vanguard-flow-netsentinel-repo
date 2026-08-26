@@ -1,6 +1,6 @@
-# Changes this session — build `b-4431b665`
+# Changes this session — build `b-b2a464b9`
 
-Twenty-three things this session. Build IDs for reference:
+Twenty-four things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -46,8 +46,61 @@ Twenty-three things this session. Build IDs for reference:
 23. (no build ID — installer script only) — the auto-installed inetc
     plugin from #21 failed on your machine ("Plugin not found, cannot
     call inetc::get"); removed the inetc dependency from `installer.nsi`
-    entirely instead of patching the plugin-installer further (this one,
-    current).
+    entirely instead of patching the plugin-installer further.
+24. `b-b2a464b9` — added a Settings field for the advertised download/
+    upload speed the ISP Evidence Pack compares against (previously
+    config-file-only); also fixed the in-app guide's stale "five preset
+    colour themes" line — it's actually twelve (current).
+
+## New: advertised-speed fields in Settings (ISP Evidence Pack)
+
+You asked where `speedtest_config.json` lives, and I pointed out that its
+`advertised_down`/`advertised_up` keys — used by the ⎙ Evidence Pack PDF
+to show what % of your advertised speed you actually measured — had no
+Settings UI, only a raw config-file edit. You then asked for a real
+Settings field, so I added one.
+
+New **"ISP Evidence Pack"** section in the ⚙ Settings dialog, between
+"Speed Test Schedule" and "Tools" — two number fields, "Advertised
+download" and "Advertised upload" (Mbps), pre-filled from the existing
+config values, with a short note explaining what they're for and that
+leaving both blank/0 skips the comparison in the pack. Saving writes
+them back to `speedtest_config.json` as floats, same as every other
+numeric setting in that dialog. The Evidence Pack generator itself
+already read these two keys — this only adds the UI to set them; no
+change to how the pack uses them.
+
+While I was in that part of the file, I also fixed a stale line in the
+in-app guide's Settings page — it said "five preset colour themes,"
+but the app has had twelve (`Ocean, Sunset, Neon, Pastel, Mono, Crimson,
+Arctic, Hacker, Purple, Gold, Fire, Ice`) for a while. Unrelated to the
+Settings field, just noticed it while editing the same guide section
+and it was a one-line fix.
+
+**Verified (not assumed):**
+
+- `python3 selftest.py` — the only route diff was `/guide` (its byte
+  content changed because I edited guide text), which is exactly the
+  intended change; re-baselined with `--update-ok`.
+- `xvfb-run -a python3.12 selftest.py` — full 35/35 pass + 1 skip (skip
+  is "no display," expected under plain `python3`).
+- Built the real Settings dialog headlessly (Xvfb + a stand-in object
+  with a `.config` dict, calling the actual `_open_settings_dialog`
+  method) and screenshotted it — confirmed the new section renders in
+  the right place, wraps its hint text correctly, and doesn't overlap
+  neighboring sections. Screenshots taken both with the fields empty
+  and pre-filled from a fake config (500/50), confirming existing
+  values load into the boxes correctly.
+- Simulated a real Save click on that headless dialog: typed 250/25 into
+  the two new fields, invoked the actual Save button's command, and
+  confirmed the fake config object ended up with
+  `advertised_down: 250.0, advertised_up: 25.0` — the full UI-to-config
+  round trip, not just that the widgets exist.
+- Confirmed the build-ID bump alone changed zero routes (re-ran
+  `selftest.py` after the bump, 0 failures).
+- **What I can't verify from here**: how it looks on an actual Windows
+  desktop at native DPI/font rendering — the screenshot above is from
+  Xvfb on Linux, same caveat as every other UI change this session.
 
 ## The inetc auto-install (#21) failed on your machine — removed the plugin instead of chasing it
 
