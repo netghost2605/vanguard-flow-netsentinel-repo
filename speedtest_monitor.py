@@ -2432,7 +2432,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-b2a464b9'
+_NM_BUILD_ID = 'b-b07a1ff4'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -6689,6 +6689,73 @@ def _nm_evidence_pack(monitor, days=30, path=None):
     from matplotlib.backends.backend_pdf import PdfPages
     from matplotlib.figure import Figure
 
+    # ── Dark theme, matching the rest of the app (same hex values used by
+    # the heatmap / quality windows) — plus the user's own download / upload
+    # / ping colours from the active colour theme, so the pack's charts use
+    # the same three colours as the live gauges and dashboard charts do.
+    _EV_BG, _EV_PANEL = '#0a0e18', '#0d1828'
+    _EV_FG, _EV_DIM, _EV_ACC, _EV_EDGE = '#c8dff0', '#6a9ab8', '#38b8f0', '#1a2535'
+    _EV_GOOD, _EV_WARN, _EV_BAD = '#39ff14', '#ff9f43', '#ff6b6b'
+    try:
+        _ev_c = monitor.colors
+        _EV_DL, _EV_UL, _EV_PG = _ev_c['download'], _ev_c['upload'], _ev_c['ping']
+    except Exception:
+        _EV_DL, _EV_UL, _EV_PG = '#00d4aa', '#a371f7', '#f7cc73'
+
+    def _ev_page(figsize):
+        """A fresh dark-themed page — every page starts from this."""
+        f = Figure(figsize=figsize, dpi=100, facecolor=_EV_BG)
+        return f
+
+    def _ev_style_axes(ax):
+        """Apply the app's dark chart styling to one Axes."""
+        ax.set_facecolor(_EV_PANEL)
+        ax.tick_params(colors=_EV_DIM, labelsize=8)
+        ax.xaxis.label.set_color(_EV_DIM)
+        ax.yaxis.label.set_color(_EV_DIM)
+        ax.title.set_color(_EV_FG)
+        for sp in ax.spines.values():
+            sp.set_color(_EV_EDGE)
+        ax.grid(alpha=0.25, color=_EV_EDGE)
+
+    def _ev_legend(ax, **kw):
+        leg = ax.legend(fontsize=9, facecolor=_EV_PANEL, edgecolor=_EV_EDGE,
+                        labelcolor=_EV_FG, **kw)
+        return leg
+
+    def _ev_save(pdf, fig):
+        pdf.savefig(fig, facecolor=fig.get_facecolor())
+
+    def _ev_textblock(fig, x, y0, lines, fontsize=10, linespacing=1.5):
+        """Render a list of monospace lines top-to-bottom, colouring ALL-CAPS
+        section headers in the accent colour and '>>' callouts in warn amber,
+        so these pages read like the rest of the app instead of a plain
+        printout — one fig.text() per line so each can take its own colour."""
+        fig_h_in = fig.get_size_inches()[1]
+        line_h = (fontsize / 72.0) / fig_h_in * linespacing
+        y = y0
+        for line in lines:
+            stripped = line.strip()
+            # Ignore parenthetical units/ranges like "(Mbps)" or "(20:00-22:00)"
+            # when deciding if a line is an all-caps section header — those
+            # are deliberately mixed-case/numeric and shouldn't disqualify an
+            # otherwise all-caps heading such as "DOWNLOAD SPEED (Mbps)".
+            _core = re.sub(r'\([^)]*\)', '', stripped)
+            is_header = (stripped and not line.startswith(' ')
+                         and _core.strip() == _core.strip().upper()
+                         and any(ch.isalpha() for ch in _core))
+            is_callout = stripped.startswith('>>')
+            if is_header:
+                fig.text(x, y, line, fontsize=fontsize, family='monospace',
+                         va='top', color=_EV_ACC, fontweight='bold')
+            elif is_callout:
+                fig.text(x, y, line, fontsize=fontsize, family='monospace',
+                         va='top', color=_EV_WARN, fontweight='bold')
+            elif stripped:
+                fig.text(x, y, line, fontsize=fontsize, family='monospace',
+                         va='top', color=_EV_FG)
+            y -= line_h
+
     db = getattr(monitor, '_db', None)
     since = datetime.now() - timedelta(days=days)
 
@@ -6822,11 +6889,11 @@ def _nm_evidence_pack(monitor, days=30, path=None):
 
     with PdfPages(path) as pdf:
         # ── Page 1: availability + download detail ──────────────────────────
-        fig = Figure(figsize=(8.27, 11.69), dpi=100)   # A4
+        fig = _ev_page((8.27, 11.69))   # A4
         fig.suptitle('Broadband Performance Evidence Pack',
-                     fontsize=17, fontweight='bold', y=0.965)
+                     fontsize=17, fontweight='bold', y=0.965, color=_EV_FG)
         fig.text(0.08, 0.935, 'Page 1 of 8  —  Summary: Availability & Download',
-                 fontsize=9, style='italic', color='#555555')
+                 fontsize=9, style='italic', color=_EV_DIM)
 
         lines = [
             f'Report generated    {datetime.now():%d %B %Y, %H:%M}',
@@ -6871,16 +6938,15 @@ def _nm_evidence_pack(monitor, days=30, path=None):
             if med_off > 0 and med_peak < med_off:
                 lines.append(f'    >> {100 * (1 - med_peak / med_off):.0f}% slower during the evening peak.')
 
-        fig.text(0.08, 0.905, '\n'.join(lines), fontsize=10, family='monospace',
-                 va='top', linespacing=1.5)
-        pdf.savefig(fig)
+        _ev_textblock(fig, 0.08, 0.905, lines, fontsize=10, linespacing=1.5)
+        _ev_save(pdf, fig)
 
         # ── Page 2: upload + latency + notes ────────────────────────────────
-        figS2 = Figure(figsize=(8.27, 11.69), dpi=100)
+        figS2 = _ev_page((8.27, 11.69))
         figS2.suptitle('Broadband Performance Evidence Pack',
-                       fontsize=17, fontweight='bold', y=0.965)
+                       fontsize=17, fontweight='bold', y=0.965, color=_EV_FG)
         figS2.text(0.08, 0.935, 'Page 2 of 8  —  Summary: Upload, Latency & Method',
-                   fontsize=9, style='italic', color='#555555')
+                   fontsize=9, style='italic', color=_EV_DIM)
         lines2 = [
             'UPLOAD SPEED (Mbps)',
             (f'    Advertised                  {adv_u:.0f}' if adv_u else
@@ -6914,94 +6980,94 @@ def _nm_evidence_pack(monitor, days=30, path=None):
             '      mark periods with no successful measurement.',
             '    - Raw per-test data (CSV) is available on request.',
         ]
-        figS2.text(0.08, 0.905, '\n'.join(lines2), fontsize=10, family='monospace',
-                   va='top', linespacing=1.5)
-        pdf.savefig(figS2)
+        _ev_textblock(figS2, 0.08, 0.905, lines2, fontsize=10, linespacing=1.5)
+        _ev_save(pdf, figS2)
 
         # ── Page 3: download over time ──────────────────────────────────────
-        fig2 = Figure(figsize=(11.69, 8.27), dpi=100)
+        fig2 = _ev_page((11.69, 8.27))
         ax = fig2.add_subplot(111)
-        ax.plot(dl_ts, dls, lw=0.9, color='#1f77b4', label='Download (Mbps)')
-        ax.axhline(med_d, color='#2ca02c', ls='--', lw=1.2,
+        _ev_style_axes(ax)
+        ax.plot(dl_ts, dls, lw=0.9, color=_EV_DL, label='Download (Mbps)')
+        ax.axhline(med_d, color=_EV_GOOD, ls='--', lw=1.2,
                    label=f'Median {med_d:.1f} Mbps')
         if adv_d > 0:
-            ax.axhline(adv_d, color='#d62728', ls='-', lw=1.4,
+            ax.axhline(adv_d, color=_EV_WARN, ls='-', lw=1.4,
                        label=f'Advertised {adv_d:.0f} Mbps')
         for _st, _en, _mn in outages:
             try:
-                ax.axvspan(_st, _en, color='#ff4444', alpha=0.25)
+                ax.axvspan(_st, _en, color=_EV_BAD, alpha=0.25)
             except Exception:
                 continue
         ax.set_title('Download speed over the measurement period '
-                     '(red bands = no service)', fontsize=12)
-        ax.set_ylabel('Mbps')
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=9)
+                     '(red bands = no service)', fontsize=12, color=_EV_FG)
+        ax.set_ylabel('Mbps', color=_EV_DIM)
+        _ev_legend(ax)
         fig2.autofmt_xdate()
         fig2.tight_layout()
-        pdf.savefig(fig2)
+        _ev_save(pdf, fig2)
 
         # ── Page 4: upload over time ────────────────────────────────────────
-        figU = Figure(figsize=(11.69, 8.27), dpi=100)
+        figU = _ev_page((11.69, 8.27))
         axU = figU.add_subplot(111)
-        axU.plot(ul_ts, uls, lw=0.9, color='#9467bd', label='Upload (Mbps)')
-        axU.axhline(med_u, color='#2ca02c', ls='--', lw=1.2,
+        _ev_style_axes(axU)
+        axU.plot(ul_ts, uls, lw=0.9, color=_EV_UL, label='Upload (Mbps)')
+        axU.axhline(med_u, color=_EV_GOOD, ls='--', lw=1.2,
                     label=f'Median {med_u:.1f} Mbps')
         if adv_u > 0:
-            axU.axhline(adv_u, color='#d62728', ls='-', lw=1.4,
+            axU.axhline(adv_u, color=_EV_WARN, ls='-', lw=1.4,
                         label=f'Advertised {adv_u:.0f} Mbps')
         for _st, _en, _mn in outages:
             try:
-                axU.axvspan(_st, _en, color='#ff4444', alpha=0.25)
+                axU.axvspan(_st, _en, color=_EV_BAD, alpha=0.25)
             except Exception:
                 continue
         axU.set_title('Upload speed over the measurement period '
-                      '(red bands = no service)', fontsize=12)
-        axU.set_ylabel('Mbps')
-        axU.grid(alpha=0.3)
-        axU.legend(fontsize=9)
+                      '(red bands = no service)', fontsize=12, color=_EV_FG)
+        axU.set_ylabel('Mbps', color=_EV_DIM)
+        _ev_legend(axU)
         figU.autofmt_xdate()
         figU.tight_layout()
-        pdf.savefig(figU)
+        _ev_save(pdf, figU)
 
         # ── Page 5: latency over time ───────────────────────────────────────
-        figL = Figure(figsize=(11.69, 8.27), dpi=100)
+        figL = _ev_page((11.69, 8.27))
         axL = figL.add_subplot(111)
-        axL.plot(pg_ts, pgs, lw=0.9, color='#ff7f0e', label='Ping (ms)')
-        axL.axhline(med_p, color='#2ca02c', ls='--', lw=1.2,
+        _ev_style_axes(axL)
+        axL.plot(pg_ts, pgs, lw=0.9, color=_EV_PG, label='Ping (ms)')
+        axL.axhline(med_p, color=_EV_GOOD, ls='--', lw=1.2,
                     label=f'Median {med_p:.0f} ms')
-        axL.axhline(_pct(pgs, 95), color='#d62728', ls=':', lw=1.2,
+        axL.axhline(_pct(pgs, 95), color=_EV_WARN, ls=':', lw=1.2,
                     label=f'P95 {_pct(pgs, 95):.0f} ms')
-        axL.set_title('Latency (ping) over the measurement period', fontsize=12)
-        axL.set_ylabel('ms')
-        axL.grid(alpha=0.3)
-        axL.legend(fontsize=9)
+        axL.set_title('Latency (ping) over the measurement period', fontsize=12, color=_EV_FG)
+        axL.set_ylabel('ms', color=_EV_DIM)
+        _ev_legend(axL)
         figL.autofmt_xdate()
         figL.tight_layout()
-        pdf.savefig(figL)
+        _ev_save(pdf, figL)
 
         # ── Page 6: download distribution ───────────────────────────────────
-        figH = Figure(figsize=(11.69, 8.27), dpi=100)
+        figH = _ev_page((11.69, 8.27))
         axH = figH.add_subplot(111)
-        axH.hist(dls, bins=40, color='#1f77b4', alpha=0.85, edgecolor='#0d3a5c')
-        axH.axvline(med_d, color='#2ca02c', ls='--', lw=1.4,
+        _ev_style_axes(axH)
+        axH.hist(dls, bins=40, color=_EV_DL, alpha=0.85, edgecolor=_EV_BG)
+        axH.axvline(med_d, color=_EV_GOOD, ls='--', lw=1.4,
                     label=f'Median {med_d:.1f} Mbps')
         if adv_d > 0:
-            axH.axvline(adv_d, color='#d62728', lw=1.4,
+            axH.axvline(adv_d, color=_EV_WARN, lw=1.4,
                         label=f'Advertised {adv_d:.0f} Mbps')
-        axH.axvline(_pct(dls, 10), color='#ff7f0e', ls=':', lw=1.2,
+        axH.axvline(_pct(dls, 10), color=_EV_UL, ls=':', lw=1.2,
                     label=f'Slowest 10% below {_pct(dls, 10):.1f} Mbps')
-        axH.set_title('Distribution of download-speed results', fontsize=12)
-        axH.set_xlabel('Mbps')
-        axH.set_ylabel('Number of tests')
-        axH.grid(alpha=0.3)
-        axH.legend(fontsize=9)
+        axH.set_title('Distribution of download-speed results', fontsize=12, color=_EV_FG)
+        axH.set_xlabel('Mbps', color=_EV_DIM)
+        axH.set_ylabel('Number of tests', color=_EV_DIM)
+        _ev_legend(axH)
         figH.tight_layout()
-        pdf.savefig(figH)
+        _ev_save(pdf, figH)
 
         # ── Page 7: daily breakdown ─────────────────────────────────────────
-        figD = Figure(figsize=(8.27, 11.69), dpi=100)
-        figD.suptitle('Daily Breakdown', fontsize=15, fontweight='bold', y=0.96)
+        figD = _ev_page((8.27, 11.69))
+        figD.suptitle('Daily Breakdown', fontsize=15, fontweight='bold', y=0.96,
+                      color=_EV_FG)
         dbody = [f'{"Date":<14}{"Tests":>6}{"Med DL":>10}{"Med UL":>10}{"Med ms":>9}',
                  '-' * 49]
         for k in list(daily.keys())[:31]:
@@ -7011,13 +7077,13 @@ def _nm_evidence_pack(monitor, days=30, path=None):
                          f'{_median(dd["p"]):>9.0f}')
         if len(daily) > 31:
             dbody.append(f'... and {len(daily) - 31} more days')
-        figD.text(0.09, 0.90, '\n'.join(dbody), fontsize=9,
-                  family='monospace', va='top', linespacing=1.5)
-        pdf.savefig(figD)
+        _ev_textblock(figD, 0.09, 0.90, dbody, fontsize=9, linespacing=1.5)
+        _ev_save(pdf, figD)
 
         # ── Page 8: the outage log ──────────────────────────────────────────
-        fig3 = Figure(figsize=(8.27, 11.69), dpi=100)
-        fig3.suptitle('Outage Log', fontsize=15, fontweight='bold', y=0.96)
+        fig3 = _ev_page((8.27, 11.69))
+        fig3.suptitle('Outage Log', fontsize=15, fontweight='bold', y=0.96,
+                      color=_EV_FG)
         if outages:
             body = [f'{"#":>3}  {"Start":<18}{"End":<18}{"Duration":>10}', '-' * 52]
             for _i, (_st, _en, _mn) in enumerate(outages[:80], 1):
@@ -7034,13 +7100,12 @@ def _nm_evidence_pack(monitor, days=30, path=None):
             ]
         else:
             body = ['No outages recorded in this period.']
-        fig3.text(0.08, 0.90, '\n'.join(body), fontsize=9.5,
-                  family='monospace', va='top', linespacing=1.5)
+        _ev_textblock(fig3, 0.08, 0.90, body, fontsize=9.5, linespacing=1.5)
         fig3.text(0.08, 0.06,
                   'Measurements taken with Ookla Speedtest CLI against the nearest server,\n'
                   'from a wired connection where available. Raw data available on request.',
-                  fontsize=8, style='italic', color='#555555')
-        pdf.savefig(fig3)
+                  fontsize=8, style='italic', color=_EV_DIM)
+        _ev_save(pdf, fig3)
 
     log.info(f'[evidence] wrote {path}')
     return path

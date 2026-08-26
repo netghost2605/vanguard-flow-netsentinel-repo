@@ -1,6 +1,6 @@
-# Changes this session — build `b-b2a464b9`
+# Changes this session — build `b-b07a1ff4`
 
-Twenty-four things this session. Build IDs for reference:
+Twenty-five things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -50,7 +50,71 @@ Twenty-four things this session. Build IDs for reference:
 24. `b-b2a464b9` — added a Settings field for the advertised download/
     upload speed the ISP Evidence Pack compares against (previously
     config-file-only); also fixed the in-app guide's stale "five preset
-    colour themes" line — it's actually twelve (current).
+    colour themes" line — it's actually twelve.
+25. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
+    rest of the app, using your active colour theme's download/upload/
+    ping colours for the charts (current).
+
+## New: ISP Evidence Pack PDF now matches the app's dark theme
+
+You asked for the Evidence Pack "themed like the rest of the app." It
+was previously a plain white matplotlib PDF with default blue/purple/
+orange lines — nothing like the dark navy + cyan interface everywhere
+else. Now every one of its 8 pages uses the same dark palette as the
+heatmap and quality windows (`#0a0e18` background, `#0d1828` panels,
+`#38b8f0` cyan accents, `#c8dff0` body text, `#6a9ab8` muted labels),
+and the three line charts (download/upload/ping) use your **actual
+selected colour theme's** download/upload/ping colours — the same
+three colours as the live gauges and dashboard charts — rather than
+matplotlib's generic blue/purple/orange defaults.
+
+Other changes to the pack:
+
+- Section headers on the two text-summary pages (SERVICE AVAILABILITY,
+  DOWNLOAD SPEED, PEAK-HOURS DOWNLOAD, UPLOAD SPEED, LATENCY / PING,
+  METHOD & NOTES) now render in the accent cyan, and the ">> ..." callout
+  lines (e.g. "Median is 27% below advertised") render in warning amber
+  — both bold, so the things worth noticing actually stand out instead
+  of being buried in a monospace wall of text.
+- Outage bands on the time-series charts changed from a generic red to
+  the same red used for danger states elsewhere in the app.
+- Median lines are now green (good/reference), advertised-speed lines
+  are amber (the threshold you're being compared against), matching the
+  tip/warn colour meaning used throughout the rest of the UI.
+- Chart legends are dark-boxed with light text instead of matplotlib's
+  default white box, so they don't look like a mistake sitting on a
+  dark chart.
+
+**Verified (not assumed):**
+
+- `python3 selftest.py` — 0 failures (route/api diff unaffected, this
+  function isn't exposed over the web server).
+- `xvfb-run -a python3.12 selftest.py` — full 35/35 pass + 1 skip.
+- Actually **generated real PDFs** — not just read the code — using a
+  synthetic in-memory SQLite database (400 fake readings, 2 fake
+  outages, "Ocean" theme, advertised speeds set) and a second run with
+  a different theme ("Neon"), no advertised speed configured, and zero
+  outages, to exercise both the normal path and the edge cases (no
+  advertised-speed comparison, empty outage log, no outage bands on the
+  charts).
+- Rasterized every page of both PDFs to PNG with `pdftoppm` and visually
+  inspected all 16 renders: confirmed the dark background applies to
+  every page (not just the charts), confirmed the download/upload/ping
+  chart colours actually change with the selected theme (teal-green
+  under "Ocean," bright green under "Neon"), confirmed section headers
+  and callout lines pick up their accent colours (including catching
+  and fixing a header-detection edge case — "DOWNLOAD SPEED (Mbps)"
+  wasn't matching the "is this an all-caps header" check because of the
+  lowercase "bps" inside the unit, so it stayed unstyled the first time
+  through; fixed by ignoring parenthetical units when deciding what's a
+  header), and confirmed nothing overlaps or clips on either the normal
+  or edge-case data.
+- **What I can't verify from here**: exact print/PDF-viewer rendering on
+  your machine (fonts, viewer chrome) — the renders above are via
+  `pdftoppm`/Poppler in this sandbox, not Windows' own PDF viewer or
+  Acrobat. The colours and layout should be identical either way since
+  it's the same PDF bytes, but worth a glance once you generate a real
+  one.
 
 ## New: advertised-speed fields in Settings (ISP Evidence Pack)
 
