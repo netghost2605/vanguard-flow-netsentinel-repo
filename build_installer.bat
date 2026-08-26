@@ -284,13 +284,15 @@ echo  ║                                                      ║
 echo  ║  This installer will:                                ║
 echo  ║    • Install Vanguard Flow NetSentinel to Program Files        ║
 echo  ║    • Install Wireshark + Npcap (1 click)             ║
+echo  ║    • Install Ollama (local AI engine)                ║
 echo  ║    • Optional: remote client app                     ║
 echo  ║    • Create Desktop and Start Menu shortcuts         ║
 echo  ║    • Register proper uninstaller                     ║
 echo  ║                                                      ║
-echo  ║  Note: Ollama (local AI) was set up on THIS build    ║
-echo  ║  machine. To ship it to end users, add the same      ║
-echo  ║  download/install step to installer.nsi.             ║
+echo  ║  Note: Wireshark, Npcap and Ollama are NOT bundled   ║
+echo  ║  into this installer. Each end user's PC downloads   ║
+echo  ║  them fresh from the official Wireshark/Npcap/Ollama ║
+echo  ║  sites the first time the installer runs.            ║
 echo  ║                                                      ║
 echo  ╚══════════════════════════════════════════════════════╝
 echo.

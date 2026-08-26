@@ -1,6 +1,6 @@
 # Changes this session — build `b-d4a95b9d`
 
-Nineteen things this session. Build IDs for reference:
+Twenty things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -32,6 +32,64 @@ Nineteen things this session. Build IDs for reference:
 19. `b-d4a95b9d` — ISP Evidence Pack PDF: fixed a crash ("x and y must
     have same first dimension") when any download/upload/ping reading in
     the period was missing or implausible (this one, current).
+20. (no build ID — this is the installer script, not the app) —
+    `installer.nsi`/`build_installer.bat`: Npcap download URL was pinned
+    to a stale version; bumped, plus a stale build-script banner fixed
+    (this one, current).
+
+## Installer: Npcap URL bump + stale build-script banner
+
+You asked for the installer to download dependencies from their official
+sites instead of bundling them, to avoid redistributing other people's
+software. I checked `installer.nsi` first rather than assuming — it
+**already** does this for all three dependencies it installs (Wireshark,
+Npcap, Ollama): each one is fetched at install time on the end user's PC
+via NSIS's `inetc::get`, from the vendor's own site, not shipped inside
+the installer. None of the third-party installer `.exe`s sitting in your
+`setup` folder (Wireshark, npcap, nmap, MobaXterm, SQL Server Eval, etc.)
+are referenced by `installer.nsi` at all — they're unused leftovers, not
+things the installer bundles. (Same reason none of them made it into the
+GitHub repo we set up.)
+
+Two real problems I did find and fix, both in the download step itself:
+
+- **Npcap URL was stale.** `NPCAP_URL` was pinned to `npcap-1.79.exe`.
+  Checked npcap.com's live release listing: current is 1.88 (released
+  2026-05-06). Updated the URL to `npcap-1.88.exe` and added a comment —
+  unlike Wireshark, Npcap has no `-latest-` alias URL, so this has to be
+  bumped by hand periodically; the comment says where to check.
+- **`build_installer.bat`'s closing summary banner was wrong.** It told
+  you "Ollama... To ship it to end users, add the same download/install
+  step to installer.nsi" — implying that step was still needed, when
+  `installer.nsi` has had a working `SecOllama` download section this
+  whole time. Rewrote the banner to say what actually happens: Wireshark,
+  Npcap and Ollama are all fetched fresh from their official sites on the
+  end user's machine, not bundled.
+
+**Verified (not assumed):**
+
+- Installed a real NSIS 3.09 compiler in this sandbox (`apt-get install
+  nsis`) and syntax-compiled the actual `installer.nsi` end-to-end —
+  built a minimal stub `inetc` plugin DLL (via `mingw-w64`, since the
+  Ubuntu NSIS package doesn't ship it) so the `inetc::get` calls would
+  resolve. Compiled clean both before and after the edit: 6 sections, 648
+  install instructions, no errors — confirming the script's structure and
+  logic are sound, not just eyeballed.
+- Confirmed no third-party binary sneaks into the output: with only stub
+  placeholder files standing in for the app's own exe/assets, the
+  compiled installer came out to ~343 KB — consistent with it containing
+  only the app's own files, since nothing in the script embeds Wireshark,
+  Npcap, Ollama, or any of the other `.exe`s sitting in the folder.
+- Checked npcap.com's actual `/dist/` listing (not guessed) to confirm
+  1.88 is current before hardcoding it.
+- Checked the Wireshark download URL resolves to a large real binary
+  (got a "response too large" fetch error, which is exactly what a
+  90+ MB real installer looks like — not a 404 or redirect-to-nothing).
+- Confirmed `https://ollama.com/download/OllamaSetup.exe` is the correct,
+  current filename against Ollama's own docs, which reference
+  `OllamaSetup.exe` by that exact name.
+- Copied both fixed files into the `vanguard-flow-netsentinel` GitHub
+  folder too, so the repo isn't left with the stale version.
 
 ## ISP Evidence Pack — fixed a crash on any missing/implausible reading
 

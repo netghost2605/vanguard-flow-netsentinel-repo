@@ -19,7 +19,10 @@ Unicode True
 !define REG_KEY     "Software\Microsoft\Windows\CurrentVersion\Uninstall\NetworkMonitor"
 
 !define WIRESHARK_URL "https://1.na.dl.wireshark.org/win64/Wireshark-latest-x64.exe"
-!define NPCAP_URL     "https://npcap.com/dist/npcap-1.79.exe"
+; Npcap has no "latest" alias URL (unlike Wireshark) -- the version
+; below must be bumped by hand periodically. Check https://npcap.com/dist/
+; for the current release. Last verified: npcap 1.88 (2026-08-26).
+!define NPCAP_URL     "https://npcap.com/dist/npcap-1.88.exe"
 !define OLLAMA_URL    "https://ollama.com/download/OllamaSetup.exe"
 
 ; ── Installer settings ────────────────────────────────
