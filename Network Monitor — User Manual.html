@@ -1,0 +1,1669 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vanguard Flow NetSentinel — User Manual</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Exo+2:ital,wght@0,200;0,400;0,600;0,800;1,300&display=swap');
+
+  :root {
+    --bg:        #030a14;
+    --bg2:       #060f1e;
+    --panel:     #081525;
+    --border:    #0e2540;
+    --acc1:      #38b8f0;
+    --acc2:      #a371f7;
+    --acc3:      #39ff14;
+    --acc4:      #ff9f43;
+    --acc5:      #ff6b6b;
+    --text:      #c8dff0;
+    --muted:     #4a6a8a;
+    --mono:      'Share Tech Mono', monospace;
+    --head:      'Rajdhani', sans-serif;
+    --body:      'Exo 2', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--body);
+    font-size: 15px;
+    line-height: 1.7;
+    overflow-x: hidden;
+  }
+
+  /* ── Scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Sidebar nav ── */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 280px;
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    z-index: 100;
+    padding: 0 0 40px;
+  }
+
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-track { background: var(--bg); }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .nav-logo {
+    padding: 24px 20px 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
+  }
+  .nav-logo h1 {
+    font-family: var(--head);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--acc1);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .nav-logo span {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    display: block;
+    margin-top: 2px;
+    letter-spacing: 1px;
+  }
+
+  .nav-section {
+    padding: 8px 20px 4px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-top: 12px;
+  }
+
+  .nav-item {
+    display: block;
+    padding: 7px 20px 7px 28px;
+    color: var(--muted);
+    text-decoration: none;
+    font-family: var(--body);
+    font-size: 13px;
+    font-weight: 400;
+    transition: all 0.15s;
+    border-left: 2px solid transparent;
+    position: relative;
+  }
+  .nav-item:hover {
+    color: var(--acc1);
+    background: rgba(56,184,240,0.05);
+    border-left-color: var(--acc1);
+  }
+  .nav-item.sub {
+    padding-left: 40px;
+    font-size: 12px;
+    color: #384858;
+  }
+  .nav-item.sub:hover { color: var(--acc1); }
+
+  /* ── Main content ── */
+  .content {
+    margin-left: 280px;
+    min-height: 100vh;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    background: linear-gradient(160deg, #05111f 0%, #0a1e35 40%, #050d1a 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 80px 60px 60px;
+    position: relative;
+    overflow: hidden;
+  }
+  .hero::after {
+    content: '';
+    position: absolute;
+    top: 0; right: 0; bottom: 0;
+    width: 50%;
+    background: radial-gradient(ellipse at 80% 50%, rgba(56,184,240,0.06) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .hero-tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 3px;
+    color: var(--acc1);
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    opacity: 0.8;
+  }
+  .hero h1 {
+    font-family: var(--head);
+    font-size: 52px;
+    font-weight: 700;
+    color: white;
+    line-height: 1.1;
+    margin-bottom: 12px;
+    letter-spacing: 1px;
+  }
+  .hero h1 span { color: var(--acc1); }
+  .hero p {
+    font-size: 16px;
+    color: var(--muted);
+    max-width: 560px;
+    line-height: 1.6;
+    margin-bottom: 28px;
+  }
+  .hero-badges { display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 3px;
+    letter-spacing: 1px;
+  }
+  .badge-blue  { background: rgba(56,184,240,0.12); color: var(--acc1); border: 1px solid rgba(56,184,240,0.25); }
+  .badge-purp  { background: rgba(163,113,247,0.12); color: var(--acc2); border: 1px solid rgba(163,113,247,0.25); }
+  .badge-green { background: rgba(57,255,20,0.10); color: var(--acc3); border: 1px solid rgba(57,255,20,0.20); }
+  .badge-amber { background: rgba(255,159,67,0.12); color: var(--acc4); border: 1px solid rgba(255,159,67,0.25); }
+
+  /* ── Page sections ── */
+  .section {
+    padding: 60px 60px 40px;
+    border-bottom: 1px solid var(--border);
+    max-width: 900px;
+  }
+  .section:last-child { border-bottom: none; }
+
+  .section-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  h2 {
+    font-family: var(--head);
+    font-size: 34px;
+    font-weight: 700;
+    color: white;
+    margin-bottom: 6px;
+    letter-spacing: 0.5px;
+  }
+  h2 .accent { color: var(--acc1); }
+
+  .section-intro {
+    color: var(--muted);
+    font-size: 15px;
+    margin-bottom: 36px;
+    max-width: 700px;
+    border-left: 2px solid var(--border);
+    padding-left: 16px;
+  }
+
+  h3 {
+    font-family: var(--head);
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--acc1);
+    margin: 32px 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h3::before {
+    content: '';
+    display: inline-block;
+    width: 18px;
+    height: 2px;
+    background: var(--acc1);
+    opacity: 0.5;
+  }
+
+  h4 {
+    font-family: var(--head);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--acc2);
+    margin: 20px 0 8px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  p { margin-bottom: 12px; color: var(--text); }
+
+  /* ── Feature grid ── */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 16px;
+    margin: 24px 0;
+  }
+
+  .feature-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px;
+    transition: border-color 0.2s;
+  }
+  .feature-card:hover { border-color: var(--acc1); }
+  .feature-card .icon {
+    font-size: 22px;
+    margin-bottom: 10px;
+    display: block;
+  }
+  .feature-card strong {
+    display: block;
+    font-family: var(--head);
+    font-size: 15px;
+    font-weight: 600;
+    color: white;
+    margin-bottom: 6px;
+  }
+  .feature-card p {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  /* ── Info boxes ── */
+  .info-box {
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin: 20px 0;
+    font-size: 14px;
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+  }
+  .info-box .icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .info-box.tip   { background: rgba(57,255,20,0.06); border: 1px solid rgba(57,255,20,0.2); }
+  .info-box.warn  { background: rgba(255,159,67,0.08); border: 1px solid rgba(255,159,67,0.25); }
+  .info-box.note  { background: rgba(56,184,240,0.07); border: 1px solid rgba(56,184,240,0.2); }
+  .info-box.danger{ background: rgba(255,107,107,0.08); border: 1px solid rgba(255,107,107,0.25); }
+  .info-box.tip   .icon { color: var(--acc3); }
+  .info-box.warn  .icon { color: var(--acc4); }
+  .info-box.note  .icon { color: var(--acc1); }
+  .info-box.danger .icon{ color: var(--acc5); }
+  .info-box p { margin: 0; }
+
+  /* ── Steps ── */
+  .steps { margin: 20px 0; counter-reset: step; }
+  .step {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+    align-items: flex-start;
+  }
+  .step-num {
+    flex-shrink: 0;
+    width: 28px; height: 28px;
+    background: rgba(56,184,240,0.1);
+    border: 1px solid rgba(56,184,240,0.3);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--acc1);
+    font-weight: bold;
+  }
+  .step-body { flex: 1; padding-top: 3px; }
+  .step-body strong { color: white; }
+  .step-body p { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+
+  /* ── Key reference table ── */
+  .ref-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    font-size: 13px;
+  }
+  .ref-table th {
+    background: var(--panel);
+    color: var(--acc1);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    padding: 10px 16px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  .ref-table td {
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(14,37,64,0.6);
+    vertical-align: top;
+  }
+  .ref-table tr:last-child td { border-bottom: none; }
+  .ref-table tr:nth-child(even) td { background: rgba(6,15,30,0.4); }
+  .ref-table .ctrl {
+    font-family: var(--mono);
+    color: var(--acc1);
+    white-space: nowrap;
+  }
+  .ref-table .desc { color: var(--text); }
+  .ref-table .note-cell { color: var(--muted); font-size: 12px; }
+
+  /* ── Kbd ── */
+  kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 7px;
+    color: var(--acc1);
+    white-space: nowrap;
+  }
+
+  /* ── Inline code ── */
+  code {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: rgba(56,184,240,0.08);
+    border: 1px solid rgba(56,184,240,0.15);
+    border-radius: 3px;
+    padding: 1px 6px;
+    color: var(--acc1);
+  }
+
+  /* ── UI element callout ── */
+  .ui-el {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(163,113,247,0.12);
+    border: 1px solid rgba(163,113,247,0.25);
+    color: var(--acc2);
+    white-space: nowrap;
+  }
+
+  /* ── Divider ── */
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+
+  /* ── Bullet list ── */
+  ul.feature-list {
+    list-style: none;
+    margin: 12px 0 20px;
+    padding: 0;
+  }
+  ul.feature-list li {
+    padding: 5px 0 5px 22px;
+    position: relative;
+    font-size: 14px;
+    color: var(--text);
+  }
+  ul.feature-list li::before {
+    content: '▸';
+    position: absolute;
+    left: 0;
+    color: var(--acc1);
+    font-size: 12px;
+  }
+
+  /* ── Screenshot placeholder ── */
+  .screen-placeholder {
+    background: var(--panel);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 24px;
+    text-align: center;
+    margin: 20px 0;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  /* ── Colour legend ── */
+  .colour-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 6px 0;
+    font-size: 13px;
+  }
+  .colour-dot {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ── TOC quick-links ── */
+  .quick-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 20px 0;
+  }
+  .quick-link {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--muted);
+    text-decoration: none;
+    transition: all 0.15s;
+    letter-spacing: 0.5px;
+  }
+  .quick-link:hover {
+    color: var(--acc1);
+    border-color: var(--acc1);
+    background: rgba(56,184,240,0.05);
+  }
+
+  /* ── Version tag ── */
+  .version-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 12px;
+    vertical-align: middle;
+  }
+
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .content { margin-left: 0; }
+    .hero, .section { padding: 40px 24px; }
+    .hero h1 { font-size: 34px; }
+  }
+
+  @media print {
+    /* ── Reset all dark theme colours to print-safe light values ── */
+    :root {
+      --bg:     #ffffff;
+      --bg2:    #ffffff;
+      --panel:  #f5f5f5;
+      --border: #cccccc;
+      --acc1:   #0066aa;
+      --acc2:   #6030a0;
+      --acc3:   #1a7a1a;
+      --acc4:   #c06010;
+      --acc5:   #cc2222;
+      --text:   #111111;
+      --muted:  #444444;
+      --mono:   'Courier New', monospace;
+    }
+
+    * {
+      color: #111111 !important;
+      background: #ffffff !important;
+      border-color: #cccccc !important;
+      box-shadow: none !important;
+      text-shadow: none !important;
+    }
+
+    /* Hide sidebar and scanline overlay */
+    .sidebar, body::before { display: none !important; }
+    .content { margin-left: 0 !important; }
+
+    /* Hero */
+    .hero {
+      background: #1a1a2e !important;
+      color: white !important;
+      padding: 24px 32px !important;
+      border-radius: 0 !important;
+      page-break-after: avoid;
+    }
+    .hero h1, .hero p, .hero-tag { color: white !important; }
+    .hero h1 span { color: #88ccee !important; }
+    .badge {
+      border: 1px solid #666 !important;
+      color: #222 !important;
+      background: #eee !important;
+      padding: 2px 8px !important;
+    }
+
+    /* Sections */
+    .section {
+      padding: 20px 32px !important;
+      border-bottom: 1px solid #ddd !important;
+      page-break-inside: avoid;
+      max-width: none !important;
+    }
+
+    /* Headings */
+    h2 { color: #1a1a4a !important; font-size: 22px !important; }
+    h2 .accent { color: #0066aa !important; }
+    h3 { color: #0055aa !important; font-size: 16px !important; }
+    h3::before { background: #0055aa !important; }
+    h4 { color: #6030a0 !important; }
+
+    .section-label { color: #888888 !important; }
+    .section-intro {
+      color: #444444 !important;
+      border-left: 2px solid #aaaaaa !important;
+    }
+
+    /* Tables */
+    .ref-table th {
+      background: #1a1a4a !important;
+      color: white !important;
+    }
+    .ref-table td { color: #111111 !important; }
+    .ref-table tr:nth-child(even) td { background: #f0f0f0 !important; }
+    .ctrl { color: #0055aa !important; font-family: 'Courier New', monospace !important; }
+    .desc { color: #111111 !important; }
+
+    /* Feature cards */
+    .feature-card {
+      background: #f8f8f8 !important;
+      border: 1px solid #cccccc !important;
+      page-break-inside: avoid;
+    }
+    .feature-card strong { color: #111111 !important; }
+    .feature-card p { color: #444444 !important; }
+
+    /* Info boxes */
+    .info-box { page-break-inside: avoid; }
+    .info-box.tip   { background: #f0fff0 !important; border-color: #66aa66 !important; }
+    .info-box.warn  { background: #fff8f0 !important; border-color: #cc8833 !important; }
+    .info-box.note  { background: #f0f8ff !important; border-color: #3388cc !important; }
+    .info-box.danger{ background: #fff0f0 !important; border-color: #cc4444 !important; }
+    .info-box .icon { color: #333333 !important; }
+    .info-box p     { color: #111111 !important; }
+
+    /* Steps */
+    .step-num {
+      background: #e8eeff !important;
+      border-color: #3355aa !important;
+      color: #3355aa !important;
+    }
+    .step-body strong { color: #111111 !important; }
+    .step-body p      { color: #444444 !important; }
+
+    /* Bullets */
+    ul.feature-list li { color: #111111 !important; }
+    ul.feature-list li::before { color: #0055aa !important; }
+
+    /* Colour dots — keep them */
+    .colour-dot { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    .colour-row { color: #111111 !important; }
+
+    /* Code / kbd / ui-el */
+    code {
+      background: #f0f0f0 !important;
+      border-color: #cccccc !important;
+      color: #0055aa !important;
+    }
+    kbd {
+      background: #f0f0f0 !important;
+      border-color: #cccccc !important;
+      color: #0055aa !important;
+    }
+    .ui-el {
+      background: #f0e8ff !important;
+      border-color: #9966cc !important;
+      color: #6030a0 !important;
+    }
+
+    /* Divider */
+    .divider { border-color: #cccccc !important; }
+
+    /* Nav logo area (hidden) */
+    .nav-logo, .nav-section, .nav-item { display: none !important; }
+
+    /* Page breaks */
+    h2 { page-break-before: always; }
+    .hero + .section h2 { page-break-before: avoid; }
+    .feature-grid { page-break-inside: avoid; }
+    .steps { page-break-inside: avoid; }
+    .ref-table { page-break-inside: avoid; }
+
+    /* Footer */
+    .content > div:last-child { color: #888888 !important; }
+
+    @page {
+      margin: 1.5cm 2cm;
+      size: A4;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ── -->
+<nav class="sidebar">
+  <div class="nav-logo">
+    <h1>◉ NetSentinel</h1>
+    <span>USER MANUAL v2.0</span>
+  </div>
+
+  <div class="nav-section">Getting Started</div>
+  <a class="nav-item" href="#overview">Overview</a>
+  <a class="nav-item" href="#installation">Installation</a>
+  <a class="nav-item" href="#first-run">First Run</a>
+
+  <div class="nav-section">Main Dashboard</div>
+  <a class="nav-item" href="#dashboard">Window Layout</a>
+  <a class="nav-item" href="#speed-test">Speed Tests &amp; Bufferbloat</a>
+  <a class="nav-item" href="#dns-monitor">DNS Monitoring</a>
+  <a class="nav-item" href="#heatmap-outages">Heatmap &amp; Outages</a>
+  <a class="nav-item" href="#vdi">VDI Session Health</a>
+  <a class="nav-item" href="#evidence">ISP Evidence Pack</a>
+  <a class="nav-item" href="#export-report">Export &amp; Reports</a>
+  <a class="nav-item" href="#settings">Settings &amp; Themes</a>
+
+  <div class="nav-section">Wireshark Monitor</div>
+  <a class="nav-item" href="#wireshark">Overview</a>
+  <a class="nav-item sub" href="#ws-capture">Starting a Capture</a>
+  <a class="nav-item sub" href="#ws-filters">Filters</a>
+  <a class="nav-item sub" href="#ws-packets">Inspecting Packets</a>
+  <a class="nav-item sub" href="#ws-menus">Analyse &amp; Statistics</a>
+  <a class="nav-item sub" href="#ws-pcap">PCAP Files</a>
+  <a class="nav-item sub" href="#ws-ai">AI Query</a>
+  <a class="nav-item sub" href="#ws-report">Generating Reports</a>
+
+  <div class="nav-section">Topology &amp; Visualization</div>
+  <a class="nav-item" href="#etherape">EtherApe Overview</a>
+  <a class="nav-item sub" href="#ea-capture">Live Capture</a>
+  <a class="nav-item sub" href="#ea-topology">Topology Canvas</a>
+  <a class="nav-item sub" href="#ea-flows">Flow Details</a>
+  <a class="nav-item sub" href="#ea-replay">PCAP Replay</a>
+  <a class="nav-item sub" href="#ea-font">Font &amp; Display</a>
+  <a class="nav-item" href="#viz-3d">3D Network View</a>
+  <a class="nav-item" href="#viz-radar">Sonar &amp; Threat Radar</a>
+  <a class="nav-item" href="#viz-sankey">Flow Map (Sankey)</a>
+  <a class="nav-item" href="#viz-talkers">Top Talkers</a>
+  <a class="nav-item" href="#viz-devices">Devices &amp; Vendors</a>
+
+  <div class="nav-section">Security &amp; Threats</div>
+  <a class="nav-item" href="#honeypot">Honeypot</a>
+  <a class="nav-item" href="#firewall">Firewall Management</a>
+  <a class="nav-item" href="#killswitch">Kill Switch</a>
+  <a class="nav-item" href="#geoblock">Country / Geo Blocking</a>
+  <a class="nav-item" href="#threatintel">Threat-Intel Feeds</a>
+  <a class="nav-item" href="#mlanomaly">ML Anomaly Detection</a>
+  <a class="nav-item" href="#attackdrill">Attack Drill</a>
+
+  <div class="nav-section">AI Analysis</div>
+  <a class="nav-item" href="#ai-overview">How AI Works Here</a>
+  <a class="nav-item" href="#ai-capture">Capture Analysis</a>
+  <a class="nav-item" href="#ai-report">AI Report Builder</a>
+  <a class="nav-item" href="#ai-flowwatch">Continuous Flow-Watch</a>
+  <a class="nav-item" href="#ai-briefing">Daily Briefing</a>
+
+  <div class="nav-section">Remote &amp; Web Access</div>
+  <a class="nav-item" href="#remote-agents">Remote Agents</a>
+  <a class="nav-item" href="#remote-client">Standalone Client</a>
+  <a class="nav-item" href="#web-dashboard">Web Dashboard &amp; PWA</a>
+
+  <div class="nav-section">Alerting &amp; Reporting</div>
+  <a class="nav-item" href="#alerts">Thresholds &amp; Alerts</a>
+  <a class="nav-item" href="#notifications">Notifications</a>
+  <a class="nav-item" href="#scheduled-reports">Scheduled Reports</a>
+
+  <div class="nav-section">Platform &amp; Tools</div>
+  <a class="nav-item" href="#tools-terminal">Embedded Terminal</a>
+  <a class="nav-item" href="#pihole">Pi-hole Deployment</a>
+  <a class="nav-item" href="#data-storage">Data &amp; Storage</a>
+
+  <div class="nav-section">Reference</div>
+  <a class="nav-item" href="#protocols">Protocol Colours</a>
+  <a class="nav-item" href="#troubleshooting">Troubleshooting</a>
+  <a class="nav-item" href="#shortcuts">Quick Reference</a>
+  <a class="nav-item" href="#data-files">Data File Locations</a>
+</nav>
+
+<!-- ── Content ── -->
+<div class="content">
+
+<!-- Hero -->
+<div class="hero">
+  <div class="hero-tag">User Manual · Build b-4431b665</div>
+  <h1>Vanguard Flow<br><span>NetSentinel</span></h1>
+  <p>A complete guide to the sidebar dashboard, Wireshark packet capture, live topology &amp; 3D visualization, honeypot &amp; firewall, local AI analysis, remote clients, and everything else in the app — written from the current source, not the box art.</p>
+  <div class="hero-badges">
+    <span class="badge badge-blue">Windows &amp; Linux</span>
+    <span class="badge badge-purp">Wireshark Integration</span>
+    <span class="badge badge-green">Live 3D Topology</span>
+    <span class="badge badge-amber">Local AI (Ollama)</span>
+  </div>
+</div>
+
+<!-- ══════════════ 01 — GETTING STARTED ══════════════ -->
+
+<div id="overview" class="section">
+  <div class="section-label">01 — Getting Started</div>
+  <h2>What is <span class="accent">Vanguard Flow NetSentinel?</span></h2>
+  <div class="section-intro">It started as a speed-test monitor and grew into a full local network-operations console — measuring your connection, capturing and visualizing your traffic, watching for scanners and intrusions, and explaining what it sees in plain language via a locally-running AI. Everything runs from one Python process; you can drive it from the desktop windows or from any browser on your network.</div>
+
+  <p>This manual documents the app's current <strong>sidebar + card</strong> interface (window title <code>Vanguard Flow NetSentinel</code>). If you've used an older build with big dial-style speed gauges, that "Classic" dashboard has been replaced — this manual only covers the interface the app actually launches today.</p>
+
+  <h3>What's in the box</h3>
+  <div class="feature-grid">
+    <div class="feature-card"><span class="icon">📶</span><strong>Speed &amp; Quality</strong><p>Multi-engine speed tests, bufferbloat grading, DNS timing, outage detection, VDI health, an ISP evidence-pack PDF.</p></div>
+    <div class="feature-card"><span class="icon">🦈</span><strong>Wireshark Monitor</strong><p>A full tshark-backed capture window with filters, Statistics/Analyse menus, and PCAP open/save.</p></div>
+    <div class="feature-card"><span class="icon">🌐</span><strong>Topology &amp; 3D</strong><p>An EtherApe-style live graph, a WebGL 3D scene with a rotating globe, sonar &amp; threat radar, and a flow-map view.</p></div>
+    <div class="feature-card"><span class="icon">🍯</span><strong>Honeypot &amp; Firewall</strong><p>29 decoy ports with a tarpit, cross-platform firewall blocking, a one-click kill switch, and country blocking.</p></div>
+    <div class="feature-card"><span class="icon">✦</span><strong>Local AI</strong><p>Runs on Ollama by default — no API key, no cloud account. Anthropic is available as an optional alternate provider.</p></div>
+    <div class="feature-card"><span class="icon">⊞</span><strong>Remote &amp; Web</strong><p>Poll headless agents on other machines, connect a standalone client, or just open the built-in web dashboard.</p></div>
+  </div>
+
+  <div class="info-box note">
+    <span class="icon">ℹ</span>
+    <p><strong>No keyboard shortcuts.</strong> The current interface is entirely mouse-driven — there are no <code>accelerator=</code> hotkeys bound anywhere in the main dashboard, Wireshark Monitor, or Topology window. Where this manual gives a "quick reference," it's a table of buttons, not keys.</p>
+  </div>
+</div>
+
+<div id="installation" class="section">
+  <div class="section-label">01 — Getting Started</div>
+  <h2><span class="accent">Installation</span></h2>
+  <div class="section-intro">The same source file builds for both Windows and Linux.</div>
+
+  <h3>Windows</h3>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Run <span class="ui-el">NetworkMonitorSetup.exe</span></strong><p>Built from <code>installer.nsi</code> via <code>build_installer.bat</code>. No third-party NSIS plugin is required.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Choose a preset</strong><p><span class="ui-el">Full</span> installs the monitor app plus capture/AI components; <span class="ui-el">Client only</span> installs just <code>nm_client.py</code> for a second machine that only needs to view the dashboard.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Let it fetch dependencies</strong><p>The installer downloads Npcap, Wireshark, Ollama, and the <code>librespeed-cli</code> speed-test CLI directly from each project's own site during setup — nothing third-party is bundled or redistributed. Any step that fails to download shows a message box telling you exactly what to install manually and from where.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><strong>Run as Administrator</strong><p>Needed for packet capture, the firewall/kill switch, and the honeypot's low-numbered decoy ports.</p></div></div>
+  </div>
+
+  <h3>Linux</h3>
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Build a package</strong><p><code>./build-linux.sh deb</code> produces a <code>.deb</code>; <code>./build-linux.sh appimage</code> produces a portable AppImage.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Install with apt, not dpkg</strong><p><code>sudo apt install ./netsentinel_1.0.0_all.deb</code> — using <code>apt</code> instead of raw <code>dpkg -i</code> lets dependencies resolve automatically.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Join the wireshark group</strong><p>Needed for packet capture without running the whole app as root. Firewall/kill-switch features still need <code>sudo</code>/root.</p></div></div>
+  </div>
+
+  <h3>System Requirements</h3>
+  <table class="ref-table">
+    <tbody><tr><th>Platform</th><th>Requirement</th></tr>
+    <tr><td class="ctrl">Windows</td><td class="desc">Windows 10 or later, 64-bit. Administrator for capture, firewall, kill switch, and low-numbered honeypot ports.</td></tr>
+    <tr><td class="ctrl">Linux</td><td class="desc">Any recent distro. <code>wireshark</code> group for capture; root/<code>sudo</code> for firewall and kill-switch features.</td></tr>
+    <tr><td class="ctrl">Both</td><td class="desc">Outbound internet access is used for: geolocation (ip-api.com), threat-intel feed downloads, and Ollama's first-run model pull (~2GB). The app still works offline — those features just degrade gracefully.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="first-run" class="section">
+  <div class="section-label">01 — Getting Started</div>
+  <h2><span class="accent">First Run</span></h2>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Launch the app</strong><p>Desktop/Start Menu shortcut, or run <code>speedtest_monitor.py</code> directly with Python. The main window opens titled <strong>Vanguard Flow NetSentinel</strong>, sized 1400×820.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Ollama starts itself, quietly</strong><p>Before the window even appears, a background thread tries to launch <code>ollama serve</code> if Ollama is installed, and pulls the default model (<code>llama3.2</code>, ~2GB) the very first time. There's no splash screen for this — if it fails, AI features just show a plain-English error later; everything else keeps working.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><strong>The embedded web server comes up on port 8765</strong><p>Open <code>http://localhost:8765</code> in a browser at any time to reach the same dashboard from your phone or another machine on the network.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><strong>Point Settings at your tools</strong><p>Click <span class="ui-el">⚙ PREFS</span> in the sidebar and check the <span class="ui-el">Speedtest CLI</span> and <span class="ui-el">Wireshark / tshark</span> path fields — the app auto-detects both where possible, but use <span class="ui-el">Test</span> to confirm.</p></div></div>
+    <div class="step"><div class="step-num">5</div><div class="step-body"><strong>Run your first test</strong><p>Click <span class="ui-el">▶ RUN</span> in the left sidebar. A test also runs automatically every 5 minutes by default.</p></div></div>
+  </div>
+
+  <div class="info-box tip">
+    <span class="icon">✓</span>
+    <p>The status bar along the bottom of the main window shows live green/red dots for <code>speedtest.exe</code> and <code>tshark</code> availability, the web server's port, and whether SQLite or the legacy JSON store is active — a quick way to confirm everything found what it needs.</p>
+  </div>
+</div>
+
+<!-- ══════════════ 02 — MAIN DASHBOARD ══════════════ -->
+
+<div id="dashboard" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Window <span class="accent">Layout</span></h2>
+  <div class="section-intro">There's no separate "home" screen — the gauge-card strip and chart grid described below <em>are</em> the dashboard, visible as soon as the app opens.</div>
+
+  <h3>Top Bar</h3>
+  <p>A 46px strip reading <strong>◈ NETWORK MONITOR</strong> on the left, four navigation buttons (<span class="ui-el">Dashboard</span>, <span class="ui-el">Agents</span>, <span class="ui-el">Wireshark</span>, <span class="ui-el">Topology</span>), and on the right a status badge that reads <strong>LIVE</strong> (green), flips to <strong>TESTING</strong> (amber) during a manual speed test or <strong>DNS CHECK</strong> during a DNS check, plus a running clock.</p>
+
+  <h3>Left Sidebar — Icon Buttons</h3>
+  <p>A slim 54px rail of stacked icon+label buttons is the app's main navigation — there is no traditional File/Edit/View menu bar on this window. Top to bottom:</p>
+  <table class="ref-table">
+    <tbody><tr><th>Icon</th><th>Opens</th></tr>
+    <tr><td class="ctrl">▶ RUN</td><td class="desc">Starts a manual speed test</td></tr>
+    <tr><td class="ctrl">⊙ DNS</td><td class="desc">Runs a DNS check against the six monitored hosts</td></tr>
+    <tr><td class="ctrl">WS CAPTURE</td><td class="desc">Opens the Wireshark Monitor window</td></tr>
+    <tr><td class="ctrl">◎ TOPOLOGY</td><td class="desc">Opens the EtherApe-style topology window</td></tr>
+    <tr><td class="ctrl">⊞ AGENTS</td><td class="desc">Opens the Remote Agents window</td></tr>
+    <tr><td class="ctrl">◱ MONITOR</td><td class="desc">Opens "Alerts, Devices, VDI &amp; Analytics"</td></tr>
+    <tr><td class="ctrl">▦ HEATMAP</td><td class="desc">Opens the Time-of-Day Heatmap</td></tr>
+    <tr><td class="ctrl">⚠ OUTAGES</td><td class="desc">Opens the Outage Log</td></tr>
+    <tr><td class="ctrl">◈ QUALITY</td><td class="desc">Opens Network Quality (bufferbloat grade, bandwidth, devices, anomalies)</td></tr>
+    <tr><td class="ctrl">⎙ EVIDENCE</td><td class="desc">Opens the ISP Evidence Pack dialog</td></tr>
+    <tr><td class="ctrl">☉ PI-HOLE</td><td class="desc">Opens the Deploy Pi-hole wizard</td></tr>
+    <tr><td class="ctrl">⎙ REPORT</td><td class="desc">Opens the Generate Network Report dialog</td></tr>
+    <tr><td class="ctrl">⬇ EXPORT</td><td class="desc">Opens the Export Speed Data (CSV) dialog</td></tr>
+    <tr><td class="ctrl">⚒ TOOLS</td><td class="desc">Opens the embedded terminal (MobaXterm)</td></tr>
+    <tr><td class="ctrl">? GUIDE</td><td class="desc">Opens the in-app User Guide in your default browser</td></tr>
+    <tr><td class="ctrl">⚙ PREFS</td><td class="desc">Opens Settings</td></tr>
+    <tr><td class="ctrl">✕ QUIT</td><td class="desc">Confirms and shuts down the app</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Gauge Cards</h3>
+  <p>Five cards across the top: <strong>DOWNLOAD</strong>, <strong>UPLOAD</strong>, <strong>PING</strong>, and <strong>DNS</strong>, each with a live value, a unit label, a thin progress bar, and a 40-reading sparkline — plus a fifth <strong>TODAY</strong> card with a 2×2 grid of Tests / DNS / Max&nbsp;DL / Jitter.</p>
+
+  <h3>View-Mode Bar &amp; Chart Grid</h3>
+  <p>Four toggle buttons — <span class="ui-el">Today</span>, <span class="ui-el">This Week</span>, <span class="ui-el">This Month</span>, <span class="ui-el">All Time</span> — plus <code>◄</code>/<code>►</code> arrows to page through history, switch what the chart grid below shows. The grid itself is a single embedded Matplotlib figure laid out 2×3: Download / Upload / Latency line charts on top, then Live Traffic (from <code>psutil</code>), DNS History, and a text-based Statistics panel (Avg/Max/Min/σ) on the bottom row. It refreshes every 2 seconds.</p>
+
+  <h3>Status Bar</h3>
+  <p>Along the very bottom: green/red dots for <code>speedtest.exe</code> and <code>tshark</code> availability, the web server's port, <code>SQLite ✓</code> or <code>JSON</code> plus the build ID, and a right-aligned countdown to the next scheduled speed test.</p>
+</div>
+
+<div id="speed-test" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Speed Tests &amp; <span class="accent">Bufferbloat</span></h2>
+
+  <h3>Running a Test</h3>
+  <p>Click <span class="ui-el">▶ RUN</span> in the sidebar for a manual test, or let the schedule handle it — <span class="ui-el">⚙ PREFS</span> → <strong>Speed Test Schedule</strong> → "Run every ___ minutes (1–1440)" with quick-pick buttons (<code>1m 5m 10m 15m 30m 1h 2h</code>). Default is every 5 minutes, and a change takes effect once the current interval finishes.</p>
+
+  <h3>Which Engine It Uses</h3>
+  <p>There's no engine picker in the UI. The app auto-detects whichever speed-test CLI is pointed to by <span class="ui-el">⚙ PREFS</span> → <strong>Speedtest CLI</strong> → the <code>speedtest.exe</code> path field, and normalizes its output regardless of which of the three it is:</p>
+  <ul class="feature-list">
+    <li><strong>librespeed-cli</strong> (LGPL) — what the Windows installer fetches automatically.</li>
+    <li><strong>speedtest-cli</strong> / "sivel" (Apache) — also auto-detected if present.</li>
+    <li><strong>Ookla's own CLI</strong> — used if you already have it installed, but never bundled or auto-downloaded (its license forbids redistribution).</li>
+  </ul>
+
+  <h3>Bufferbloat Grade (A+ to F)</h3>
+  <p>Shown in <span class="ui-el">◈ QUALITY</span> → the <strong>Quality</strong> tab, as a large letter grade with the added-latency-under-load figure beneath it:</p>
+  <table class="ref-table">
+    <tbody><tr><th>Grade</th><th>Added latency</th></tr>
+    <tr><td class="ctrl">A+</td><td class="desc">under 5 ms</td></tr>
+    <tr><td class="ctrl">A</td><td class="desc">under 30 ms</td></tr>
+    <tr><td class="ctrl">B</td><td class="desc">under 60 ms</td></tr>
+    <tr><td class="ctrl">C</td><td class="desc">under 200 ms</td></tr>
+    <tr><td class="ctrl">D</td><td class="desc">under 400 ms</td></tr>
+    <tr><td class="ctrl">F</td><td class="desc">400 ms or more</td></tr>
+    </tbody>
+  </table>
+  <p>Measured by pinging continuously while a speed test saturates the link, so it shows whether the connection falls apart under load — not just how fast it is sitting idle.</p>
+</div>
+
+<div id="dns-monitor" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>DNS <span class="accent">Monitoring</span></h2>
+  <p>Click <span class="ui-el">⊙ DNS</span> to run a check on demand, or watch the DNS gauge card and the "DNS history" chart update automatically alongside every speed test. There's no separate DNS window on the desktop — the per-host breakdown only shows up in a generated report.</p>
+
+  <p>Six hosts are resolved and timed by default:</p>
+  <p style="font-family:var(--mono); color:var(--acc1); font-size:13px;">google.com &nbsp;·&nbsp; cloudflare.com &nbsp;·&nbsp; microsoft.com &nbsp;·&nbsp; amazon.com &nbsp;·&nbsp; bbc.co.uk &nbsp;·&nbsp; github.com</p>
+  <p>Change the list at <span class="ui-el">⚙ PREFS</span> → <strong>DNS Check Hosts</strong> (comma-separated), with a <span class="ui-el">Reset to defaults</span> button. A host that fails to resolve counts as a failure; the DNS reading is the average of whichever hosts succeeded.</p>
+</div>
+
+<div id="heatmap-outages" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Heatmap &amp; <span class="accent">Outages</span></h2>
+
+  <h3>Time-of-Day Heatmap</h3>
+  <p>Sidebar <span class="ui-el">▦ HEATMAP</span> opens a 7×24 grid — weekday down the side, hour across the top — coloring every cell by the median of <strong>download</strong>, <strong>upload</strong>, or <strong>ping</strong> (pick with the <span class="ui-el">Metric</span> dropdown) over a rolling window of 7 / 30 / 90 / 365 days (<span class="ui-el">Window</span> dropdown, default 90). A white-outlined box marks the current weekday/hour; hover any cell for its sample count and last reading.</p>
+  <div class="info-box note"><span class="icon">ℹ</span><p>Each cell aggregates <em>every</em> occurrence of that weekday+hour in the window — e.g. every Sunday at 1pm — not just today, so patterns like "evenings are always slow" become visible after a week or two of data.</p></div>
+
+  <h3>Outage Log</h3>
+  <p>Sidebar <span class="ui-el">⚠ OUTAGES</span> opens a table of every gap in successful tests over the last 90 days — columns <strong>Went down</strong>, <strong>Came back</strong>, <strong>Duration</strong>, most recent first — with a header summary like "3 outages · 2.1 hrs total downtime · uptime 99.87%".</p>
+</div>
+
+<div id="vdi" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>VDI Session <span class="accent">Health</span></h2>
+  <div class="section-intro">Diagnoses "my remote desktop feels laggy" in real time by watching active VDI sessions on the machine.</div>
+
+  <p>Lives in the <span class="ui-el">◱ MONITOR</span> window, under the <strong>VDI</strong> tab. It watches for active sessions on these ports and labels the protocol accordingly:</p>
+  <table class="ref-table">
+    <tbody><tr><th>Port</th><th>Protocol</th></tr>
+    <tr><td class="ctrl">3389</td><td class="desc">RDP</td></tr>
+    <tr><td class="ctrl">4172</td><td class="desc">PCoIP</td></tr>
+    <tr><td class="ctrl">22443</td><td class="desc">Blast Extreme</td></tr>
+    <tr><td class="ctrl">8443</td><td class="desc">Blast (UAG)</td></tr>
+    </tbody>
+  </table>
+  <p>A background worker pings the session's remote host every 15 seconds and grades it: <strong style="color:#39ff14">good</strong>, <strong style="color:#ff9f43">fair</strong> (loss ≥1% or RTT ≥80ms), <strong style="color:#ff5b5b">poor</strong> (loss ≥5% or RTT ≥150ms), or <strong style="color:#6a9ab8">unknown</strong>. A transition into "poor" raises an alert (deduped for 10 minutes). The table shows Health, Protocol, Client, Host, RTT, Loss, and Bandwidth per session.</p>
+</div>
+
+<div id="evidence" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>ISP <span class="accent">Evidence Pack</span></h2>
+  <p>Sidebar <span class="ui-el">⎙ EVIDENCE</span> opens a small dialog — pick a <span class="ui-el">Period</span> (7 / 14 / 30 / 60 / 90 days) and click <span class="ui-el">Generate PDF</span>. An 8-page report opens automatically once it's built:</p>
+
+  <table class="ref-table">
+    <tbody>
+    <tr><th>Page</th><th>Contents</th></tr>
+    <tr><td class="ctrl">1</td><td class="desc">Summary: uptime %, outage count, downtime, download-speed stats vs. advertised, percentiles, peak-hours (20:00–22:00) vs. off-peak comparison</td></tr>
+    <tr><td class="ctrl">2</td><td class="desc">Upload speed stats, latency/jitter stats, and a methodology note</td></tr>
+    <tr><td class="ctrl">3</td><td class="desc">Download-over-time chart, outage windows shaded red</td></tr>
+    <tr><td class="ctrl">4</td><td class="desc">Upload-over-time chart</td></tr>
+    <tr><td class="ctrl">5</td><td class="desc">Latency-over-time chart</td></tr>
+    <tr><td class="ctrl">6</td><td class="desc">Download-speed distribution histogram</td></tr>
+    <tr><td class="ctrl">7</td><td class="desc">Daily breakdown table (date / tests / median DL / median UL / median ping)</td></tr>
+    <tr><td class="ctrl">8</td><td class="desc">Full outage log, numbered with start/end/duration</td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-box warn">
+    <span class="icon">⚠</span>
+    <p><strong>Set your advertised speeds first, or the comparisons show as 0.</strong> The pack compares your measured speeds against <code>advertised_down</code>/<code>advertised_up</code> from the config file — but as of this build there's no field for them in the Settings dialog. Add them to <code>speedtest_config.json</code> directly (values in Mbps) before generating the pack.</p>
+  </div>
+</div>
+
+<div id="export-report" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Export &amp; <span class="accent">Reports</span></h2>
+  <div class="section-intro">Three distinct ways to get data out — pick based on what you need.</div>
+
+  <h3>Export Speed Data (CSV)</h3>
+  <p>Sidebar <span class="ui-el">⬇ EXPORT</span> — pick a <span class="ui-el">Period</span> (<code>Today</code>, <code>Last 7 days</code>, <code>Last 30 days</code>, <code>All</code>; "Today" means since local midnight) and click <span class="ui-el">Export CSV</span>. Suggested filename: <code>speedtest_YYYYMMDD_HHMM.csv</code>, columns <code>Timestamp, Download (Mbps), Upload (Mbps), Ping (ms)</code>. CSV only — no JSON option in this particular dialog.</p>
+
+  <h3>Generate Network Report</h3>
+  <p>Sidebar <span class="ui-el">⎙ REPORT</span> opens a much richer dialog that builds an interactive HTML report:</p>
+  <ul class="feature-list">
+    <li><strong>Time period:</strong> Last 1 hour / 6 hours / 24 hours / 7 days / 30 days / All Time</li>
+    <li><strong>Contents:</strong> checkboxes for Speed History, DNS Performance, Remote Agents, Topology &amp; Traffic, Firewall Logs, Honeypot Activity (or just "Full Summary")</li>
+    <li><strong>Storage:</strong> defaults to <code>~/Documents/NetworkMonitor</code>, filenamed <code>nm_report_YYYYMMDD_HHMMSS.html</code>, with a <span class="ui-el">📂 View Previous Reports</span> browser</li>
+    <li><strong>Schedule:</strong> optional Hourly/Daily/Weekly auto-generation at a chosen time of day</li>
+  </ul>
+  <p>The generated report has its own embedded AI panel (<span class="ui-el">✦ Analyse Report</span>) that calls back to the desktop app's local web server — so that button only works while the app is running.</p>
+
+  <div class="info-box tip"><span class="icon">✓</span><p>This report also embeds Chart.js inline (cached to <code>~/.nm_chartjs.js</code> after the first fetch), so its charts still render if you reopen it offline later — only the AI button needs the app running.</p></div>
+</div>
+
+<div id="settings" class="section">
+  <div class="section-label">02 — Main Dashboard</div>
+  <h2>Settings &amp; <span class="accent">Themes</span></h2>
+  <p>Sidebar <span class="ui-el">⚙ PREFS</span> opens a single scrolling dialog (not a tabbed one) with these sections, top to bottom:</p>
+
+  <table class="ref-table">
+    <tbody>
+    <tr><th>Section</th><th>What's in it</th></tr>
+    <tr><td class="ctrl">Speedtest CLI</td><td class="desc">Path field + Browse/Test buttons</td></tr>
+    <tr><td class="ctrl">Wireshark / tshark</td><td class="desc">Path field + Browse/Test/Auto-detect</td></tr>
+    <tr><td class="ctrl">Colour Theme</td><td class="desc">12-swatch grid (see below)</td></tr>
+    <tr><td class="ctrl">DNS Check Hosts</td><td class="desc">Comma-separated host list + Reset to defaults</td></tr>
+    <tr><td class="ctrl">Speed Test Schedule</td><td class="desc">Interval in minutes + web-server port (default 8765, restart to apply)</td></tr>
+    <tr><td class="ctrl">Tools</td><td class="desc">MobaXterm folder path + Browse/Test</td></tr>
+    <tr><td class="ctrl">Alerts</td><td class="desc">Enable toggle, debug logging, firewall drop-logging, per-metric thresholds, webhook URL, debounce minutes, ping host, and the remote-client license-key requirement</td></tr>
+    <tr><td class="ctrl">Data</td><td class="desc">"Purge corrupt speed readings…" cleanup button</td></tr>
+    </tbody>
+  </table>
+  <p><kbd>Return</kbd> saves the dialog, <kbd>Escape</kbd> cancels it — the only keyboard shortcuts anywhere in Settings.</p>
+
+  <h3>Colour Themes — 12, Not 5</h3>
+  <p>The theme picker offers twelve named palettes, each defining a download/upload/ping color triple:</p>
+  <p style="font-family:var(--mono); color:var(--acc1); font-size:13px;">Ocean (default) &nbsp;·&nbsp; Sunset &nbsp;·&nbsp; Neon &nbsp;·&nbsp; Pastel &nbsp;·&nbsp; Mono &nbsp;·&nbsp; Crimson &nbsp;·&nbsp; Arctic &nbsp;·&nbsp; Hacker &nbsp;·&nbsp; Purple &nbsp;·&nbsp; Gold &nbsp;·&nbsp; Fire &nbsp;·&nbsp; Ice</p>
+
+  <h3>AI Provider — Not in Settings</h3>
+  <p>Somewhat unusually, the Ollama/Anthropic provider choice isn't in this dialog at all — it lives locally in the two AI-enabled windows themselves (the Topology window's Flow Detail panel, and the AI Capture Analysis window). See <a class="ui-el" href="#ai-overview" style="text-decoration:none;">How AI Works Here</a>.</p>
+
+  <h3>Remote-Client Licensing</h3>
+  <p>The Alerts section includes a checkbox <strong>"Require licence key for remote clients"</strong> (on by default) and a <span class="ui-el">Manage licences…</span> button that opens the License Manager — generate a key, copy it, and paste it into <code>nm_client.py</code>'s <span class="ui-el">Key</span> field on the connecting machine. This gate only applies to <code>nm_client.py</code>; the browser dashboard itself is never gated, even when the checkbox is on.</p>
+</div>
+
+<!-- ══════════════ 03 — WIRESHARK MONITOR ══════════════ -->
+
+<div id="wireshark" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2><span class="accent">Wireshark</span> Monitor</h2>
+  <div class="section-intro">A full tshark-backed capture window — live packet list, display &amp; capture filters, protocol tree and hex panes, and the standard Statistics/Analyse menus, plus three new one-click analyzers borrowed from the Topology window.</div>
+
+  <p>Open it from the top bar's <span class="ui-el">Wireshark</span> button or the sidebar's <span class="ui-el">WS CAPTURE</span> icon. The window opens titled <strong>Wireshark Monitor</strong> (1440×940), with a header reading <strong>WIRESHARK MONITOR — Live Packet Capture &amp; Deep Inspection</strong> and the detected tshark version shown top-right.</p>
+
+  <div class="info-box note"><span class="icon">ℹ</span><p>Three toolbar buttons — <span class="ui-el">⚠ Behavior</span>, <span class="ui-el">◎ Traffic</span>, <span class="ui-el">◼ IDS</span> — actually run inside the <em>Topology</em> window's analysis engine, not this one. If Topology isn't open, clicking them just tells you to open it first.</p></div>
+</div>
+
+<div id="ws-capture" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Starting a <span class="accent">Capture</span></h2>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Pick an interface</strong><p>The <span class="ui-el">Interface:</span> dropdown lists each one as "N. friendly name".</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><strong>(Optional) set a capture filter</strong><p>The <strong>Capture Filter (BPF)</strong> combobox is pre-loaded with presets — see <a class="ui-el" href="#ws-filters" style="text-decoration:none;">Filters</a> — applied only at start.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Click ▶ Start Capture</strong><p>Live packets stream in, color-coded by protocol, with a running count on the right.</p></div></div>
+    <div class="step"><div class="step-num">4</div><div class="step-body"><strong>◼ Stop / ⊘ Clear when done</strong><p>Stop ends the capture; Clear wipes the packet list.</p></div></div>
+  </div>
+
+  <h3>Toolbar Buttons</h3>
+  <table class="ref-table">
+    <tbody>
+    <tr><th>Button</th><th>Does</th></tr>
+    <tr><td class="ctrl">▶ Start Capture</td><td class="desc">Begins a live tshark capture on the selected interface</td></tr>
+    <tr><td class="ctrl">◼ Stop</td><td class="desc">Ends the capture</td></tr>
+    <tr><td class="ctrl">⊘ Clear</td><td class="desc">Empties the packet list</td></tr>
+    <tr><td class="ctrl">📂 Open PCAP</td><td class="desc">Loads a .pcap / .pcapng / .cap file</td></tr>
+    <tr><td class="ctrl">💾 Save PCAP</td><td class="desc">Saves the current capture as .pcap or .pcapng</td></tr>
+    <tr><td class="ctrl">❆ AI Query</td><td class="desc">Opens the AI Capture Analysis window</td></tr>
+    <tr><td class="ctrl">⚠ Behavior</td><td class="desc">Runs the Topology window's rule-based behavioral analysis</td></tr>
+    <tr><td class="ctrl">◎ Traffic</td><td class="desc">Runs the Topology window's traffic-pattern analysis</td></tr>
+    <tr><td class="ctrl">◼ IDS</td><td class="desc">Opens a full HTML IDS dashboard in your browser</td></tr>
+    <tr><td class="ctrl">Auto-scroll</td><td class="desc">Checkbox, on by default</td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-box warn"><span class="icon">⚠</span><p>A live capture auto-stops at <strong>512 MB</strong>. In-memory history is capped at 40,000 packets (20,000 visible in the list at once).</p></div>
+</div>
+
+<div id="ws-filters" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2><span class="accent">Filters</span></h2>
+
+  <h3>Display Filter</h3>
+  <p>The <strong>Display Filter:</strong> box takes normal Wireshark syntax (e.g. <code>ip.addr == 192.168.1.1 &amp;&amp; tcp</code>) — type and press <kbd>Return</kbd>, or click <span class="ui-el">Apply</span>. <span class="ui-el">✕ Clear</span> resets it. It's a plain text entry with no autocomplete or filter history.</p>
+
+  <h3>Capture Filter (BPF)</h3>
+  <p>A separate combobox, applied only when a capture starts, pre-loaded with common presets: <code>tcp</code>, <code>udp</code>, <code>icmp</code>, <code>arp</code>, per-port presets (<code>port 80</code>, <code>port 443</code>, <code>port 53</code>, <code>port 22</code>, <code>port 3389</code>...), DHCP/NTP/mDNS/SSDP ports, host/net matches, SYN-only and setup/teardown TCP-flag filters, and packet-size filters. You can also type your own.</p>
+
+  <h3>Right-Click Quick Filters</h3>
+  <p>Right-click any packet row for: <strong>Follow TCP Stream</strong>, <strong>Follow UDP Stream</strong>, <strong>Copy Source IP</strong>, <strong>Copy Dest IP</strong>, <strong>Copy Info</strong>, <strong>Filter by Source</strong>, <strong>Filter by Dest</strong>, <strong>Filter by Protocol</strong>.</p>
+</div>
+
+<div id="ws-packets" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Inspecting <span class="accent">Packets</span></h2>
+
+  <p>The packet list columns are <strong>No., Time (s), Source, Destination, Protocol, Len, Info</strong> — click a header to sort, click a row to load its detail below.</p>
+
+  <h3>Packet Details &amp; Hex Dump</h3>
+  <p>Selecting a row fills two resizable panes underneath: a <strong>Packet Details</strong> protocol tree (from <code>tshark -V</code>) on the left, and a <strong>Hex Dump</strong> (from <code>tshark -x</code>) on the right, both side by side in a draggable split.</p>
+
+  <div id="protocols">
+  <h3>Colour Coding</h3>
+  <p>Every row is tinted by its dominant protocol — the same palette is reused across the Wireshark list, the Topology canvas, the 3D view, and the web pages:</p>
+  <div class="colour-row"><span class="colour-dot" style="background:#2bff5c;"></span> HTTP</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#b4ff1a;"></span> HTTP/2</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#00ffa3;"></span> TLS</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#12d47a;"></span> SSL</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#ffb300;"></span> DNS</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#ff3ec8;"></span> mDNS</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#ffe600;"></span> DHCP</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#ff8c1a;"></span> DHCPv6</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#ff2d55;"></span> ICMP</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#ff7043;"></span> ICMPv6</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#00b3ff;"></span> TCP</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#9b4dff;"></span> UDP</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#00e5e0;"></span> ARP</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#7f9fbf;"></span> Other</div>
+  <div class="colour-row"><span class="colour-dot" style="background:#ff1744;"></span> Blocked (firewall)</div>
+  </div>
+</div>
+
+<div id="ws-menus" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2><span class="accent">Analyse</span> &amp; Statistics</h2>
+  <div class="info-box note"><span class="icon">ℹ</span><p>The menu is spelled <strong>"Analyse"</strong> (British spelling) in the actual menu bar.</p></div>
+
+  <h3>Analyse Menu</h3>
+  <ul class="feature-list">
+    <li><strong>Expert Information</strong> — severity-tagged findings from <code>tshark -z expert,</code></li>
+    <li><strong>Follow TCP / UDP / TLS Stream</strong> — reassembled conversation text, colour-split by direction</li>
+    <li><strong>Decode As…</strong> — a filter shortcut (transport + port → protocol), not a true decode override</li>
+    <li><strong>Show Packet Bytes</strong> — scrolls the Hex Dump pane to the top</li>
+  </ul>
+
+  <h3>Statistics Menu</h3>
+  <ul class="feature-list">
+    <li><strong>Summary / Capture File Properties</strong></li>
+    <li><strong>Protocol Hierarchy</strong></li>
+    <li><strong>Conversations</strong> — separate items for Ethernet, IPv4, IPv6, TCP, UDP</li>
+    <li><strong>Endpoints</strong> — separate items for IPv4, IPv6, TCP, UDP</li>
+    <li><strong>I/O Graph</strong> — an embedded matplotlib throughput + packet-rate chart</li>
+    <li><strong>Packet Lengths</strong></li>
+    <li><strong>DNS Statistics</strong> / <strong>HTTP Statistics</strong></li>
+  </ul>
+  <p>Every item here shells out to a specific <code>tshark -z ...</code> report and renders it in its own window.</p>
+</div>
+
+<div id="ws-pcap" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>PCAP <span class="accent">Files</span></h2>
+  <p><span class="ui-el">📂 Open PCAP</span> accepts <code>.pcap</code>, <code>.pcapng</code>, or <code>.cap</code>. <span class="ui-el">💾 Save PCAP</span> writes <code>.pcap</code> or <code>.pcapng</code> — both operate on the same raw scratch file tshark wrote (<code>nm_wireshark.pcap</code> in the OS temp folder), so it's a straight copy with no format conversion.</p>
+</div>
+
+<div id="ws-ai" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>AI <span class="accent">Query</span></h2>
+
+  <div class="info-box tip"><span class="icon">✓</span><p><strong>Runs on Ollama by default — no API key needed.</strong> Anthropic is available as an optional alternate provider if you switch to it and supply your own key.</p></div>
+
+  <p>Click <span class="ui-el">❆ AI Query</span> to open <strong>AI Capture Analysis</strong>. The <span class="ui-el">AI:</span> dropdown offers <code>Ollama (local)</code> or <code>Anthropic</code>; picking Ollama hides the key field entirely (status reads "Provider: Ollama (local, no key)"). Picking Anthropic reveals a masked key entry, Show/Hide, and Save Key.</p>
+
+  <h3>Quick Prompts</h3>
+  <ul class="feature-list">
+    <li>Summarise what happened in this capture</li>
+    <li>Are there any suspicious or unusual patterns?</li>
+    <li>Which hosts are generating the most traffic?</li>
+    <li>What DNS lookups were made?</li>
+    <li>Are there any signs of network errors or retransmissions?</li>
+    <li>What connections were established and to where?</li>
+  </ul>
+  <p>Or type your own question and click <span class="ui-el">Ask AI</span> (or press <kbd>Return</kbd>).</p>
+
+  <h3>What Context Is Sent</h3>
+  <p>Protocol/host counts, top 10 sources and destinations, capture duration, packet rate, the first 20 and last 10 packets, and (if a capture file exists) tshark's own protocol-hierarchy, IPv4-conversation, and DNS-query stats — capped at 6,000 characters.</p>
+
+  <div class="info-box warn"><span class="icon">⚠</span><p>If Ollama isn't installed, the app tells you exactly how to get it (a platform-specific one-liner) rather than failing silently — everything else in the app keeps working while AI is unavailable.</p></div>
+</div>
+
+<div id="ws-report" class="section">
+  <div class="section-label">03 — Wireshark Monitor</div>
+  <h2>Generating <span class="accent">Reports</span></h2>
+  <p>Inside the AI Query window: ask a question, then click <span class="ui-el">+ Add to Report</span> to queue that Q&amp;A. Reorder with <span class="ui-el">▲ Move Up</span> / <span class="ui-el">▼ Move Down</span>, drop one with <span class="ui-el">✕ Remove</span>, then click <span class="ui-el">📄 Generate Report</span>.</p>
+  <p>The output is a single self-contained HTML file (<code>capture_analysis_YYYYMMDD_HHMMSS.html</code>) with a summary table and one card per queued question/answer — no external assets, so it opens correctly offline forever. A footer note explains how to print it to PDF from your browser.</p>
+  <div class="info-box note"><span class="icon">ℹ</span><p>The report's subtitle line is hardcoded to read "Powered by Claude (Anthropic)" even when Ollama actually answered the questions — a cosmetic leftover, not a sign your API key is being used.</p></div>
+</div>
+
+<!-- ══════════════ 04 — TOPOLOGY & VISUALIZATION ══════════════ -->
+
+<div id="etherape" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2><span class="accent">EtherApe</span> Overview</h2>
+  <div class="section-intro">A live force-graph of hosts and flows — the desktop anchor for six related visualizations, most of which are also reachable as web pages.</div>
+
+  <p>Open it from the top bar's <span class="ui-el">Topology</span> button or sidebar's <span class="ui-el">◎ TOPOLOGY</span> icon. Window title: <strong>EtherApe — Network Topology Monitor</strong>, sized 1440×940. Node size and line thickness scale with traffic volume; colours track protocol (see the legend under <a class="ui-el" href="#protocols" style="text-decoration:none;">Protocol Colours</a>); animated pulses show direction.</p>
+
+  <div class="quick-links">
+    <a class="quick-link" href="#ea-capture">Live Capture</a>
+    <a class="quick-link" href="#ea-topology">Topology Canvas</a>
+    <a class="quick-link" href="#ea-flows">Flow Details</a>
+    <a class="quick-link" href="#ea-replay">PCAP Replay</a>
+    <a class="quick-link" href="#viz-3d">3D View</a>
+    <a class="quick-link" href="#viz-radar">Radar</a>
+    <a class="quick-link" href="#viz-sankey">Sankey</a>
+    <a class="quick-link" href="#viz-talkers">Top Talkers</a>
+  </div>
+</div>
+
+<div id="ea-capture" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Live <span class="accent">Capture</span></h2>
+
+  <p>Toolbar controls: <span class="ui-el">▶ START</span> / <span class="ui-el">◼ STOP</span> / <span class="ui-el">⊘ CLEAR</span>, an interface dropdown, and a wide set of filtering and analysis tools packed into two toolbar rows.</p>
+
+  <h3>Protocol Filter</h3>
+  <p>A dropdown limiting the view to <code>ALL / TCP / UDP / DNS / HTTP / TLS / ICMP / ARP / DHCP</code>. Separately, a <strong>BPF FILTER</strong> combobox (same presets as Wireshark's capture filter) restricts what's actually captured, and a <strong>COUNTRY</strong> search box filters the display by geography.</p>
+
+  <h3>Display Options</h3>
+  <ul class="feature-list">
+    <li><strong>Hold</strong> — freezes decay/animation without stopping the capture</li>
+    <li><strong>Labels</strong> / <strong>Legend</strong> — toggle on-canvas text</li>
+    <li><strong>DNS</strong> — toggles hostname resolution</li>
+    <li><strong>FLOW WIDTH</strong> slider with Thin/Medium/Bold/Thick presets</li>
+    <li><strong>MIN TRAFFIC</strong> threshold slider to hide low-volume flows</li>
+  </ul>
+</div>
+
+<div id="ea-topology" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Topology <span class="accent">Canvas</span></h2>
+
+  <h3>Reading the Display</h3>
+  <p>Left-click a node to pin/drag it and see its detail; left-click a flow line (or its curve, in Sankey layout mode) to open <a class="ui-el" href="#ea-flows" style="text-decoration:none;">Flow Detail</a>. Double-click a node for its geo/firewall popup. Toggle between straight-line and curved-Sankey layouts with <span class="ui-el">⇉ SANKEY</span> / <span class="ui-el">◎ RADIAL</span>.</p>
+
+  <h3>Traffic Decay</h3>
+  <p>Unless <span class="ui-el">Hold</span> is checked, every node and flow fades continuously — thickness shrinks by a factor of 0.9985 on every ~50ms render tick — and is removed once it's been idle roughly 5 minutes (nodes) or 2 minutes (flows). It's a smooth fade, not a hard cutoff.</p>
+
+  <h3>Limits</h3>
+  <p>The canvas shows at most <strong>500 nodes</strong> and <strong>2,000 flows</strong> at once (the same caps apply to the 3D view).</p>
+</div>
+
+<div id="ea-flows" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Flow <span class="accent">Details</span></h2>
+
+  <h3>1 — Click a Flow Line on the Canvas</h3>
+  <p>Or...</p>
+  <h3>2 — Click a Row in the Active Flows Table</h3>
+  <p>Either opens the same detail.</p>
+
+  <h3>Flow Detail Panel Contents</h3>
+  <p>Protocol, Source IP (with resolved hostname if DNS is on), Destination, Packet count, approximate data volume, and average packet size — plus an inline "Ask about this flow..." AI box with its own provider/model selector.</p>
+
+  <h3>Resizing Panels</h3>
+  <p>The right-hand side is a stack of three independently resizable panes — <strong>Active Hosts</strong>, <strong>Active Flows</strong>, <strong>Flow Detail</strong> — dragged via their shared sash, and the whole right panel can be dragged wider/narrower against the canvas.</p>
+</div>
+
+<div id="ea-replay" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>PCAP <span class="accent">Replay</span></h2>
+  <p>Load a file with <span class="ui-el">📂 PCAP</span>, then <span class="ui-el">⏵ REPLAY</span> plays it back through the same live-rendering pipeline at a chosen speed — <strong>0.1×, 0.25×, 0.5×, 1×, 2×, 4×, 8×, or 16×</strong> — and <span class="ui-el">⏹ STOP</span> ends playback.</p>
+</div>
+
+<div id="ea-font" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Font &amp; <span class="accent">Display</span></h2>
+  <p>A <span class="ui-el">FONT</span> family dropdown and a <span class="ui-el">SIZE</span> spinner (6–24pt) in the toolbar's right edge control label rendering on the canvas. Separately, a zoom percentage readout and <span class="ui-el">⊟ Reset View</span> button sit at the canvas's bottom-left.</p>
+</div>
+
+<div id="viz-3d" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>3D Network <span class="accent">Visualization</span></h2>
+  <p>Open it from the topology toolbar's <span class="ui-el">⬡ 3D VIEW</span> button, or browse directly to <code>http://localhost:8765/3d</code>.</p>
+
+  <p>The scene: a starfield inside an inverted sky-gradient sphere, four faintly translucent "glass" walls so the stars glow through rather than closing off the room, a grid floor, ambient bloom-post-processed lighting, and roughly 3,200 twinkling star sprites plus ~150 brighter flare sprites. Hosts and flows render as nodes and glowing lines in this space, color-coded exactly like the 2D topology view.</p>
+
+  <h3>Controls</h3>
+  <table class="ref-table">
+    <tbody>
+    <tr><th>Control</th><th>Does</th></tr>
+    <tr><td class="ctrl">✦ Bloom</td><td class="desc">Click to cycle Off → Subtle → Normal → Strong → Max; right-click to go back</td></tr>
+    <tr><td class="ctrl">⊛ SPREAD</td><td class="desc">Adjusts node spacing, 1.0–5.0×</td></tr>
+    <tr><td class="ctrl">⛔ BLOCKED</td><td class="desc">Highlights blocked flows</td></tr>
+    <tr><td class="ctrl">🏷 LABELS / ▦ GRID</td><td class="desc">Toggle on-screen labels / floor+wall grid lines</td></tr>
+    <tr><td class="ctrl">⌖ RESET</td><td class="desc">Resets the camera</td></tr>
+    <tr><td class="ctrl">TOP</td><td class="desc">Slider limiting to the top N nodes by traffic (5–500)</td></tr>
+    <tr><td class="ctrl">▦ TOP TALKERS</td><td class="desc">Opens the Top Flow Talkers overlay in-page</td></tr>
+    <tr><td class="ctrl">🌍 WORLD VIEW</td><td class="desc">Wraps the topology onto a rotating globe</td></tr>
+    <tr><td class="ctrl">☠ ATTACK SIM</td><td class="desc">Starts/stops the Attack Drill</td></tr>
+    <tr><td class="ctrl">⏻ KILL CONNECTION</td><td class="desc">Cuts all traffic except loopback</td></tr>
+    <tr><td class="ctrl">⛔ FIREWALL</td><td class="desc">Opens the firewall rules window</td></tr>
+    </tbody>
+  </table>
+
+  <h3>World View</h3>
+  <p>Wraps every host onto a rotating globe at its real latitude/longitude (hosts sharing a location fan into a ring), flows follow great-circle arcs, and a real day/night terminator is computed from the current UTC time and day of year — genuinely tracking where it's actually daytime on Earth right now. The globe auto-rotates roughly once per minute; click to pause it, press the button again to exit.</p>
+</div>
+
+<div id="viz-radar" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Sonar &amp; <span class="accent">Threat Radar</span></h2>
+
+  <h3>Sonar Radar</h3>
+  <p>A mode inside the Top Flow Talkers overlay (toggle <span class="ui-el">↙ INCOMING</span>). Every host plots as a blip at its real location — outgoing traffic cyan, incoming green, blip size by volume, blocked hosts red with a cross. An audible ping fires only for genuinely <em>new</em> connections (the existing list is seeded silently on open, so it doesn't burst-ping everything at once).</p>
+
+  <h3>Threat Radar</h3>
+  <p>A dedicated page at <code>http://localhost:8765/threats</code>, or the topology toolbar's <span class="ui-el">⚠ THREATS</span> button. Same sweep/projection as the sonar scope, but scoped to hostile hosts only — honeypot sources, blocked hosts, attack traffic, and flagged-but-not-yet-blocked hosts, each carrying a country flag, with critical threats pulsing an expanding ring.</p>
+  <p>A third, narrower instance of this same radar is embedded directly in the Honeypot window, scoped just to honeypot hit geography.</p>
+</div>
+
+<div id="viz-sankey" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Flow Map <span class="accent">(Sankey)</span></h2>
+  <p>Browse to <code>http://localhost:8765/sankey</code> ("Top Flow Talkers"). Internal hosts form a left-hand column, external hosts a right-hand column, and each flow between them is a gradient-filled ribbon whose width scales with byte volume — fully opaque at both ends, translucent in the middle, with a soft glow and small particles animating along its length to show direction. Side panels list <strong>Active Hosts</strong>, <strong>Active Flows</strong>, and <strong>Flow Detail</strong>, with the same <span class="ui-el">⚠ BEHAV</span> / <span class="ui-el">◉ TRAFFIC</span> / <span class="ui-el">⚠ IDS</span> analysis buttons as elsewhere.</p>
+</div>
+
+<div id="viz-talkers" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Top <span class="accent">Talkers</span></h2>
+  <p>Browse to <code>http://localhost:8765/talkers</code>. A live-ranked table, columns <strong>#, Host, Org/Country, Proto, Traffic, Packets, Share</strong>, refreshing every 2 seconds (capped at the top 100 hosts by bytes) with a <span class="ui-el">⏸⏸ PAUSE</span> toggle to freeze it for reading. Org/country come from a background geo-IP lookup, so they fill in progressively rather than appearing instantly.</p>
+</div>
+
+<div id="viz-devices" class="section">
+  <div class="section-label">04 — Topology &amp; Visualization</div>
+  <h2>Devices &amp; <span class="accent">Vendors</span></h2>
+  <p>Device identification isn't one single screen — it's the same MAC-vendor lookup surfacing in two places:</p>
+  <ul class="feature-list">
+    <li><strong>Desktop:</strong> <span class="ui-el">◈ QUALITY</span> → the <strong>Devices</strong> tab — a table of IP / MAC / Name / Last seen, with <span class="ui-el">⟳ Scan network</span> (ARP scan) and <span class="ui-el">✎ Rename selected</span> buttons.</li>
+    <li><strong>Web:</strong> <code>/monitor</code> → the <strong>Devices</strong> tab — a card per device with an online/offline dot, vendor-derived name, IP+MAC, and last-seen time; tap a card to rename it.</li>
+  </ul>
+  <p>Vendor lookup checks a downloaded IEEE OUI database first, then a curated fallback table covering Apple, Amazon, Google, Microsoft, TP-Link, Raspberry Pi, Sonos, and more. Names set in either place are used everywhere that IP appears — Top Talkers, topology labels, everywhere.</p>
+</div>
+
+<!-- ══════════════ 05 — SECURITY & THREATS ══════════════ -->
+
+<div id="honeypot" class="section">
+  <div class="section-label">05 — Security &amp; Threats</div>
+  <h2><span class="accent">Honeypot</span></h2>
+  <div class="section-intro">Binds 19 TCP and 10 UDP decoy ports mimicking real services, fingerprints who connects, and can stall them for up to 10 minutes without wasting real bandwidth.</div>
+
+  <p>Open it from the topology toolbar's <span class="ui-el">🍯 HONEYPOT</span> button (tries the web console at <code>/honeypot</code> first, falls back to a desktop window) or browse directly to <code>http://localhost:8765/honeypot</code>.</p>
+
+  <h3>Decoy Ports</h3>
+  <table class="ref-table">
+    <tbody>
+    <tr><th>TCP</th><th>UDP</th></tr>
+    <tr><td class="desc">22 SSH · 23 Telnet · 21 FTP · 25 SMTP · 445 SMB · 3389 RDP · 3306 MySQL · 5432 PostgreSQL · 6379 Redis · 1433 MSSQL · 27017 MongoDB · 9200 Elasticsearch · 5900 VNC · 8080/8443 HTTP(S)-alt · 2222/2323 SSH/Telnet-alt · 5984 CouchDB · 2375 Docker API · 502 Modbus/ICS</td>
+    <td class="desc">53 DNS · 123 NTP · 161 SNMP · 1900 SSDP · 11211 memcached · 137 NetBIOS · 5353 mDNS · 389 CLDAP · 19 chargen · 111 portmap</td></tr>
+    </tbody>
+  </table>
+  <p>Connections are fingerprinted against roughly 30 known scanner/tool signatures (libssh, paramiko, SMB probes, admin-panel scans, CGI exploits, VNC handshakes, and more) and fake service banners are sent for realism.</p>
+
+  <h3>Tarpit</h3>
+  <p>TCP connections can be held open up to <strong>10 minutes</strong>, drip-fed one byte every 2–6 seconds, capped at 400 concurrent held sockets. UDP decoys are never tarpitted and never reply, so the honeypot can't be abused as a reflection amplifier. Hits are logged and alerted <em>before</em> tarpitting starts, so the hold never delays detection.</p>
+
+  <h3>Buttons</h3>
+  <table class="ref-table">
+    <tbody>
+    <tr><th>Button</th><th>Does</th></tr>
+    <tr><td class="ctrl">▶ START / ■ STOP</td><td class="desc">Binds/releases all decoy ports</td></tr>
+    <tr><td class="ctrl">🧪 TEST</td><td class="desc">Fires real connections at the honeypot from this machine to prove hits register</td></tr>
+    <tr><td class="ctrl">⛔ BLOCK SELECTED</td><td class="desc">Firewall-blocks the selected row's source IP</td></tr>
+    <tr><td class="ctrl">✧ AI ANALYSIS</td><td class="desc">Summarizes current hits via the local AI</td></tr>
+    <tr><td class="ctrl">Auto-block after 2 hits</td><td class="desc">Checkbox — auto-blocks a source on its 2nd connection</td></tr>
+    <tr><td class="ctrl">Tarpit (stall connections)</td><td class="desc">Checkbox, on by default</td></tr>
+    </tbody>
+  </table>
+
+  <p>5 or more distinct ports probed by one source within 2 minutes, or 12+ connection attempts in that window, raises a sweep/volume alert (one per source per 10-minute window).</p>
+</div>
+
+<div id="firewall" class="section">
+  <div class="section-label">05 — Security &amp; Threats</div>
+  <h2><span class="accent">Firewall</span> Management</h2>
+  <p>Open via the topology toolbar's <span class="ui-el">⛔ FIREWALL</span> button, or by clicking the "N blocked" pill visible in several other windows. The window itself only lists and unblocks — blocking a host is done from wherever you spot it (honeypot's Block Selected, a topology right-click, country/range blocking, or auto-block).</p>
+
+  <p>A live search box filters the table by IP, device name, or rule name as you type — no Enter needed — with a "N of M shown" counter. Columns: <strong>Blocked address, Name, Rule name, State</strong>.</p>
+
+  <h3>Backend</h3>
+  <p>Windows uses <code>netsh advfirewall</code> rules; Linux uses its own dedicated <code>nftables</code> table (<code>nm_sentinel</code>) so your existing ruleset is never touched. Every rule this app creates is named <code>NM_BLOCK_&lt;ip&gt;</code>, so they're easy to spot if you ever inspect the firewall directly.</p>
+
+  <div class="info-box warn"><span class="icon">⚠</span><p>If the window shows "NOT RUNNING ELEVATED," new blocks will fail silently at the OS level — restart the app as Administrator (Windows) or with <code>sudo</code> (Linux).</p></div>
+</div>
+
+<div id="killswitch" class="section">
+  <div class="section-label">05 — Security &amp; Threats</div>
+  <h2>Kill <span class="accent">Switch</span></h2>
+  <p>A single button — <span class="ui-el">⏻ KILL CONNECTION</span> — in the Topology window's toolbar and on the web 3D/flow-map views (not on the main speed-test dashboard). Clicking it shows a confirmation dialog, then blocks all inbound and outbound traffic on the machine.</p>
+  <div class="info-box tip"><span class="icon">✓</span><p>Loopback (127.0.0.1) is never filtered by either backend, so the local dashboard stays reachable and you can turn it back off from the same button — now reading <span class="ui-el">⏻ RE-ENABLE CONNECTION</span> — without needing another machine.</p></div>
+  <p>Requires Administrator/root. If left on from a previous session, the app correctly detects and reflects that state on reopening rather than losing track of it.</p>
+</div>
+
+<div id="geoblock" class="section">
+  <div class="section-label">05 — Security &amp; Threats</div>
+  <h2>Country / <span class="accent">Geo Blocking</span></h2>
+
+  <p>In the topology toolbar: a <strong>COUNTRY</strong> box filters what's <em>displayed</em> (not blocking), while <strong>BLOCK CC</strong> (a 2-letter code) + <span class="ui-el">⛔ BLOCK</span> blocks every currently-known IP from that country and enrolls it for future auto-blocking — there's no separate toggle for the two; blocking a country always does both. A <strong>BLOCK RANGE</strong> field alongside it blocks by CIDR instead. <span class="ui-el">📋 MANAGE</span> opens a window listing every blocked country with a per-row <span class="ui-el">Unblock</span> button.</p>
+
+  <div class="info-box warn">
+    <span class="icon">⚠</span>
+    <p><strong>Auto-blocking newly-seen IPs from a blocked country only runs on Windows</strong> in this build. The initial "block everyone currently known" action works on both platforms; the ongoing watch for new arrivals from that country does not run on Linux.</p>
+  </div>
+
+  <p>Geolocation has no bundled database — it calls the free public <code>ip-api.com</code> service live and caches results, so country blocking (and the radar/talkers views) depend on outbound internet access and that service's rate limits.</p>
+</div>
+
+<div id="threatintel" class="section">
+  <div class="section-label">05 — Security &amp; Threats</div>
+  <h2>Threat-Intel <span class="accent">Feeds</span></h2>
+  <p>Three feeds are pre-configured and refreshed automatically every 8 hours:</p>
+  <ul class="feature-list">
+    <li><strong>Emerging Threats</strong> — IP block-rule list</li>
+    <li><strong>Feodo Tracker</strong> — abuse.ch's C2 IP blocklist</li>
+    <li><strong>ET Compromised IPs</strong> — Emerging Threats' compromised-hosts list</li>
+  </ul>
+  <p>Each feed is cached to disk, so a download failure falls back to the last good copy rather than leaving you unprotected. A match against any feed raises a critical alert (deduped hourly per IP). Status shows in the desktop Alerts tab and the web <code>/monitor</code> page as "N bad IPs · M ranges · X countries seen," with a relative "last updated" time.</p>
+  <div class="info-box note"><span class="icon">ℹ</span><p>Adding a custom feed isn't exposed as a form in this build — it's read from a <code>threat_feeds</code> array in the JSON config file, which currently needs hand-editing rather than a Settings field.</p></div>
+</div>
+
+<div id="mlanomaly" class="section">
+  <div class="section-label">05 — Security &amp; Threats</div>
+  <h2>ML Anomaly <span class="accent">Detection</span></h2>
+  <p>A local Isolation Forest model (scikit-learn) scores live flows on byte volume, packet count, average packet size, destination port, and whether the destination is public — flagging statistical outliers as "unusual traffic profile." It needs at least 8 concurrent flows to run at all.</p>
+  <div class="info-box tip"><span class="icon">✓</span><p>Entirely local — no cloud dependency — and it no-ops gracefully if scikit-learn/numpy aren't installed, rather than erroring.</p></div>
+  <p>Runs as part of the always-on flow-watch loop (see <a class="ui-el" href="#ai-flowwatch" style="text-decoration:none;">Continuous Flow-Watch</a>) alongside rule-based checks and a beaconing detector; findings surface in the Topology window's red alert strip.</p>
+</div>
+
+<div id="attackdrill" class="section">
+  <div class="section-label">05 — Security &amp; Threats</div>
+  <h2>Attack <span class="accent">Drill</span></h2>
+  <p>The <span class="ui-el">☠ ATTACK SIM</span> button — present in the Topology toolbar, the 3D view, and the Top Flow Talkers page (all wired to the same shared toggle, so starting it anywhere shows it everywhere) — simulates realistic-looking hostile traffic to demonstrate what a genuine detection and block looks like, safely.</p>
+  <p>Every simulated source comes from IP ranges reserved for documentation use — <code>192.0.2.0/24</code>, <code>198.51.100.0/24</code>, <code>203.0.113.0/24</code> — spread across 14 fictional cities worldwide, each tagged with a plausible attack type (SSH brute force, port scan, UDP flood, SQL injection, and more) and labelled <strong>SIM</strong> everywhere it appears.</p>
+  <p>A new hostile appears roughly once per second (up to 12 live at a time), ramps simulated traffic for 1–4 seconds, then "detonates" — a real block-event fires (the same bookkeeping real blocks use, so the UI reacts identically: a shock-ring and BLOCKED marker on the radar/globe) without ever writing an actual OS firewall rule or touching a real host. Toggle it off to clear every live hostile immediately.</p>
+</div>
+
+<!-- ══════════════ 06 — AI ANALYSIS ══════════════ -->
+
+<div id="ai-overview" class="section">
+  <div class="section-label">06 — AI Analysis</div>
+  <h2>How AI Works <span class="accent">Here</span></h2>
+  <div class="section-intro">Every AI feature in the app funnels through the same small set of shared logic — understand this once and the rest follows.</div>
+
+  <p>On launch, a background thread tries to start <code>ollama serve</code> if Ollama is installed but not already running, and pulls the default model — <strong><code>llama3.2</code></strong> — the first time, silently (log-only, no splash dialog). If Ollama isn't installed at all, every AI feature keeps working in the sense that the rest of the app is unaffected — you just get a plain-English error explaining how to install it (a one-line command specific to your OS) when you try to use one.</p>
+
+  <h3>Switching to Anthropic</h3>
+  <p>There's no central AI settings tab — the provider dropdown lives locally in each AI-enabled window (Topology's Flow Detail panel, and the AI Capture Analysis window), and the choice is shared across all of them via files in your home directory. Pick <strong>Anthropic</strong>, paste an API key, and every AI feature in the app switches to it — including the model name, which defaults to <code>claude-haiku-4-5-20251001</code>.</p>
+
+  <table class="ref-table">
+    <tbody>
+    <tr><th>File</th><th>Purpose</th></tr>
+    <tr><td class="ctrl">~/.nm_ai_provider</td><td class="desc"><code>ollama</code> or <code>anthropic</code></td></tr>
+    <tr><td class="ctrl">~/.nm_ai_model</td><td class="desc">Ollama model name (default <code>llama3.2</code>)</td></tr>
+    <tr><td class="ctrl">~/.nm_ai_model_anthropic</td><td class="desc">Anthropic model name</td></tr>
+    <tr><td class="ctrl">~/.nm_anthropic_key</td><td class="desc">Saved API key, owner-read/write only</td></tr>
+    <tr><td class="ctrl">~/.nm_ai_url</td><td class="desc">Ollama server base URL, default <code>http://localhost:11434</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="info-box note"><span class="icon">ℹ</span><p>The app's own built-in <span class="ui-el">? GUIDE</span> still describes AI Query as requiring an Anthropic key in one spot — that's leftover text from before Ollama became the default. Trust this manual and the in-app Troubleshooting page over that one paragraph.</p></div>
+</div>
+
+<div id="ai-capture" class="section">
+  <div class="section-label">06 — AI Analysis</div>
+  <h2>Capture <span class="accent">Analysis</span></h2>
+  <p>Covered in full under <a class="ui-el" href="#ws-ai" style="text-decoration:none;">Wireshark Monitor → AI Query</a> — six quick-prompt buttons plus a free-text question box, answering against the currently loaded or live capture.</p>
+  <p>The same per-flow "Ask about this flow..." box also exists inside the Topology window's Flow Detail panel, for one-off questions about a single connection rather than the whole capture.</p>
+</div>
+
+<div id="ai-report" class="section">
+  <div class="section-label">06 — AI Analysis</div>
+  <h2>AI Report <span class="accent">Builder</span></h2>
+  <p>Covered under <a class="ui-el" href="#ws-report" style="text-decoration:none;">Wireshark Monitor → Generating Reports</a>. Separately, the IDS dashboard (<span class="ui-el">◼ IDS</span> button) has its own <strong>AI Threat Advisor</strong> panel that calls back to the desktop app's local server — and, unlike the Capture Analysis report, loads Chart.js from a CDN rather than embedding it, so its charts need internet access if you reopen the saved file later.</p>
+</div>
+
+<div id="ai-flowwatch" class="section">
+  <div class="section-label">06 — AI Analysis</div>
+  <h2>Continuous <span class="accent">Flow-Watch</span></h2>
+  <p>Internally called "AI Watch." It has no manual toggle — the moment the Topology window opens, it starts scanning live flows every <strong>30 seconds</strong>, and stops only when the window closes.</p>
+  <p>Each pass layers three checks: a rule-based pre-screen (known-bad ports, high-risk countries, large uploads to public IPs), the local <a class="ui-el" href="#mlanomaly" style="text-decoration:none;">ML anomaly detector</a>, and a beaconing detector that flags suspiciously regular, low-variance contact intervals (possible C2). Up to 40 active flows are then sent to the AI for a confirmation pass; if the AI is unreachable, the rule-based and ML hits are used as-is rather than losing the check entirely.</p>
+  <p>Findings appear in a red <strong>AI THREAT ALERTS</strong> strip at the bottom of the Topology window (and mirrored into the Geo Map window), with matching red-ring highlights on flagged nodes.</p>
+</div>
+
+<div id="ai-briefing" class="section">
+  <div class="section-label">06 — AI Analysis</div>
+  <h2>Daily <span class="accent">Briefing</span></h2>
+  <p>A plain-language summary of the last 24 hours — download/upload/ping averages, gateway uptime %, alert counts, newly-seen devices, top local talkers, latency to key targets, and threat-feed status — generated automatically once a day (default 8am local time, checked every 10 minutes) and pushed as a notification, or generated on demand with the <span class="ui-el">Generate now</span> button in the <strong>Analytics</strong> tab of the <span class="ui-el">◱ MONITOR</span> window, or via the web <code>/analytics</code> page.</p>
+  <div class="info-box note"><span class="icon">ℹ</span><p>The 8am default trigger time has no Settings field yet — it's the <code>briefing_hour</code> config key, editable in the JSON config if you want it earlier or later.</p></div>
+  <p>If the AI call fails, the briefing degrades to the raw stats as plain text rather than showing nothing.</p>
+</div>
+
+<!-- ══════════════ 07 — REMOTE & WEB ACCESS ══════════════ -->
+
+<div id="remote-agents" class="section">
+  <div class="section-label">07 — Remote &amp; Web Access</div>
+  <h2>Remote <span class="accent">Agents</span></h2>
+  <p>Lightweight headless companions — deployed as a separate <code>speedtest_agent.py</code> script on other machines — that run their own speed tests and DNS checks and expose a small HTTP API (default port 7331) for the main app to poll every 10 seconds.</p>
+
+  <div class="steps">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><strong>Deploy the agent</strong><p>Copy <code>speedtest_agent.py</code> to the remote machine and run <code>python speedtest_agent.py</code>. Useful flags: <code>--port 7331</code>, <code>--interval 10</code>, <code>--host 0.0.0.0</code>, <code>--token mysecret</code>.</p></div></div>
+    <div class="step"><div class="step-num">2</div><div class="step-body"><strong>Add it here</strong><p>Sidebar <span class="ui-el">⊞ AGENTS</span> → <span class="ui-el">+ Add Agent</span> → enter the URL (e.g. <code>http://192.168.1.10:7331</code>), an optional friendly label, and the auth token if the agent has one.</p></div></div>
+    <div class="step"><div class="step-num">3</div><div class="step-body"><strong>Watch it</strong><p><span class="ui-el">↺ Refresh All</span> polls every agent now; <span class="ui-el">▶ Run Test on Selected</span> triggers an on-demand test remotely.</p></div></div>
+  </div>
+
+  <div class="info-box warn"><span class="icon">⚠</span><p>By default, agents accept connections with no authentication. On untrusted networks, always set <code>--token</code> and firewall the port to trusted IPs only.</p></div>
+</div>
+
+<div id="remote-client" class="section">
+  <div class="section-label">07 — Remote &amp; Web Access</div>
+  <h2>Standalone <span class="accent">Client</span></h2>
+  <p><code>nm_client.py</code> is a separate Tkinter app (window title <strong>Vanguard Flow NetSentinel — Client</strong>) that talks only to the documented HTTP API, so it runs from anywhere on the network without needing the desktop app installed.</p>
+
+  <h3>Tabs</h3>
+  <p>Dashboard, Alerts, Devices, Latency, Quality, Heatmap, Outages, VDI, Flow Map, Honeypot, Firewall, Agents, Analytics, and <strong>Views &amp; Tools</strong> (a launcher out to the browser for the heavier WebGL/HTML views like 3D Topology).</p>
+
+  <h3>Connecting</h3>
+  <p>Enter the server address in the toolbar's <span class="ui-el">Server</span> field (defaults to <code>http://localhost:8765</code>) and, if required, your key in the <span class="ui-el">Key</span> field right next to it — then click <span class="ui-el">Connect</span>. Generate a key from the main app's <span class="ui-el">⚙ PREFS</span> → Alerts → <span class="ui-el">Manage licences…</span>, and paste it here.</p>
+  <div class="info-box tip"><span class="icon">✓</span><p>The key requirement can be switched off entirely from the main app's Settings (<span class="ui-el">Require licence key for remote clients</span>) — and either way, the browser dashboard itself is never gated, only <code>nm_client.py</code> connections.</p></div>
+</div>
+
+<div id="web-dashboard" class="section">
+  <div class="section-label">07 — Remote &amp; Web Access</div>
+  <h2>Web Dashboard &amp; <span class="accent">PWA</span></h2>
+  <p>The embedded server listens on <strong>port 8765</strong> by default (change it in Settings; restart to apply). Browse to <code>http://localhost:8765</code> — or that machine's LAN IP from your phone — for a mobile-friendly hub linking out to every major view:</p>
+  <ul class="feature-list">
+    <li><strong>Topology:</strong> 3D Topology, Flow Talkers, Top Talkers</li>
+    <li><strong>Monitor:</strong> Remote Agents, Alerts &amp; Devices, VDI Sessions, Honeypot, Threat Radar</li>
+    <li><strong>Analytics:</strong> Analytics &amp; AI, Full HTML Report</li>
+    <li><strong>Export:</strong> Download CSV, Download JSON</li>
+  </ul>
+  <p>It's installable as a Progressive Web App — "Add to Home Screen" from your phone's browser — and caches its app shell for offline use, so the hub still opens (network calls just won't) without a connection.</p>
+</div>
+
+<!-- ══════════════ 08 — ALERTING & REPORTING ══════════════ -->
+
+<div id="alerts" class="section">
+  <div class="section-label">08 — Alerting &amp; Reporting</div>
+  <h2>Thresholds &amp; <span class="accent">Alerts</span></h2>
+  <p>Settings → Alerts → master checkbox <strong>"Notify me when the connection misbehaves"</strong>, then per-metric thresholds — leave any box empty to skip that rule:</p>
+  <p style="font-family:var(--mono); color:var(--acc1); font-size:13px;">Download &lt; &nbsp;·&nbsp; Upload &lt; &nbsp;·&nbsp; Ping &gt; &nbsp;·&nbsp; Jitter &gt; &nbsp;·&nbsp; Loss &gt; &nbsp;·&nbsp; Bufferbloat &gt;</p>
+  <p>A <strong>"Re-alert after ___ minutes"</strong> field (default 15) debounces repeat firing of the same rule. Beyond these threshold rules, alerts also fire for honeypot activity, a new device joining the network, a VDI session degrading to "poor," and any firewall or kill-switch state change — each with its own dedup window so you're not flooded.</p>
+</div>
+
+<div id="notifications" class="section">
+  <div class="section-label">08 — Alerting &amp; Reporting</div>
+  <h2><span class="accent">Notifications</span></h2>
+  <p>Two independent channels, configured separately:</p>
+  <h3>Webhook + Local Toast (Settings → Alerts)</h3>
+  <p>A <strong>Webhook URL</strong> field posts a JSON payload to Slack/Discord/Teams/anything that accepts it, plus a Windows toast notification on the local machine — with its own <span class="ui-el">Test</span> button.</p>
+  <h3>Push Relay (MonitorWindow → Notify tab)</h3>
+  <p>A <strong>Provider</strong> dropdown — <code>none / ntfy / pushover / webhook</code> — with matching fields (ntfy topic + server, Pushover token + user, or a webhook URL) and a <strong>"Notify on severity"</strong> floor (<code>info / warn / crit</code>). <span class="ui-el">Save</span> and <span class="ui-el">Send test</span> buttons confirm it's wired up correctly. This is the channel the Daily Briefing and threshold alerts push through to reach your phone.</p>
+</div>
+
+<div id="scheduled-reports" class="section">
+  <div class="section-label">08 — Alerting &amp; Reporting</div>
+  <h2>Scheduled <span class="accent">Reports</span></h2>
+  <p>Inside the <a class="ui-el" href="#export-report" style="text-decoration:none;">Generate Network Report</a> dialog: check <strong>"Enable scheduled report generation"</strong>, pick a frequency — <strong>Hourly / Daily / Weekly</strong> — and (for Daily/Weekly) a time of day. A live "Next run:" label confirms the computed schedule. This runs as a background thread independent of the dialog being open, so it keeps firing even after you close the window.</p>
+  <p>Browse everything already generated with <span class="ui-el">📂 View Previous Reports</span> — grouped by date, newest first.</p>
+</div>
+
+<!-- ══════════════ 09 — PLATFORM & TOOLS ══════════════ -->
+
+<div id="tools-terminal" class="section">
+  <div class="section-label">09 — Platform &amp; Tools</div>
+  <h2>Embedded <span class="accent">Terminal</span></h2>
+  <p>Sidebar <span class="ui-el">⚒ TOOLS</span> opens <strong>Tools — MobaXterm</strong>, which literally reparents a MobaXterm window inside the app rather than reimplementing a terminal — handy for SSH-ing into another machine without leaving the dashboard. Point Settings → Tools at your MobaXterm folder, or leave it blank to auto-search. Windows only.</p>
+</div>
+
+<div id="pihole" class="section">
+  <div class="section-label">09 — Platform &amp; Tools</div>
+  <h2><span class="accent">Pi-hole</span> Deployment</h2>
+  <p>Sidebar <span class="ui-el">☉ PI-HOLE</span> opens <strong>Deploy Pi-hole</strong> — a genuine guided setup, not just a link. It checks for WSL2/Docker, lets you set the web-UI port and admin password, then <span class="ui-el">DEPLOY</span>s a real Pi-hole Docker container. Once running, <span class="ui-el">STATS</span> pulls live blocking stats, <span class="ui-el">REPORT</span> builds an HTML summary, and <span class="ui-el">ADMIN UI</span> opens the Pi-hole admin panel in your browser.</p>
+</div>
+
+<div id="data-storage" class="section">
+  <div class="section-label">09 — Platform &amp; Tools</div>
+  <h2>Data &amp; <span class="accent">Storage</span></h2>
+  <p>SQLite is the primary store; any existing legacy JSON data is migrated in automatically on first run and backed up alongside it. Speed-test history lives in one database file; devices, alerts, honeypot hits, and firewall events live in a deliberately separate one, so a problem in either can never corrupt the other.</p>
+  <p>Settings → Data → <strong>"Purge corrupt speed readings…"</strong> clears download/upload values that fall outside a sane range (leftover from an old units bug) — it backs up the database first, automatically, before touching anything, and only clears the affected fields, leaving timestamps/ping/jitter/loss/bufferbloat untouched.</p>
+</div>
+
+<!-- ══════════════ 10 — REFERENCE ══════════════ -->
+
+<div id="troubleshooting" class="section">
+  <div class="section-label">10 — Reference</div>
+  <h2><span class="accent">Troubleshooting</span></h2>
+
+  <h3>AI Query Returns an Error</h3>
+  <p>AI runs locally via Ollama by default — no API key needed. Install it from ollama.com and pull a model (<code>ollama pull llama3.2</code>). The app tries to start Ollama automatically on launch; if that fails, run <code>ollama serve</code> manually and confirm the model name matches one from <code>ollama list</code>. Only relevant if you've switched providers: check your Anthropic API key and that the machine can reach <code>api.anthropic.com</code> over HTTPS.</p>
+
+  <h3>Packet Capture Fails Immediately</h3>
+  <p>Confirm <code>tshark</code> is installed and its path is set correctly in Settings, and that the app is running elevated (Administrator on Windows, or your user is in the <code>wireshark</code> group / running with <code>sudo</code> on Linux).</p>
+
+  <h3>Speed Test Shows "All Attempts Failed"</h3>
+  <p>Check the Speedtest CLI path in Settings and click <span class="ui-el">Test</span>. If it's blank or wrong, the installer's downloaded <code>librespeed-cli.exe</code> normally sits right next to the app executable — reinstalling or rerunning the installer's speed-test-CLI step will restore it.</p>
+
+  <h3>Firewall / Kill Switch Actions Fail</h3>
+  <p>Almost always a permissions issue — restart as Administrator (Windows) or with <code>sudo</code> (Linux). On Linux, confirm <code>nftables</code> is installed (<code>sudo apt install nftables</code>).</p>
+
+  <h3>Country Auto-Block Isn't Catching New IPs</h3>
+  <p>Expected on Linux in this build — the initial block runs cross-platform, but the ongoing watch for newly-seen IPs from a blocked country is currently Windows-only.</p>
+
+  <h3>ISP Evidence Pack Shows 0 for Advertised Speed</h3>
+  <p>There's no Settings field for this yet — add <code>advertised_down</code> / <code>advertised_up</code> (Mbps) to <code>speedtest_config.json</code> directly, then regenerate the pack.</p>
+
+  <h3>DNS Gauge Shows 0</h3>
+  <p>All six monitored hosts failed to resolve — check general internet/DNS connectivity, or that your monitored host list (Settings → DNS Check Hosts) hasn't been set to something unreachable.</p>
+</div>
+
+<div id="shortcuts" class="section">
+  <div class="section-label">10 — Reference</div>
+  <h2>Quick <span class="accent">Reference</span></h2>
+
+  <div class="info-box note"><span class="icon">ℹ</span><p>There are no keyboard shortcuts anywhere in the current interface — every action listed below is a mouse click. The only key bindings that exist at all are <kbd>Return</kbd>/<kbd>Escape</kbd> to save/cancel the Settings dialog, and <kbd>Return</kbd> in a handful of individual text fields (filter bars, AI question boxes) to submit that one field.</p></div>
+
+  <h3>Main Dashboard Sidebar</h3>
+  <table class="ref-table">
+    <tbody>
+    <tr><td class="ctrl">▶ RUN</td><td class="desc">Manual speed test</td></tr>
+    <tr><td class="ctrl">⊙ DNS</td><td class="desc">Manual DNS check</td></tr>
+    <tr><td class="ctrl">WS CAPTURE</td><td class="desc">Wireshark Monitor</td></tr>
+    <tr><td class="ctrl">◎ TOPOLOGY</td><td class="desc">EtherApe / 3D / Radar / Sankey hub</td></tr>
+    <tr><td class="ctrl">⊞ AGENTS</td><td class="desc">Remote Agents</td></tr>
+    <tr><td class="ctrl">◱ MONITOR</td><td class="desc">Alerts, Devices, VDI &amp; Analytics</td></tr>
+    <tr><td class="ctrl">▦ HEATMAP / ⚠ OUTAGES / ◈ QUALITY</td><td class="desc">Time-of-day heatmap / Outage log / Bufferbloat grade</td></tr>
+    <tr><td class="ctrl">⎙ EVIDENCE / ⎙ REPORT / ⬇ EXPORT</td><td class="desc">ISP PDF / HTML report / CSV export</td></tr>
+    <tr><td class="ctrl">☉ PI-HOLE / ⚒ TOOLS</td><td class="desc">Deploy Pi-hole / Embedded terminal</td></tr>
+    <tr><td class="ctrl">? GUIDE / ⚙ PREFS / ✕ QUIT</td><td class="desc">In-app help / Settings / Exit</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Wireshark Monitor Toolbar</h3>
+  <table class="ref-table">
+    <tbody>
+    <tr><td class="ctrl">▶ Start / ◼ Stop / ⊘ Clear</td><td class="desc">Capture control</td></tr>
+    <tr><td class="ctrl">📂 Open PCAP / 💾 Save PCAP</td><td class="desc">File I/O</td></tr>
+    <tr><td class="ctrl">❆ AI Query</td><td class="desc">AI Capture Analysis window</td></tr>
+    <tr><td class="ctrl">⚠ Behavior / ◎ Traffic / ◼ IDS</td><td class="desc">Analysis (Behavior &amp; Traffic need Topology open)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Topology / EtherApe Toolbar</h3>
+  <table class="ref-table">
+    <tbody>
+    <tr><td class="ctrl">▶ START / ◼ STOP / ⊘ CLEAR</td><td class="desc">Capture control</td></tr>
+    <tr><td class="ctrl">📂 PCAP / ⏵ REPLAY / ⏹ STOP</td><td class="desc">PCAP replay</td></tr>
+    <tr><td class="ctrl">⇉ SANKEY / ◎ RADIAL</td><td class="desc">Layout toggle</td></tr>
+    <tr><td class="ctrl">⊕ GEO MAP / ⬡ 3D VIEW</td><td class="desc">Geo map window / open /3d</td></tr>
+    <tr><td class="ctrl">⛔ FIREWALL / 🍯 HONEYPOT / ⚠ THREATS</td><td class="desc">Security windows</td></tr>
+    <tr><td class="ctrl">⏻ KILL CONNECTION / ☠ ATTACK SIM</td><td class="desc">Kill switch / Attack drill</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="data-files" class="section">
+  <div class="section-label">10 — Reference</div>
+  <h2>Data File <span class="accent">Locations</span></h2>
+
+  <table class="ref-table">
+    <tbody><tr><th>File</th><th>Location</th></tr>
+    <tr><td class="ctrl">speedtest_data.db</td><td class="desc">App folder (or <code>%TEMP%\speedtest_monitor\</code> for a packaged build) — primary SQLite store for speed/DNS history</td></tr>
+    <tr><td class="ctrl">speedtest_data.json</td><td class="desc">Same folder — legacy JSON store, migrated into SQLite on first run and kept as a <code>.bak</code></td></tr>
+    <tr><td class="ctrl">speedtest_config.json</td><td class="desc">Same folder — theme, thresholds, and all other Settings values</td></tr>
+    <tr><td class="ctrl">agents.json</td><td class="desc">App folder — saved Remote Agents list</td></tr>
+    <tr><td class="ctrl">blocked_countries.json</td><td class="desc">App folder — persisted country-block list</td></tr>
+    <tr><td class="ctrl">speedtest_monitor.log</td><td class="desc">App folder — rotating log, 5MB × 3 backups; Settings → Alerts → Debug logging raises its verbosity</td></tr>
+    <tr><td class="ctrl">~/.nm_monitor.db</td><td class="desc">Home directory — devices, alerts, honeypot hits, firewall events (kept separate from speed-test data on purpose)</td></tr>
+    <tr><td class="ctrl">~/.nm_anthropic_key, ~/.nm_ai_provider, ~/.nm_ai_model</td><td class="desc">Home directory — AI provider/model/key settings, shared across every AI-enabled window</td></tr>
+    <tr><td class="ctrl">~/.nm_report_schedule.json</td><td class="desc">Home directory — the Generate Report dialog's saved schedule</td></tr>
+    <tr><td class="ctrl">~/Documents/NetworkMonitor/nm_report_*.html</td><td class="desc">Generated HTML reports (location changeable per-generation)</td></tr>
+    <tr><td class="ctrl">nm_wireshark.pcap</td><td class="desc">OS temp folder — current Wireshark scratch capture, cleared each session</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Footer -->
+<div class="section" style="border-bottom:none; padding-bottom: 60px;">
+  <div style="text-align:center; color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 1px;">
+    <div style="margin-bottom:8px; color: var(--border);">◈ ◈ ◈</div>
+    VANGUARD FLOW NETSENTINEL — USER MANUAL &nbsp;·&nbsp; VERSION 2.0 &nbsp;·&nbsp; BUILD b-4431b665<br>
+    Built with Python · Tkinter · Matplotlib · tshark · three.js · Ollama
+  </div>
+</div>
+
+</div><!-- /content -->
+
+</body></html>
