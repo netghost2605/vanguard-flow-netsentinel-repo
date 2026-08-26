@@ -15,12 +15,14 @@ if not exist "speedtest_monitor.py" (
     echo  Run this script from the project folder.
     pause & exit /b 1
 )
-:: A speed-test CLI is NOT bundled. Ookla's licence restricts redistribution,
-:: so the app locates one at runtime: librespeed-cli (LGPL), speedtest-cli
-:: (Apache) or Ookla's own if the user already has it.
+:: A speed-test CLI is NOT bundled in this build folder. Ookla's licence
+:: restricts redistribution, so that one is never bundled or auto-installed.
+:: librespeed-cli (LGPL) IS auto-installed for the end user, but by
+:: installer.nsi at install time (see its SecSpeedtest section) - not by
+:: anything in this build script, so there is nothing to check for here.
 if not exist "speedtest.exe" (
     echo  [INFO] No speedtest.exe here - fine, it is not bundled.
-    echo         Users install a CLI themselves; the app finds it automatically.
+    echo         The installer fetches librespeed-cli automatically instead.
 )
 
 :: ── Check Python ──────────────────────────────────────────────────────────────
@@ -113,12 +115,16 @@ if "!NSIS_PATH!"=="" (
     echo.
     echo  [ERROR] NSIS not found.
     echo  Download and install NSIS from: https://nsis.sourceforge.io/Download
-    echo  Also install the inetc plugin: https://nsis.sourceforge.io/Inetc_plug-in
     echo.
     echo  After installing NSIS, re-run this script.
     pause & exit /b 1
 )
 echo  [OK] NSIS found.
+:: NOTE: installer.nsi no longer needs any third-party NSIS plugin (no more
+:: inetc dependency - its downloads now go through a generated PowerShell
+:: script + stock ExecWait instead). A prior version of this script tried
+:: to auto-install the inetc plugin here; that step is gone because the
+:: thing it was installing is no longer used at all.
 
 :: Branding assets: welcome.bmp (164x314) + header.bmp (150x57) give the
 :: installer its branded look. installer.nsi skips them gracefully if absent.
@@ -263,8 +269,6 @@ echo.
 if errorlevel 1 (
     echo.
     echo  [ERROR] NSIS build failed. Check output above.
-    echo  Make sure the inetc plugin is installed:
-    echo  https://nsis.sourceforge.io/Inetc_plug-in
     pause & exit /b 1
 )
 
@@ -285,14 +289,16 @@ echo  ║  This installer will:                                ║
 echo  ║    • Install Vanguard Flow NetSentinel to Program Files        ║
 echo  ║    • Install Wireshark + Npcap (1 click)             ║
 echo  ║    • Install Ollama (local AI engine)                ║
+echo  ║    • Install a speed-test CLI (librespeed-cli)       ║
 echo  ║    • Optional: remote client app                     ║
 echo  ║    • Create Desktop and Start Menu shortcuts         ║
 echo  ║    • Register proper uninstaller                     ║
 echo  ║                                                      ║
-echo  ║  Note: Wireshark, Npcap and Ollama are NOT bundled   ║
-echo  ║  into this installer. Each end user's PC downloads   ║
-echo  ║  them fresh from the official Wireshark/Npcap/Ollama ║
-echo  ║  sites the first time the installer runs.            ║
+echo  ║  Note: Wireshark, Npcap, Ollama and librespeed-cli   ║
+echo  ║  are NOT bundled into this installer. Each end       ║
+echo  ║  user's PC downloads them fresh from each project's  ║
+echo  ║  own official site the first time the installer      ║
+echo  ║  runs — no third-party NSIS plugin needed either.    ║
 echo  ║                                                      ║
 echo  ╚══════════════════════════════════════════════════════╝
 echo.

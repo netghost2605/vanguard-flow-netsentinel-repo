@@ -1,6 +1,10 @@
 ; ============================================================
 ;  Vanguard Flow NetSentinel — NSIS Installer (Modern UI 2, branded)
-;  Requires NSIS 3.x + inetc plugin
+;  Requires NSIS 3.x only — no third-party plugins. Downloads go through a
+;  small generated PowerShell script + stock ExecWait (see DetailPrint
+;  "Downloading ..." sections below) rather than the inetc plugin, which
+;  used to require a manual (and, once automated, still unreliable —
+;  see CHANGES_this_session.md) install step of its own.
 ; ============================================================
 
 Unicode True
@@ -24,6 +28,14 @@ Unicode True
 ; for the current release. Last verified: npcap 1.88 (2026-08-26).
 !define NPCAP_URL     "https://npcap.com/dist/npcap-1.88.exe"
 !define OLLAMA_URL    "https://ollama.com/download/OllamaSetup.exe"
+
+; librespeed-cli (LGPL, github.com/librespeed/speedtest-cli) — an open-source
+; drop-in for Ookla's speed-test CLI, which we deliberately do NOT bundle or
+; download (its licence forbids redistribution). Pinned to a specific release
+; like Npcap, since GitHub release assets don't have a "latest" filename
+; either. Check https://github.com/librespeed/speedtest-cli/releases for the
+; current version when bumping this.
+!define LIBRESPEED_URL "https://github.com/librespeed/speedtest-cli/releases/download/v1.0.14/librespeed-cli_1.0.14_windows_amd64.zip"
 
 ; ── Installer settings ────────────────────────────────
 Name            "${APP_NAME} ${APP_VERSION}"
@@ -137,10 +149,15 @@ Section "Wireshark + Npcap (for capture)" SecWireshark
 
     DetailPrint "Downloading Npcap (packet capture driver)..."
     SetOutPath "$TEMP"
-    inetc::get /CAPTION "Downloading Npcap..." /BANNER "Please wait..." "${NPCAP_URL}" "$TEMP\npcap_setup.exe" /END
-    Pop $0
-    StrCmp $0 "OK" npcap_install 0
-    MessageBox MB_OK "Could not download Npcap (error: $0).$\r$\nInstall it manually from https://npcap.com/ — packet capture will not work without it."
+    Delete "$TEMP\npcap_setup.exe"
+    FileOpen $2 "$TEMP\dl_npcap.ps1" w
+    FileWrite $2 '$$ProgressPreference = "SilentlyContinue"$\r$\n'
+    FileWrite $2 'try { Invoke-WebRequest -Uri "${NPCAP_URL}" -OutFile "$TEMP\npcap_setup.exe" -UseBasicParsing } catch {}$\r$\n'
+    FileClose $2
+    ExecWait 'powershell -NoProfile -ExecutionPolicy Bypass -File "$TEMP\dl_npcap.ps1"' $0
+    Delete "$TEMP\dl_npcap.ps1"
+    IfFileExists "$TEMP\npcap_setup.exe" npcap_install 0
+    MessageBox MB_OK "Could not download Npcap.$\r$\nInstall it manually from https://npcap.com/ — packet capture will not work without it."
     Goto npcap_done
 
     npcap_install:
@@ -162,10 +179,15 @@ Section "Wireshark + Npcap (for capture)" SecWireshark
 
     DetailPrint "Downloading Wireshark..."
     SetOutPath "$TEMP"
-    inetc::get /CAPTION "Downloading Wireshark..." /BANNER "Please wait..." "${WIRESHARK_URL}" "$TEMP\wireshark_setup.exe" /END
-    Pop $0
-    StrCmp $0 "OK" ws_install 0
-    MessageBox MB_OK "Could not download Wireshark (error: $0).$\r$\nInstall manually from https://www.wireshark.org/"
+    Delete "$TEMP\wireshark_setup.exe"
+    FileOpen $2 "$TEMP\dl_wireshark.ps1" w
+    FileWrite $2 '$$ProgressPreference = "SilentlyContinue"$\r$\n'
+    FileWrite $2 'try { Invoke-WebRequest -Uri "${WIRESHARK_URL}" -OutFile "$TEMP\wireshark_setup.exe" -UseBasicParsing } catch {}$\r$\n'
+    FileClose $2
+    ExecWait 'powershell -NoProfile -ExecutionPolicy Bypass -File "$TEMP\dl_wireshark.ps1"' $0
+    Delete "$TEMP\dl_wireshark.ps1"
+    IfFileExists "$TEMP\wireshark_setup.exe" ws_install 0
+    MessageBox MB_OK "Could not download Wireshark.$\r$\nInstall manually from https://www.wireshark.org/"
     Goto ws_done
 
     ws_install:
@@ -191,10 +213,15 @@ Section "Ollama (local AI engine)" SecOllama
 
     DetailPrint "Downloading Ollama..."
     SetOutPath "$TEMP"
-    inetc::get /CAPTION "Downloading Ollama..." /BANNER "Please wait..." "${OLLAMA_URL}" "$TEMP\OllamaSetup.exe" /END
-    Pop $0
-    StrCmp $0 "OK" ollama_install 0
-    MessageBox MB_OK "Could not download Ollama (error: $0).$\r$\nThe app's AI needs Ollama - install manually from https://ollama.com/"
+    Delete "$TEMP\OllamaSetup.exe"
+    FileOpen $2 "$TEMP\dl_ollama.ps1" w
+    FileWrite $2 '$$ProgressPreference = "SilentlyContinue"$\r$\n'
+    FileWrite $2 'try { Invoke-WebRequest -Uri "${OLLAMA_URL}" -OutFile "$TEMP\OllamaSetup.exe" -UseBasicParsing } catch {}$\r$\n'
+    FileClose $2
+    ExecWait 'powershell -NoProfile -ExecutionPolicy Bypass -File "$TEMP\dl_ollama.ps1"' $0
+    Delete "$TEMP\dl_ollama.ps1"
+    IfFileExists "$TEMP\OllamaSetup.exe" ollama_install 0
+    MessageBox MB_OK "Could not download Ollama.$\r$\nThe app's AI needs Ollama - install manually from https://ollama.com/"
     Goto ollama_done
 
     ollama_install:
@@ -208,6 +235,72 @@ Section "Ollama (local AI engine)" SecOllama
     DetailPrint "Ollama already installed."
 
     ollama_done:
+SectionEnd
+
+; ── Speed-test CLI ───────────────────────────────────────────
+; Ookla's own CLI is proprietary and its licence forbids redistribution, so
+; we never bundle or download it. librespeed-cli is LGPL and fine to fetch
+; fresh the same way as Wireshark/Npcap/Ollama above. Skipped if the user
+; already has ANY supported engine (librespeed-cli, speedtest-cli or Ookla's)
+; on PATH — this only fills the gap when nothing is available.
+Section "Speed-test CLI (librespeed-cli)" SecSpeedtest
+    SectionIn 1
+
+    IfFileExists "$INSTDIR\librespeed-cli.exe" st_skip 0
+
+    ; ExecToStack pushes exit code then output (output on top) — pop BOTH
+    ; every time, or the leftover output string corrupts the next Pop.
+    nsExec::ExecToStack 'where librespeed-cli'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" st_skip 0
+    nsExec::ExecToStack 'where speedtest-cli'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" st_skip 0
+    nsExec::ExecToStack 'where speedtest'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" st_skip 0
+
+    DetailPrint "Downloading librespeed-cli (open-source speed-test engine)..."
+    SetOutPath "$TEMP"
+    Delete "$TEMP\librespeed-cli.zip"
+    RMDir /r "$TEMP\librespeed_extract"
+    ; One script does download + extract + copy. $INSTDIR/$TEMP can contain
+    ; spaces (e.g. "Program Files"), which is fragile to nest inside an
+    ; already-quoted inline command, and the exe is found by searching the
+    ; extracted tree recursively rather than assuming the zip's internal
+    ; layout. Silent try/catch — NSIS checks the result via IfFileExists
+    ; below rather than trying to parse PowerShell's own error output.
+    FileOpen $2 "$TEMP\install_librespeed.ps1" w
+    FileWrite $2 '$$ProgressPreference = "SilentlyContinue"$\r$\n'
+    FileWrite $2 '$$ErrorActionPreference = "Stop"$\r$\n'
+    FileWrite $2 'try {$\r$\n'
+    FileWrite $2 '  Invoke-WebRequest -Uri "${LIBRESPEED_URL}" -OutFile "$TEMP\librespeed-cli.zip" -UseBasicParsing$\r$\n'
+    FileWrite $2 '  Expand-Archive -Path "$TEMP\librespeed-cli.zip" -DestinationPath "$TEMP\librespeed_extract" -Force$\r$\n'
+    FileWrite $2 '  $$found = Get-ChildItem -Path "$TEMP\librespeed_extract" -Recurse -Filter "librespeed-cli.exe" | Select-Object -First 1$\r$\n'
+    FileWrite $2 '  if ($$found) { Copy-Item $$found.FullName -Destination "$INSTDIR\librespeed-cli.exe" -Force }$\r$\n'
+    FileWrite $2 '} catch {}$\r$\n'
+    FileClose $2
+
+    ExecWait 'powershell -NoProfile -ExecutionPolicy Bypass -File "$TEMP\install_librespeed.ps1"' $0
+    Delete "$TEMP\librespeed-cli.zip"
+    Delete "$TEMP\install_librespeed.ps1"
+    RMDir /r "$TEMP\librespeed_extract"
+
+    IfFileExists "$INSTDIR\librespeed-cli.exe" st_ok 0
+    MessageBox MB_OK "Could not set up the speed-test CLI.$\r$\nSpeed tests will not work until you install one — see Settings, or download librespeed-cli from https://github.com/librespeed/speedtest-cli/releases"
+    Goto st_done
+
+    st_ok:
+    DetailPrint "librespeed-cli installed."
+    Goto st_done
+
+    st_skip:
+    DetailPrint "A speed-test CLI is already available — skipping."
+
+    st_done:
 SectionEnd
 
 ; ── Shortcuts ──────────────────────────────────────────────
@@ -307,6 +400,7 @@ FunctionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecMain}      "The ${APP_NAME} monitor app — captures, tests and serves the dashboard. Choose the 'Client only' preset to skip this and install just the viewer."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecWireshark} "Wireshark and the Npcap driver — needed for packet capture, live topology and flow analysis. Npcap shows a short wizard (its free build cannot install silently)."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecOllama}    "Ollama runs the AI features locally on this machine. No API key and no cloud account needed."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecSpeedtest} "librespeed-cli, an open-source speed-test engine — needed for the speed gauges. Skipped if you already have a compatible CLI on PATH."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecClient}    "A standalone client that connects to a Vanguard Flow NetSentinel running on this or another PC and shows its dashboard, alerts, devices, quality, heatmap and outages. Install this on a second machine."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecShortcuts} "Desktop and Start Menu shortcuts."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
@@ -317,6 +411,7 @@ Section "Uninstall"
     Delete "$INSTDIR\NetworkMonitorClient.exe"
     Delete "$INSTDIR\bg.jpg"
     Delete "$INSTDIR\speedtest.exe"
+    Delete "$INSTDIR\librespeed-cli.exe"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\README.txt"
     Delete "$INSTDIR\Uninstall.exe"

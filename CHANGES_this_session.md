@@ -1,6 +1,6 @@
-# Changes this session — build `b-d4a95b9d`
+# Changes this session — build `b-4431b665`
 
-Twenty things this session. Build IDs for reference:
+Twenty-three things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -36,6 +36,185 @@ Twenty things this session. Build IDs for reference:
     `installer.nsi`/`build_installer.bat`: Npcap download URL was pinned
     to a stale version; bumped, plus a stale build-script banner fixed
     (this one, current).
+21. (no build ID — build script only) — `build_installer.bat` now
+    downloads and installs the NSIS inetc plugin automatically instead
+    of requiring a manual download/extract/copy (could not be run
+    end-to-end — no Windows box here, see caveat further down).
+22. `b-4431b665` — installer now auto-installs a speed-test CLI
+    (librespeed-cli) instead of requiring you to find one yourself; the
+    app's own CLI-discovery code updated to match.
+23. (no build ID — installer script only) — the auto-installed inetc
+    plugin from #21 failed on your machine ("Plugin not found, cannot
+    call inetc::get"); removed the inetc dependency from `installer.nsi`
+    entirely instead of patching the plugin-installer further (this one,
+    current).
+
+## The inetc auto-install (#21) failed on your machine — removed the plugin instead of chasing it
+
+You ran `build_installer.bat` and got:
+
+```
+Plugin not found, cannot call inetc::get
+Error in script "installer.nsi" on line 140 -- aborting creation process
+```
+
+That's exactly the failure mode I flagged as unverified in #21's caveat —
+the plugin auto-download/placement I wrote couldn't be tested here (no
+Windows machine, and this sandbox's own network can't reach the plugin's
+download site either), and in practice it didn't work. I don't know
+precisely which step failed on your machine (download, extraction, or
+placement into the right `Plugins` subfolder) — the script's own cleanup
+deletes its temp files whether it succeeds or fails, so there was nothing
+left afterward to inspect.
+
+Rather than guess at a second unverifiable patch to the plugin installer,
+I removed the reason it's needed at all. `installer.nsi`'s four downloads
+(Npcap, Wireshark, Ollama, librespeed-cli) used the `inetc` plugin's
+`inetc::get` command. I rewrote all four to download via a small
+generated PowerShell script (`Invoke-WebRequest`) run through NSIS's own
+built-in `ExecWait` — no plugin involved at all. PowerShell and
+`ExecWait` both ship with Windows 10 / NSIS respectively, so there's
+nothing left to install, place, or get wrong. `build_installer.bat`'s
+whole "check/install inetc" block from #21 is gone too — it has nothing
+to do anymore.
+
+One implementation detail worth knowing: `Invoke-WebRequest` has a
+well-known performance bug where it renders a progress UI that can make
+large downloads (Wireshark is ~90 MB) drastically slower unless
+`$ProgressPreference` is set to `"SilentlyContinue"` first — every
+generated download script sets that.
+
+**Verified (not assumed):**
+
+- Compiled the updated `installer.nsi` with **no NSIS plugins present at
+  all** except the stock ones NSIS ships with (I didn't even install my
+  usual `inetc` stub this time) — clean compile, 7 sections, 688
+  instructions, no errors. This is the direct, concrete proof that the
+  plugin dependency your build hit is actually gone, not just papered
+  over.
+- Re-verified parens/quotes balance in the batch file after removing the
+  ~70-line inetc block (61/61 parens).
+- Copied both files into `vanguard-flow-netsentinel` too.
+- **What I still can't verify**: the actual `Invoke-WebRequest` downloads
+  and Npcap/Wireshark/Ollama installs, same as before — no Windows
+  machine here. This approach has less to go wrong (no plugin, no DLL
+  placement, no zip-layout guessing for Npcap/Wireshark/Ollama), but
+  please run it and tell me if anything still doesn't reach `[OK]` — I'd
+  rather hear about a real failure than assume this one's right too.
+
+## Speed-test CLI: installer now gets one automatically
+
+You asked why the installer doesn't download a speed-test CLI. Answer:
+it deliberately never bundles or downloads Ookla's own CLI — a call
+already made in this codebase before I touched it, because Ookla's
+licence forbids redistribution. But it also never downloaded either of
+the two permissively-licensed alternatives the code already knew about
+(`librespeed-cli`, LGPL, and `speedtest-cli`, Apache) — it just checked
+whether you happened to already have one on PATH, and threw an error
+telling you to install one yourself if not. So a fresh install could
+genuinely have no working speed test until you did that by hand — a real
+gap, not something I broke.
+
+You asked me to fix it the same way as Wireshark/Npcap/Ollama. I did,
+scoped to `librespeed-cli` only (still not touching Ookla's CLI — that
+call stands):
+
+- **`installer.nsi`** — new `SecSpeedtestCli` section. Skips itself if
+  `librespeed-cli.exe`, `speedtest-cli` or `speedtest` is already
+  reachable (checked with `where`, both via an existing local copy and
+  on PATH). Otherwise downloads `librespeed-cli`'s official Windows
+  release zip via `inetc::get`, then extracts it and copies the exe into
+  `$INSTDIR` via a small generated PowerShell script rather than an
+  inline `ExecWait` one-liner — `$INSTDIR`/`$TEMP` can contain spaces
+  ("Program Files"), which is fragile to nest inside an
+  already-quoted command. The extraction searches the unzipped tree
+  recursively for `librespeed-cli.exe` rather than assuming the zip's
+  internal folder layout, same defensive approach as the inetc-plugin
+  fix above. Non-fatal on failure — warns and continues, same as the
+  other three download sections.
+- **`speedtest_monitor.py`** — `_nm_st_find()` (the function that locates
+  a speed-test CLI at runtime) only ever searched PATH via
+  `shutil.which()`. `$INSTDIR` is not on PATH, so the CLI the installer
+  now places there would never have been found without this. Added a
+  fallback: on a frozen/installed build, if nothing turns up on PATH,
+  check for `librespeed-cli.exe` next to the running exe (exactly where
+  the installer puts it). Reused the same fixed function for the
+  module-level `SPEEDTEST_PATH`/`_DEFAULT_SPEEDTEST_PATH` default
+  (previously duplicated similar-but-not-identical lookup logic inline)
+  so the Settings dialog's displayed default is correct too, not just
+  the runtime fallback path.
+
+**Verified (not assumed):**
+
+- Checked librespeed-cli's actual GitHub releases page (via the
+  `expanded_assets` endpoint, since the normal release page loads assets
+  with JS that a text fetch can't see) rather than guessing a filename —
+  confirmed v1.0.14 current, exact asset name
+  `librespeed-cli_1.0.14_windows_amd64.zip`.
+- Compiled the updated `installer.nsi` end-to-end again with the same
+  real NSIS 3.09 setup from the earlier fix (stub `inetc` plugin; `nsExec`
+  is a stock NSIS plugin so needed no stub) — clean compile, 7 sections
+  (up from 6), 712 instructions, no errors.
+- While writing the `nsExec::ExecToStack` calls I made a real mistake —
+  only popping the exit code and not the output string too, which would
+  have corrupted the next `Pop` with stale stack data. Caught it myself
+  before compiling by re-reading NSIS's documented `ExecToStack` stack
+  contract (exit code, then output, output on top) and fixed it to pop
+  both every time.
+- `python3 selftest.py`: no web/API routes changed (expected — this
+  touches only CLI-discovery code, nothing web-facing). `xvfb-run -a
+  python3.12 selftest.py`: 35/35 green, 1 skip (the pre-existing
+  no-tkinter-on-3.11 gap), same baseline as before — no rebaseline
+  needed.
+- **What I could NOT verify**: same caveat as the inetc-plugin fix —
+  no Windows machine and no network path to github.com from this sandbox
+  to actually run the download+extract+copy. Compiled and hand-checked
+  carefully, but this is inference, not measurement, same as the inetc
+  automation above. Try it once and tell me if the "Speed-test CLI"
+  install step doesn't end in `[OK]`.
+- Copied all three changed files (`installer.nsi`, `build_installer.bat`,
+  `speedtest_monitor.py`) into `vanguard-flow-netsentinel` too.
+
+## Build script: automated the manual NSIS inetc plugin step
+
+You asked why installing the inetc plugin was a manual download-and-extract
+step. Answer: NSIS itself does not ship inetc — it's a separate, very
+widely-used third-party plugin (from the NSIS wiki, not the NSIS installer),
+and `installer.nsi`'s `inetc::get` calls (the ones that fetch Wireshark,
+Npcap and Ollama at install time) don't work until its DLL is dropped into
+NSIS's own `Plugins\x86-ansi` / `Plugins\x86-unicode` folders. Until now,
+`build_installer.bat` only ever *told* you to do that by hand (in the NSIS
+build's error message) — it never did it.
+
+Added a step, right after NSIS itself is detected, that:
+- Checks whether `INetC.dll` is already sitting in either Plugins variant
+  folder under the detected NSIS install — skips everything below if so.
+- If missing, downloads `inetc.zip` from the official NSIS site (same
+  curl-then-PowerShell-fallback pattern already used for Ollama).
+- Extracts it and copies the DLL into the correct `Plugins\x86-ansi` /
+  `Plugins\x86-unicode` folder(s) — matched by scanning the extracted
+  filenames for "x86-ansi"/"x86-unicode", falling back to placing it in
+  both if the zip's layout doesn't split them, so this doesn't hard-fail
+  if the archive's internal layout isn't exactly what I expect.
+- Re-checks afterward and prints [OK] or a [WARN] with the manual-install
+  link, rather than silently pretending it worked.
+
+**Verified (not assumed) — and one real caveat:**
+
+- Confirmed the official download URL two ways: found it via the NSIS
+  wiki's Inetc plug-in page (`https://nsis.sourceforge.io/mediawiki/images/c/c9/Inetc.zip`,
+  81 KB) rather than guessing a sourceforge path.
+- Could NOT execute this new batch+PowerShell code end-to-end — this
+  sandbox has no Windows machine, and the sandbox's own network egress
+  can't even reach sourceforge.io to fetch the real zip and test the
+  extraction logic against real content (tried; connection refused).
+  I hand-checked it carefully (parens/braces/quotes all balance; the
+  curl/PowerShell-fallback shape mirrors the Ollama block already proven
+  to work in this same file) but this is the one piece this session that
+  is inference, not measurement. Please run `build_installer.bat` once
+  and tell me if the "Checking for the NSIS inetc plugin" step doesn't
+  end in `[OK]` — I'll fix whatever it gets wrong about the zip's layout.
+- Copied the updated file into `vanguard-flow-netsentinel` too.
 
 ## Installer: Npcap URL bump + stale build-script banner
 

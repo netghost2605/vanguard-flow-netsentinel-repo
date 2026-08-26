@@ -580,6 +580,14 @@ def _nm_st_find():
         hit = _nm_which(name)
         if hit:
             return hit, engine
+    # A frozen/installed build has librespeed-cli.exe sitting right next to
+    # the app exe (the installer downloads it there — see installer.nsi's
+    # SecSpeedtestCli). shutil.which() only searches PATH, and $INSTDIR is
+    # not normally on PATH, so check that exact spot too before giving up.
+    if getattr(sys, 'frozen', False):
+        cand = Path(sys.executable).parent / 'librespeed-cli.exe'
+        if cand.exists():
+            return str(cand), 'librespeed'
     return '', ''
 
 
@@ -2091,6 +2099,8 @@ if getattr(sys, 'frozen', False):
     # A speed-test CLI is no longer bundled (Ookla's licence forbids
     # redistribution), so this must cope with the binary being absent: fall
     # back to whatever the user has installed rather than crashing at import.
+    # `_nm_st_find()` also checks next to this exe, where the installer
+    # drops librespeed-cli.exe at install time — see installer.nsi.
     try:
         if bundled_speedtest.exists():
             if (not Path(SPEEDTEST_PATH).exists()
@@ -2098,13 +2108,11 @@ if getattr(sys, 'frozen', False):
                     > Path(SPEEDTEST_PATH).stat().st_mtime):
                 shutil.copy2(bundled_speedtest, SPEEDTEST_PATH)
         elif not Path(SPEEDTEST_PATH).exists():
-            SPEEDTEST_PATH = (_nm_which('librespeed-cli', 'speedtest-cli',
-                                        'speedtest', 'speedtest.exe')
-                              or SPEEDTEST_PATH)
+            _found_cli, _ = _nm_st_find()
+            SPEEDTEST_PATH = _found_cli or SPEEDTEST_PATH
     except Exception:
-        SPEEDTEST_PATH = (_nm_which('librespeed-cli', 'speedtest-cli',
-                                    'speedtest', 'speedtest.exe')
-                          or SPEEDTEST_PATH)
+        _found_cli, _ = _nm_st_find()
+        SPEEDTEST_PATH = _found_cli or SPEEDTEST_PATH
 else:
     # Not running from a bundle. Find whichever speed-test CLI is installed
     # rather than assuming one developer's Windows desktop path.
@@ -2424,7 +2432,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-d4a95b9d'
+_NM_BUILD_ID = 'b-4431b665'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
