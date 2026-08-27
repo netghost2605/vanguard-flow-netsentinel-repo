@@ -1,6 +1,6 @@
-# Changes this session — build `b-b07a1ff4`
+# Changes this session — build `b-8d732031`
 
-Twenty-five things this session. Build IDs for reference:
+Twenty-six things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -53,7 +53,84 @@ Twenty-five things this session. Build IDs for reference:
     colour themes" line — it's actually twelve.
 25. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
     rest of the app, using your active colour theme's download/upload/
-    ping colours for the charts (current).
+    ping colours for the charts.
+26. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
+    moved off the middle of the canvas onto the actual blocked external
+    server it refers to (this one, current).
+
+## New: "[ BLOCKED ]" marker now sits on the actual blocked server, not floating in mid-canvas
+
+**What you reported:** in the Topology window's Sankey ribbon view, the
+red "[ BLOCKED ]" tag was floating somewhere in the middle of the canvas
+with no clear line back to which external server it was actually about —
+"its impossible to see whats blocked."
+
+**Root cause:** the marker was drawn at the flow's arithmetic midpoint —
+literally `((x0+x1)/2, (y0+y1)/2)`, halfway between the Internal Hosts
+column and the External Servers column. With several flows converging
+from different heights, that midpoint lands in empty space in the middle
+of the canvas, not next to anything. Worse, every flow into the same
+blocked host queued up its own separate marker at its own midpoint, so a
+host with 3 blocked flows could show 3 overlapping tags nowhere near the
+node itself.
+
+**Fix:**
+
+- The marker is now anchored at the blocked endpoint's actual on-screen
+  position for that frame (`x1,y1` for a blocked destination, `x0,y0` for
+  a blocked source) — the same coordinates the ribbon itself is drawn to
+  in Sankey mode, i.e. the node's real column position, not the older
+  radial-layout position — with a small downward offset so it sits just
+  below the node's own name label instead of overlapping it.
+- Markers are now collected in a dict keyed by the blocked IP instead of
+  appended to a list, so multiple flows into the same blocked host collapse
+  to exactly one marker instead of stacking duplicates on top of each
+  other.
+- The Geo Map window's separate "BLOCKED" mid-arc label (a different,
+  genuinely geographic layout) was left as-is — your screenshots were
+  specifically the Topology/EtherApe Sankey canvas ("Internal Hosts" /
+  "External Servers" columns), not the map.
+
+**Verified (not assumed):**
+
+- Built the real `EtherApeWindow` headlessly under `xvfb-run`, switched it
+  into Sankey mode, and fed it synthetic packets: 3 internal hosts all
+  talking to one blocked external IP, a second blocked external IP with
+  one flow, and a third, *unblocked* external IP with traffic of its own.
+- Independently recomputed the Sankey column math (same formula as
+  `_sankey_layout`, kept as a separate calculation in the test rather than
+  reusing the app's own code, so the check can't just be confirming the
+  code against itself) and asserted the actual rendered marker artists'
+  positions against it: both blocked hosts got exactly one marker each,
+  both at the External Servers column x-position and at that host's own
+  row y-position plus the label offset — not at any midpoint. The
+  unblocked external host correctly got no marker.
+- First pass at this test compared marker position against
+  `self._nodes[ip]['pos']` instead and got a mismatch — traced that to the
+  test being wrong, not the fix: Sankey mode computes column positions on
+  a local, shallow-copied dict inside `_render_tick_inner` and never
+  writes them back to `self._nodes` (which keeps its original
+  radial-layout position, used only by the Radial view). Rewrote the test
+  to check against the same coordinates the ribbons themselves use, which
+  is what actually matters for "does the marker sit at the node."
+  Mentioning this because it's the kind of test-vs-fix mixup worth being
+  upfront about rather than quietly correcting and moving on.
+- Rendered a real screenshot of the fixed window (4 internal hosts, 1
+  blocked external server with 4 converging flows, 3 unblocked external
+  servers) — the "[ BLOCKED ]" tag sits directly under the blocked node,
+  right where its own red-highlighted flows land, with no ambiguity about
+  which server it's naming. Sent alongside this changelog.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface +
+  JS checks, desktop checks skipped — no display) and 35/35 passed, 1
+  skipped (Python 3.12 under `xvfb-run`, includes the desktop window and
+  honeypot radar checks). No route content changed, so no re-baseline was
+  needed.
+
+**Not done / your call:**
+
+- Didn't touch the Geo Map's own mid-arc "BLOCKED" label — say if that one
+  has the same "hard to tell which server" problem and I'll do the
+  equivalent fix there using its real geographic arc endpoints.
 
 ## New: ISP Evidence Pack PDF now matches the app's dark theme
 

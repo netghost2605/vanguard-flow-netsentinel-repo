@@ -2432,7 +2432,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-b07a1ff4'
+_NM_BUILD_ID = 'b-8d732031'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -10764,7 +10764,10 @@ class EtherApeWindow:
                 self._placeholder_drawn=False
         max_bytes=max((n['bytes'] for n in nodes.values()),default=1) or 1
         segs,lws,colors_e,segs_glow,lws_glow=[],[],[],[],[]
-        _blocked_segs=[]
+        # Keyed by the blocked IP itself, not appended per-flow, so several
+        # flows sharing one blocked destination don't stack identical
+        # "[ BLOCKED ]" markers exactly on top of each other.
+        _blocked_segs={}
         pulse_xs,pulse_ys,pulse_ss,pulse_cs=[],[],[],[]
         # ── Sankey mode: bipartite columns. We shallow-copy each node dict so
         #    overwriting 'pos' cannot corrupt the radial layout underneath.
@@ -10841,9 +10844,18 @@ class EtherApeWindow:
             flow_seg_map.append((x0,y0,x1,y1,src,dst,proto,
                                  (_bow if _sankey else 0.0),
                                  (_bulge if _sankey else 0.0)))
-            # Collect BLOCKED mid-flow positions (drawn after texts clear)
-            if src in self._blocked_ips or dst in self._blocked_ips:
-                _blocked_segs.append(((x0+x1)/2, (y0+y1)/2))
+            # Collect BLOCKED marker positions (drawn after texts clear).
+            # This used to sit at the flow's arithmetic midpoint — halfway
+            # between the Internal Hosts and External Servers columns, so on
+            # a busy canvas it landed in a meaningless spot in mid-air, not
+            # next to whichever server was actually blocked. Anchor it at the
+            # blocked endpoint itself instead (offset a little below the node,
+            # since that node's own name label — if one is shown — sits just
+            # above it), so it's unambiguous which server the marker is for.
+            if dst in self._blocked_ips:
+                _blocked_segs[dst] = (x1, y1 + 0.026)
+            elif src in self._blocked_ips:
+                _blocked_segs[src] = (x0, y0 + 0.026)
             if _sankey:
                 # ── Packet stream: busier ribbons carry more, brighter packets ──
                 _n = max(1, int(round((2 + frac * 5) * _pkt_scale)))   # 1..7, budgeted
@@ -11050,14 +11062,14 @@ class EtherApeWindow:
                                     facecolor='#1a0000' if blk else '#020810',
                                     edgecolor=_bbox_ec,alpha=0.85 if blk else 0.60))
                 self._label_artists[ip] = a
-        # BLOCKED mid-flow markers (small set, ok to recreate)
+        # BLOCKED markers, one per blocked host (small set, ok to recreate)
         if not hasattr(self,'_blocked_label_artists'): self._blocked_label_artists=[]
         for a in self._blocked_label_artists:
             try: a.remove()
             except Exception: _exc('_render_tick_inner')
         self._blocked_label_artists=[]
         if _blocked_segs and self._show_labels:
-            for _bx,_by in _blocked_segs:
+            for _bx,_by in _blocked_segs.values():
                 a=self._ax.text(_bx,_by,'[ BLOCKED ]',color='#ff4444',
                               fontsize=7,ha='center',va='center',zorder=13,
                               fontfamily=self._label_fontfamily,fontweight='bold',
