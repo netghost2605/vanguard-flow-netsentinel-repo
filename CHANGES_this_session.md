@@ -1,6 +1,6 @@
-# Changes this session — build `b-8d732031`
+# Changes this session — build `b-bfd27b6e`
 
-Twenty-six things this session. Build IDs for reference:
+Thirty-one things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -56,7 +56,472 @@ Twenty-six things this session. Build IDs for reference:
     ping colours for the charts.
 26. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
     moved off the middle of the canvas onto the actual blocked external
-    server it refers to (this one, current).
+    server it refers to.
+27. `b-8834f5f5` — EtherApe window: new "LAN SCAN" button — active subnet
+    scan with full name resolution, MAC/vendor, and open ports, shown as
+    both a table and a live network map.
+28. `b-738e198c` — LAN Scan map redone as an icon topology diagram (router
+    hub + connected device icons with name/IP/ports underneath), replacing
+    the plain dot-grid from #27.
+29. `b-340c4b04` — LAN Scan is now several times faster: hosts are scanned
+    concurrently instead of one at a time.
+30. `b-a1d0e459` — LAN Scan map icons are now real device artwork, cropped
+    from the Visio stencil screenshot you sent, instead of hand-drawn
+    shapes.
+31. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
+    glowing hardware-monitor-style waveform, updating on its own faster
+    timer (this one, current).
+
+## New: Live traffic panel now looks and updates like a hardware monitor
+
+**What you asked for:** "I WANT THE LIVE TRAFFIC VIEW on the main page to
+look like the attached and update in real time" — with a ~10-second video
+showing an MSI-Afterburner-style scrolling multi-line graph: dark
+background, bright glowing lines, a bright frame border, grid lines, and
+small triangle markers at the right edge showing each line's current
+value.
+
+**What I did:** This is the bottom-left panel of the six-panel chart grid
+on the main dashboard — the one that plots actual TX/RX network throughput
+sampled from your machine via psutil (not your recorded speed-test
+history). I gave it its own draw method (`_update_live_traffic`) instead
+of folding it into the shared chart-refresh code, so it can be styled and
+updated differently from the five panels around it:
+
+- Bright green (`#39ff14` — the same "this is live" green already used
+  elsewhere in the app, e.g. the SCAN button and the 3D view's GRID
+  toggle) frame border and grid lines on a dark panel, instead of the
+  plain thin border the other panels use.
+- Each line (RX and TX) is drawn as a soft glow: several progressively
+  wider, fainter copies of the same line behind one crisp top line. This
+  is a plain matplotlib technique (`_glow_line`, layered `ax.plot()` calls
+  at low alpha) — no image filters or extra libraries needed, so it works
+  the same on your machine as it did in my test.
+- A colour-coded "● RX 12.3 / ● TX 4.1 / Mbps" readout across the top of
+  the panel, in your existing Download/Upload theme colours, in place of
+  the plain grey title text.
+- A small white triangle marker pinned to each line at the right edge,
+  sitting right on the current value — the "live readout" look from your
+  video.
+- The panel now refreshes on its own independent 400ms timer
+  (`_refresh_live_fast`), instead of only redrawing whenever the rest of
+  the dashboard does its full refresh every 2 seconds. That's what makes
+  it visibly animate in real time rather than jumping every couple of
+  seconds along with everything else.
+- Updated the in-app Guide's "Live network traffic (bottom-left)" entry to
+  describe the new look and the faster independent refresh.
+
+**Verified (not assumed):**
+
+- Headless functional test (`ModernWindow` constructed under `xvfb-run`,
+  with the real refresh timers running, snapshotted twice 1.5 seconds
+  apart): confirmed 10 canvas line objects on the panel each time (4 glow
+  layers + 1 crisp line, × 2 series for RX/TX), the frame's border colour
+  reading back as `#39ff14` at the intended alpha, and the "● RX", "● TX",
+  "Mbps" text labels present. Between the two snapshots, the panel's
+  internal sample history grew (2–3 samples → 7–8 samples) — direct proof
+  the independent 400ms timer is actually running and pulling new psutil
+  readings on its own, not just sitting static between the main 2-second
+  refreshes.
+- Rendered a full screenshot of the live dashboard from that same test run
+  (sent alongside this changelog) — visual confirmation the frame, glow
+  lines, colour-coded readout, and triangle markers all render together
+  correctly on the actual chart grid, not just in isolation.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface +
+  JS checks; `/guide` route changed because of the updated Live Traffic
+  wording — re-baselined, no other route changed) and 35/35 passed, 1
+  skipped (Python 3.12 under `xvfb-run`, desktop window + honeypot radar
+  checks).
+
+**Not done / your call:**
+
+- The panel's two lines use your existing Download/Upload theme colours
+  (whatever you've picked in Settings), not the literal green/orange/red
+  scheme from the reference video — the video's colours mark three
+  different metrics (utilization, temperature, kernel load) that don't
+  have an equivalent here; RX/TX already have established colours
+  elsewhere in this app, so I kept those for consistency rather than
+  introducing a second, conflicting colour scheme just for this one panel.
+- The screenshot I'm sending shows RX/TX reading near zero — that's a
+  real reflection of this sandboxed test machine's quiet network during
+  the capture, not a bug in the panel. On your machine, with real network
+  traffic, the lines and the "● RX / ● TX" numbers will move accordingly.
+
+## New: LAN Scan map icons are now real artwork, not hand-drawn shapes
+
+**What you asked for:** "use these icons" — the two `.vss` Visio stencil
+files you sent, after telling me you didn't like the plain hand-drawn
+icon shapes from the previous build.
+
+**What actually happened with the `.vss` files themselves:** I could not
+get usable images out of them, for a real technical reason, not a
+"didn't try hard enough" one — see the previous changelog entry's "Not
+done" note for the three approaches I tried (LibreOffice conversion, its
+scripting API, raw binary inspection) and why the old binary `.vss`
+format doesn't give up its images that way. What I could do instead: you
+had already sent a screenshot earlier in this conversation showing that
+same "Network and Peripherals" stencil rendered in Visio, with clean,
+readable icons and labels. That's a rendered image, not a proprietary
+binary format — I can work with that directly.
+
+**What I did:**
+
+- Measured the screenshot's grid pixel-by-pixel (not guessed) to find
+  the exact boundaries of six icons: Router, Server, Mainframe, Printer,
+  Hub, and Wireless Router.
+- Cropped each one out, then removed its background (the pale blue
+  stencil-cell backdrop) so it sits cleanly on the app's dark canvas
+  instead of looking like a pasted sticker — this took a few passes to
+  get right, since a simple "replace this exact colour" approach either
+  left a halo around each icon or ate into the icon's own light-coloured
+  parts (the icons are soft-shaded product photos, not flat clip art, so
+  there's no clean single "background colour" to key out). Settled on a
+  flood-fill from the corners inward, which only clears background that's
+  actually connected to the edge, not just any similarly-coloured pixel
+  anywhere in the icon.
+- Embedded the six results as small base64-encoded PNGs directly in the
+  script (~2.5KB each, ~18KB total) — the app stays one file, no new
+  external assets to ship or lose track of.
+- Wired them into the map: Router → the router/gateway hub, Server tower
+  → "This PC" and "Windows PC" guesses, Mainframe → "Server/SSH" guesses,
+  Printer → printer guesses, Hub → "NAS/Storage" guesses, Wireless Router
+  → "IoT/Smart device" guesses. The one guessed type with no honest match
+  in that stencil — "Device (unidentified)" — keeps the hand-drawn "?"
+  circle instead of being forced into a real-looking icon that would
+  overstate how sure the guess is.
+
+**Verified (not assumed):**
+
+- Confirmed via `tk.PhotoImage` directly (not just "the file exists") that
+  all six embedded icons decode correctly under Tk's native PNG support —
+  same mechanism Windows Tk will use, no PIL or other runtime image
+  library required.
+- Headless UI test with 7 synthetic hosts covering every guessed type
+  (router, Windows PC, server, printer, NAS, IoT, and one unidentified
+  device with no open ports): counted the actual canvas image items
+  created (7 — six real-icon nodes plus the "This PC" node, which also
+  gets a real icon; the unidentified host correctly falls back to the
+  hand-drawn "?" and is not counted as an image item) — confirmed
+  programmatically, not eyeballed.
+- Rendered screenshot of that same 7-host test (sent alongside this
+  changelog) — visual confirmation the icons, labels, connecting lines,
+  and orange open-port badges all render together correctly, and that the
+  background removal looks clean at the actual on-map size, not just in
+  an isolated crop.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface +
+  JS checks; `/guide` route changed because of the updated LAN Scan
+  wording — re-baselined, no other route changed) and 35/35 passed, 1
+  skipped (Python 3.12 under `xvfb-run`, desktop window + honeypot radar
+  checks).
+
+**Not done / your call:**
+
+- Background removal isn't pixel-perfect at extreme zoom — the Mainframe
+  icon in particular keeps a faint light edge on two sides (visible if
+  you zoom in a lot; not really visible at the map's normal icon size).
+  I tried a more aggressive pass to fully clean it but that started
+  eating into the icon artwork itself on a couple of the icons, which is
+  a worse trade, so I kept the milder pass.
+- Only six icons were pulled from your screenshot — enough to cover every
+  guessed device type this feature currently has. If you want more
+  specific types later (say, a distinct camera or smart-speaker icon
+  instead of the generic "IoT/Smart device" one), I'd need either a
+  clearer source image for that specific icon or you exporting it
+  yourself.
+
+## New: LAN Scan runs several hosts at once instead of one at a time
+
+**What you asked for:** "make the scan much quicker."
+
+**Where the time was actually going:** the previous build scanned hosts
+strictly one after another — for each host, port-scan it (up to ~1,140
+ports), *then* resolve its hostname, *then* move to the next host. A
+host that doesn't answer probes (the common case for a Windows PC with
+its default firewall on, which silently drops unsolicited connections
+instead of rejecting them) pays close to the full per-port timeout on
+every one of those ~1,140 ports. Multiply that by every host on your
+subnet, one at a time, and a normal home network's total scan time adds
+up fast — this was the real bottleneck, not the port count or the
+per-port timeout themselves.
+
+**The fix — measured, not guessed at:**
+
+- Hosts now scan **concurrently**: up to 6 hosts are port-scanned and
+  name-resolved at the same time instead of strictly one after another.
+  A shared budget of ~720 port-scanning threads is split across however
+  many hosts are active at once, rather than just multiplying per-host
+  concurrency by the number of hosts unboundedly.
+- Per host, the port scan and the name resolution — previously back to
+  back — now also run concurrently with each other, since neither
+  depends on the other's result.
+- The discovery ping sweep (the phase before port scanning even starts)
+  went from 64 to 160 concurrent pings, which covers a full /24 in 2
+  rounds of the ping timeout instead of 4 — same number of real pings
+  sent, just more of them in flight at once, so no host is skipped or
+  scanned less thoroughly.
+- The per-port connect timeout dropped slightly, from 0.5s to 0.4s — LAN
+  round-trip times are normally sub-millisecond, so this still leaves
+  roughly 400x headroom for a live host to respond; it only shortens the
+  worst case (a port that never answers at all).
+- Port count and scan scope are unchanged — still the full ~1,140-port
+  "thorough" scan you asked for when I first built this, just run with
+  the hosts overlapped instead of serialized. Nothing was cut to make
+  this faster.
+
+**Verified (not assumed):**
+
+- Because this sandbox has no real LAN with firewalled hosts to reproduce
+  the worst case against, I verified the *mechanism* directly instead of
+  eyeballing a wall-clock number: a test with 12 synthetic hosts, each
+  taking a fixed simulated 0.5s to "scan," recorded exactly how many
+  hosts were mid-scan at the same moment — the measurement showed 6
+  hosts genuinely overlapping in time (matching the intended cap), not
+  just queued back to back. The whole batch finished in ~1.1s versus the
+  6.0s a strictly-sequential version of the same test would have taken —
+  a ~5.5x speedup in this scenario, and the honest reason is real
+  concurrency, confirmed by the overlap count, not just a faster clock.
+- Real-socket port detection re-checked at the new settings (0.4s
+  timeout, the same variable worker count the scan window now computes):
+  3 real local listeners plus 3 known-closed ports, found exactly the 3
+  open ones — same correctness as before, at the tighter timeout.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface
+  + JS checks — no route content changed, so no re-baseline needed) and
+  35/35 passed, 1 skipped (Python 3.12 under `xvfb-run`, desktop window +
+  honeypot radar checks).
+
+**Not done / your call — the icon request:**
+
+You also asked me to use the two Visio stencil files you sent
+(`Icons.vss`, `2D Icons.vss`) for the map's device icons. I looked into
+it properly before giving up on it: tried opening them with LibreOffice
+headlessly (produces a blank page — stencil masters aren't placed on a
+canvas, so a plain document conversion doesn't surface them), tried
+driving LibreOffice's scripting interface to pull the masters out
+directly (couldn't get a stable connection to it in this sandbox), and
+inspected the raw file structure with a binary OLE-file reader looking
+for embedded picture data (found no extractable image data — these are
+the older, pre-2013 binary `.vss` stencil format, which packs every
+shape into one large proprietary binary blob rather than the ZIP-of-XML-
+and-images structure the modern `.vssx` format uses; there's no
+practical way to pull clean icons back out of that format without Visio
+itself). I did not fabricate icons and pass them off as "from your
+stencil" — I'd rather tell you it didn't work. This is a separate,
+still-open item from the scan-speed fix in this entry; I'm asking you
+how you'd like to proceed with it separately.
+
+## New: LAN Scan map redrawn as an icon topology diagram
+
+**What you reported:** the LAN Scan map from the previous build (a 16×16
+grid of plain coloured dots, one per possible address) wasn't what you
+wanted at all. You wanted something closer to the icon-based network
+diagrams from tools like the Visio "Network and Peripherals" stencil you
+showed me — recognisable device icons, IP/name/ports printed under each
+one, and the connections between devices actually drawn.
+
+**What changed:** the map is now a labelled icon topology instead of a
+grid of dots.
+
+- **Icons, not dots.** Each discovered host gets a small flat icon drawn
+  to match a guessed device type: router, this PC, Windows PC, server,
+  printer, NAS/storage, IoT/smart device, or a plain "?" circle when
+  nothing points to any of those. A small orange badge on the icon's
+  corner marks a host with at least one open port.
+- **Labels under every icon.** Directly below each icon: its device-type
+  guess (top caption), then hostname (or IP if unresolved), then IP
+  address, then its open ports (or "no open ports").
+- **Connections drawn.** The map is a star: your default gateway (read
+  from the OS routing table, same source the app already used elsewhere)
+  sits in the middle, and every other discovered host — including this
+  PC itself, shown as a distinct node — is drawn with a line straight to
+  it. Clicking a host highlights its line.
+- **Device type is clearly marked as a guess.** Every icon's caption ends
+  in "(guessed)" except the router and this-PC nodes, which are known for
+  certain (from the OS routing table and the socket the scan itself runs
+  from, not inferred). The type guess itself comes only from open ports,
+  MAC vendor string, and hostname — nothing queries a device about what
+  it actually is.
+- **Map is now the main view.** It moved to the top of the window as a
+  large, scrollable canvas; the sortable table and the selected-host
+  detail panel moved into a shorter strip along the bottom, still fully
+  functional (sort, click-to-select, live streaming as hosts are found).
+
+**Why a star centred on the router, not a real device-to-device diagram:**
+this app has no way to see which physical switch port each device is
+plugged into — that needs SNMP or LLDP access to a managed switch, which
+almost no home router or unmanaged switch exposes. What it does know for
+certain is which hosts answered ARP/ping on your subnet and which one is
+the default gateway. "Every device reaches the rest of the network through
+the router" is the accurate way to draw that with the data actually
+available, so that's what this draws — it is not a guess dressed up as a
+real topology.
+
+**Verified (not assumed):**
+
+- Headless UI test under `xvfb-run`, 5 synthetic hosts including the
+  gateway itself among the discovered hosts (the realistic case, since a
+  router almost always answers ARP on its own subnet): confirmed the
+  gateway host is drawn as the hub, all 5 hosts plus a synthetic "this PC"
+  node all get distinct canvas nodes (6 total, counted programmatically —
+  not eyeballed), clicking a host and clicking the "this PC" node both
+  update the detail panel correctly, and the table still sorts and stays
+  in sync with the map.
+- Device-type guess function checked directly against known inputs:
+  ports `[3389, 445]` → Windows PC, `[9100]` → printer, no ports → generic
+  device, `[22, 80]` → server — all confirmed programmatically.
+- Stress-tested with 22 synthetic hosts (not just the small 4-5 host case)
+  to check the layout scales without crashing or throwing: all 22 hosts
+  plus the self node rendered as distinct nodes with no exceptions, and
+  the canvas's scroll region grew to fit rather than clipping content —
+  checked via a rendered screenshot, not just absence-of-exception.
+- Rendered screenshots of both the 5-host and 22-host cases (5-host one
+  sent alongside this changelog) — confirms visually that icons, labels,
+  and connecting lines are legible and don't overlap badly even with a
+  couple dozen hosts.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface +
+  JS checks; the `/guide` route content changed because of the updated
+  LAN Scan section — re-baselined and confirmed no other route changed)
+  and 35/35 passed, 1 skipped (Python 3.12 under `xvfb-run`, includes the
+  desktop window and honeypot radar checks).
+
+**Not done / your call:**
+
+- Real device-to-device switch topology (which port on which switch each
+  device is plugged into) isn't something this app can discover without
+  SNMP/LLDP access to a managed switch — see the star-topology rationale
+  above. If you have a managed switch and want that level of detail, it'd
+  need new SNMP-polling code and your switch's credentials; tell me if
+  that's worth building.
+- The device-type icon is still a guess from ports/vendor/hostname, same
+  caveat as before — it can be wrong, especially for anything that
+  doesn't expose a recognisable open port (most phones and tablets show
+  up as a generic "?" device).
+- With a lot of hosts (a busy /24 could have 100+), the star can get
+  crowded even with scrolling; I haven't built a zoom control or a
+  cluster/collapse view for very large networks — say if that's something
+  your actual network needs.
+
+## New: "LAN SCAN" button in the EtherApe/Topology window — live network map with name resolution, MAC/vendor, and open ports
+
+**What you asked for:** "in the etherape window i want a map button which
+will create a live network map of my network with full name resolution
+ip adress and open ports."
+
+**Why this is new territory:** every other feature in this window (and in
+the app generally) is passive — it only ever describes traffic it happens
+to observe going by. This is the app's first *active* feature: it goes
+out and probes your LAN on demand rather than waiting for packets to
+arrive. That's a meaningfully different trust/safety shape (it originates
+new traffic instead of just watching), so I clarified scope with you
+before building rather than guessing: you chose a combined table + node-map
+display, a thorough ~1,000-port scan, auto-detected `/24` subnet, and a
+one-shot manual-refresh scan (no continuous background scanning).
+
+**How it works — two phases, both on a click of the new green "▶ SCAN"
+button:**
+
+1. **Host discovery.** Detects your active interface's `/24` (by opening a
+   throwaway UDP socket toward a public address and reading back the local
+   IP the OS picked — no packet is actually sent for this to work, it's
+   just how the OS exposes "which interface would this go out of"), then
+   pings every address in that `/24` in parallel (64 at a time). The pings
+   themselves aren't trusted as the discovery signal — a firewalled host
+   can silently drop ICMP while still answering ARP on the same LAN
+   segment — so the pings exist only to *provoke* ARP resolution; the
+   actual host+MAC list comes from reading back the OS's ARP table
+   afterward (the same `arp -a` reader the app's existing passive MAC
+   lookup already used).
+2. **Per-host scan**, run host-by-host once discovery finishes:
+   - **Ports:** a TCP connect-scan across 1,140 ports — all of well-known
+     1–1024 plus a curated ~90 additional common high ports (databases,
+     RDP, dev/web servers, NAS/IoT). I deliberately did not claim to
+     reproduce nmap's frequency-ranked "top 1000" list — nmap isn't bundled
+     with the app and I won't guess at a list I can't verify — so this is
+     a transparent, broader superset instead.
+   - **Hostname:** reverse DNS (PTR) first, wrapped in a hard timeout
+     (Python's own `gethostbyaddr` has no built-in timeout, so it's run in
+     a background thread with a bounded `join()`); if that comes back
+     empty, falls back to a NetBIOS Name Service (NBSTAT) query on UDP/137
+     for local Windows/SMB machines that don't have PTR records.
+   - **MAC + vendor:** MAC from the same ARP read as discovery; vendor
+     from the app's existing OUI vendor table.
+   - Results stream into the UI host-by-host as they complete, not all at
+     once at the end.
+
+**UI:** a new dark-themed "LAN Scan" window (matching the Geo Map window's
+look), opened by a new "🖧 LAN SCAN" button on the EtherApe toolbar.
+Left side is a sortable table (IP, Hostname, MAC, Vendor, Open Ports, Last
+Scanned). Right side is a 16×16 grid network map — one cell per possible
+host on the subnet — with an orange dot for a live host with open ports, a
+blue dot for a live host with none, and a white ring on whichever host is
+currently selected; clicking either a table row or a map dot selects that
+host and shows its full detail. Re-clicking the button while a scan is
+already running/finished just brings the same window forward instead of
+opening a second one. The in-app guide's EtherApe page has a new "LAN
+Scan" section describing all of this, matching how the guide's been kept
+in sync with every other new feature this session.
+
+**Two real bugs found and fixed while testing this, not left for you to
+find:**
+
+- **Open-port count race condition:** the finished-scan status line
+  ("Done — N host(s), M open port(s) total") was undercounting. The
+  background scan thread was totaling ports by reading the UI's own result
+  dict immediately after *scheduling* (not waiting for) the main-thread
+  callbacks that actually populate it — a genuine cross-thread read race.
+  Fixed by having the worker thread total the ports itself, from its own
+  local results, instead of reading UI state back.
+- **MAC address column too narrow:** caught only by looking at a rendered
+  screenshot, not from any data-level test — the MAC column was 130px,
+  which silently clipped the last character of a 17-character MAC address
+  (`ttk.Treeview` clips without an ellipsis, so it just looks like a
+  shorter, different-looking value). Four visually-distinct test MAC
+  addresses all rendered as if identical. Widened the MAC column (and
+  rebalanced the others) so full MACs render distinctly.
+
+**Verified (not assumed):**
+
+- Port scanner tested against real listening sockets, not mocks: opened
+  three real local TCP listeners plus three known-closed ports and
+  confirmed the scanner found exactly the three open ones, nothing more or
+  less.
+- NBNS (NetBIOS Name Service) parser tested with a synthetic constructed
+  response packet round-tripped through the real encode/query/parse code
+  (with the socket monkeypatched to hand back that packet) — confirmed the
+  hostname comes back correctly. I have not tested this against a real
+  Windows/SMB host, since this sandbox has no LAN to test against — see
+  "Not done" below.
+- Full UI/orchestration tested headlessly under `xvfb-run` with a real
+  `EtherApeWindow` and real `_EtherApeScanWindow`, fed synthetic 4-host
+  discovery/port/name data (the low-level primitives are what's tested for
+  real above): confirmed the button opens the window, re-clicking reuses
+  the same window instead of opening a second one, all 4 hosts land in
+  both the table and the map, sorting works, table↔map selection sync
+  works, the no-open-ports host shows an em-dash instead of blank or a
+  crash, and — after the two fixes above — the port-total status line and
+  the MAC column are both correct. A rendered screenshot after the fixes
+  confirms this visually (sent alongside this changelog).
+- `_NM_SCAN_PORTS` (the 1,140-port list) checked programmatically: no
+  duplicates, sorted, exact count confirmed rather than assumed.
+- `_nm_local_subnet()` and the ping-sweep/ARP-read path both run without
+  crashing even in this sandbox, which has no real LAN and no `arp` binary
+  — confirms they fail gracefully rather than assuming a working
+  environment.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface +
+  JS checks, desktop checks skipped — no display) and 35/35 passed, 1
+  skipped (Python 3.12 under `xvfb-run`, includes the desktop window and
+  honeypot radar checks). No route content changed, so no re-baseline was
+  needed.
+
+**Not done / your call:**
+
+- The NBNS fallback is implemented from protocol documentation and
+  verified against a synthetic packet, but not against a real Windows/SMB
+  host — this sandbox has no LAN to test against. If a host on your
+  network doesn't resolve a hostname and you'd expect it to via NetBIOS,
+  tell me and I'll dig into it with real data.
+- This is a one-shot, manual-refresh scan, not continuous/background, per
+  what you chose when I asked. Say if you'd rather it auto-rescan
+  periodically.
 
 ## New: "[ BLOCKED ]" marker now sits on the actual blocked server, not floating in mid-canvas
 

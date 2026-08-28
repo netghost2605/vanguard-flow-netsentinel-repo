@@ -2432,7 +2432,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-8d732031'
+_NM_BUILD_ID = 'b-bfd27b6e'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -6205,6 +6205,263 @@ def _nm_arp_table():
     return out
 
 
+# ── LAN Scan (active discovery + port scan + full name resolution) ─────────
+# Everything below backs the "LAN SCAN" button on the Topology window: a
+# one-shot, on-demand active scan of the local /24 -- separate from the rest
+# of this app, which only ever *observes* traffic passively. Nothing here
+# runs unless the user clicks the button.
+
+# ~1000 TCP ports to probe per host. NOT nmap's frequency-ranked "top 1000"
+# list -- nmap isn't bundled with this app, and reproducing its exact list
+# from memory would be guessing. This is a plain, transparent superset
+# instead: every well-known port (1-1024) plus a curated set of higher ports
+# that commonly show up in practice (databases, remote desktop, dev/web
+# servers, NAS/IoT services, etc.). ~1,140 ports total.
+_NM_SCAN_PORTS_HIGH = [
+    1080,1194,1433,1434,1521,1723,2049,2082,2083,2086,2087,2181,2375,2376,
+    2483,2484,3000,3001,3128,3306,3389,3690,4000,4444,4567,4848,5000,5001,
+    5060,5061,5222,5353,5432,5555,5601,5672,5900,5901,5985,5986,6000,6379,
+    6443,6666,6667,6881,7000,7001,7070,7077,7199,7474,7547,8000,8008,8009,
+    8080,8081,8086,8088,8090,8091,8095,8096,8140,8161,8200,8222,8291,8333,
+    8443,8500,8600,8649,8834,8880,8883,8888,8983,9000,9001,9042,9090,9091,
+    9092,9100,9200,9300,9418,9443,9527,9999,10000,10001,10250,10255,11211,
+    12345,15672,16992,16993,17185,18245,19999,20000,25565,27015,27017,28017,
+    32400,32764,32768,49152,50000,54321,62078,
+]
+_NM_SCAN_PORTS = sorted(set(range(1, 1025)) | set(_NM_SCAN_PORTS_HIGH))
+
+
+def _nm_local_subnet():
+    """Best-effort local IPv4 /24 the active interface sits on.
+
+    Uses the classic UDP-connect-to-a-public-IP trick: connecting a UDP
+    socket sends no packet, it just makes the OS pick a route/interface, so
+    reading the socket's own address back gives the local IP without needing
+    netifaces or platform-specific interface parsing. Returns
+    (network_cidr, my_ip), or (None, None) if there's no route out at all
+    (no network, VPN with no default route, etc.).
+    """
+    try:
+        _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _s.settimeout(0.5)
+        _s.connect(('8.8.8.8', 80))
+        myip = _s.getsockname()[0]
+        _s.close()
+        import ipaddress as _ipa
+        iface = _ipa.ip_interface(f'{myip}/24')
+        return str(iface.network), myip
+    except Exception:
+        _exc('_nm_local_subnet')
+        return None, None
+
+
+def _nm_ping_sweep(network_cidr, on_progress=None):
+    """Parallel ping sweep of a /24 (or smaller) CIDR, then read back the OS
+    ARP cache the pings just populated. Returns {ip: mac}.
+
+    Pinging is only the trigger, not the detection mechanism -- ARP is the
+    source of truth here, since a host can (and often does) drop ICMP while
+    still answering ARP on the same LAN segment. `on_progress(done, total)`
+    is called from the calling (worker) thread as pings complete, not the
+    Tk main thread -- callers must hop back via `.after()` themselves.
+    """
+    import ipaddress as _ipa
+    import concurrent.futures as _cf
+    try:
+        net = _ipa.ip_network(network_cidr, strict=False)
+    except Exception:
+        _exc('_nm_ping_sweep')
+        return {}
+    targets = list(net.hosts())
+    win = (sys.platform == 'win32')
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if win else 0
+
+    def _ping_one(ip):
+        try:
+            cmd = (['ping', '-n', '1', '-w', '400', str(ip)] if win
+                   else ['ping', '-c', '1', '-W', '1', str(ip)])
+            subprocess.run(cmd, capture_output=True, timeout=2, creationflags=flags)
+        except Exception:
+            pass  # a timed-out/unreachable ping is an expected, silent outcome here
+
+    done = [0]
+    if targets:
+        # 160 workers covers a full /24 (254 hosts) in 2 rounds instead of 4 --
+        # each round costs one ping timeout (worst case), so this halves the
+        # discovery phase's worst-case wall-clock for no accuracy trade-off
+        # (still one real ping per address, just more of them run at once).
+        with _cf.ThreadPoolExecutor(max_workers=160) as ex:
+            futs = [ex.submit(_ping_one, ip) for ip in targets]
+            for _ in _cf.as_completed(futs):
+                done[0] += 1
+                if on_progress:
+                    try: on_progress(done[0], len(targets))
+                    except Exception: _exc('_nm_ping_sweep_progress')
+    return _nm_arp_table()
+
+
+def _nm_scan_ports(ip, ports=None, timeout=0.5, max_workers=200, on_progress=None):
+    """TCP connect-scan a single host across `ports` (default `_NM_SCAN_PORTS`,
+    ~1,140 ports). Returns a sorted list of open port ints. `on_progress` has
+    the same calling-thread caveat as in `_nm_ping_sweep`.
+    """
+    import concurrent.futures as _cf
+    ports = ports if ports is not None else _NM_SCAN_PORTS
+    open_ports = []
+
+    def _try(port):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            r = s.connect_ex((ip, port))
+            s.close()
+            return port if r == 0 else None
+        except Exception:
+            return None
+
+    done = [0]
+    with _cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_try, p) for p in ports]
+        for fut in _cf.as_completed(futs):
+            done[0] += 1
+            res = fut.result()
+            if res:
+                open_ports.append(res)
+            if on_progress:
+                try: on_progress(done[0], len(ports))
+                except Exception: _exc('_nm_scan_ports_progress')
+    return sorted(open_ports)
+
+
+def _nbns_encode_name(name, pad_to=16):
+    """NetBIOS first-level name encoding: each byte of the (space-padded)
+    16-byte name becomes two ASCII letters (nibble + 'A'). Computed rather
+    than hand-transcribed so a copy/paste slip can't corrupt the packet.
+    """
+    raw = name.encode('ascii')[:pad_to].ljust(pad_to, b' ')
+    out = bytearray()
+    for b in raw:
+        out.append(0x41 + (b >> 4))
+        out.append(0x41 + (b & 0x0F))
+    return bytes(out)
+
+
+def _nbns_skip_name(data, offset):
+    """Skip one DNS/NBNS-style name field, honoring compression pointers."""
+    length = data[offset]
+    if (length & 0xC0) == 0xC0:
+        return offset + 2
+    while True:
+        length = data[offset]
+        if length == 0:
+            return offset + 1
+        if (length & 0xC0) == 0xC0:
+            return offset + 2
+        offset += 1 + length
+
+
+def _nm_nbns_query(ip, timeout=1.0):
+    """Minimal NetBIOS Name Service (NBSTAT) query on UDP/137 -- no
+    third-party deps, just the raw protocol. Fallback name source for local
+    Windows/SMB hosts that have no reverse-DNS (PTR) record, which is common
+    on a home/office LAN. Returns '' on any failure or non-answer; this is
+    best-effort only and was implemented from protocol documentation, not
+    verified against a live NBNS responder (this sandbox has no LAN to test
+    against) -- it fails closed (silent '') rather than raising, so a bad
+    parse just means no name, never a crash.
+    """
+    try:
+        txn_id = os.urandom(2)
+        header = txn_id + b'\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+        encoded = _nbns_encode_name('*')
+        question = b'\x20' + encoded + b'\x00' + b'\x00\x21\x00\x01'
+        packet = header + question
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(timeout)
+        s.sendto(packet, (ip, 137))
+        data, _addr = s.recvfrom(2048)
+        s.close()
+        if len(data) < 13:
+            return ''
+        offset = _nbns_skip_name(data, 12)   # skip the answer's name field
+        offset += 2 + 2 + 4                  # type(2) + class(2) + ttl(4)
+        if offset + 2 > len(data):
+            return ''
+        offset += 2                          # rdlength(2) -- not needed, trust the walk
+        if offset + 1 > len(data):
+            return ''
+        num_names = data[offset]
+        offset += 1
+        for _ in range(num_names):
+            if offset + 18 > len(data):
+                break
+            raw_name = data[offset:offset+15].decode('ascii', 'ignore').strip()
+            suffix = data[offset+15]
+            if raw_name and suffix == 0x00:   # 0x00 = workstation/hostname record
+                return raw_name
+            offset += 18
+        return ''
+    except Exception:
+        return ''
+
+
+def _nm_full_resolve(ip, timeout=1.5):
+    """Best-effort full hostname resolution for a scanned host: reverse DNS
+    (PTR) first, wrapped in a hard timeout (`socket.gethostbyaddr` has no
+    native timeout and can hang on a slow/misbehaving resolver), then a raw
+    NetBIOS query as a LAN-local fallback. Returns '' if neither answers.
+    This is deliberately separate from `EtherApeWindow._resolve()` (the
+    passive-view resolver), which is async/fire-and-forget and PTR-only --
+    a one-shot active scan can afford to wait briefly per host instead.
+    """
+    result = {}
+    def _ptr():
+        try:
+            result['name'] = socket.gethostbyaddr(ip)[0].rstrip('.')
+        except Exception:
+            pass
+    t = threading.Thread(target=_ptr, daemon=True)
+    t.start()
+    t.join(timeout)
+    name = result.get('name')
+    if name and name != ip:
+        return name
+    return _nm_nbns_query(ip, timeout=1.0)
+
+
+_NM_ROUTER_VENDORS = ('tp-link', 'netgear', 'd-link', 'asus', 'ubiquiti',
+                      'mikrotik', 'linksys', 'arris', 'technicolor', 'huawei',
+                      'zte', 'actiontec', 'sagemcom', 'belkin', 'aruba',
+                      'ruckus', 'cisco', 'juniper', 'motorola')
+
+
+def _nm_guess_device_type(ports, vendor, hostname):
+    """Best-effort GUESS at what kind of device this is, from open TCP
+    ports + MAC vendor + hostname only -- picks which icon to draw on the
+    LAN Scan map. This is inference, not verification: nothing here queries
+    the device about what it actually is, so it is always presented to the
+    user as a guess (icon caption says so), never as a confirmed fact.
+    Caller is responsible for the 'router' (default gateway) and 'self'
+    (this machine) cases, which are contextual rather than port-based.
+    """
+    portset = set(ports or [])
+    v = (vendor or '').lower()
+    h = (hostname or '').lower()
+    if (portset & {9100, 631, 515}) or 'printer' in h or 'printer' in v:
+        return 'printer'
+    if 'synology' in v or 'qnap' in v or 'nas' in h or (portset & {5000, 5001, 548}):
+        return 'nas'
+    if any(rv in v for rv in _NM_ROUTER_VENDORS) and not (portset - {80, 443, 22, 53}):
+        return 'router'
+    if portset & {3389, 445, 135, 139}:
+        return 'windows'
+    if 22 in portset:
+        return 'server'
+    if portset:
+        return 'iot'    # something is listening but matches no known pattern
+    return 'device'      # nothing open -- phone/tablet/IoT that doesn't listen
+
+
 # Small curated OUI prefix -> vendor map (common consumer/network gear).
 # Merged from two copies of this table that used to exist in this file under
 # the same name — the second silently shadowed the first at module load, so
@@ -8937,6 +9194,7 @@ class EtherApeWindow:
         self._ai_watch_results = []     # list of alert dicts
         self._geo_cache  = {}   # ip → geo data from ip-api.com
         self._geo_window = None
+        self._scan_window = None  # lazily-opened _EtherApeScanWindow (LAN SCAN button)
         self._blocked_ips = set()  # IPs with active NM_BLOCK_ firewall rules
         self._blocked_countries = set()   # country codes permanently blocked (e.g. 'RU')
         self._BLOCKED_CC_FILE = str(_app_dir() / 'blocked_countries.json')
@@ -9175,6 +9433,7 @@ class EtherApeWindow:
         htbtn(tb1,'◎  TRAFFIC',self._analyze_traffic,'#a371f7',9)
         htbtn(tb1,'◼  IDS',self._run_ids,'#ff4444',7)
         htbtn(tb1,'⊕  GEO MAP',self._open_geo_window,'#38f0a8',9)
+        htbtn(tb1,'\U0001f5a7  LAN SCAN',self._open_lan_scan_window,'#39ff14',10)
         htbtn(tb1,'⬡  3D VIEW',self._open_3d_view,'#ff9f43',9)
         htbtn(tb1,'⊛  SPREAD',self._spread_nodes,'#74c7ec',8)
         htbtn(tb1,'\u26d4  FIREWALL',self._open_firewall_window,'#ff9f43',10)
@@ -12706,6 +12965,18 @@ class EtherApeWindow:
             return
         self._geo_window = _EtherApeGeoWindow(self)
 
+    # ── LAN Scan state ────────────────────────────────────────────────────────────
+    _scan_window = None
+
+    def _open_lan_scan_window(self):
+        if (self._scan_window and
+                hasattr(self._scan_window, 'root') and
+                self._scan_window.root.winfo_exists()):
+            self._scan_window.root.lift()
+            self._scan_window.root.focus_force()
+            return
+        self._scan_window = _EtherApeScanWindow(self)
+
     def _refresh_blocked_count(self):
         """Keep the toolbar counter in step with the real firewall."""
         try:
@@ -15096,6 +15367,535 @@ class _EtherApeGeoWindow:
         except Exception: _exc('_on_close')
         try: self.root.destroy()
         except Exception: _exc_debug('_on_close')  # TclError on recursive destroy is harmless
+
+
+# Real device-icon artwork for the LAN Scan map, cropped from the Visio
+# "Network and Peripherals" stencil screenshot the user provided (the
+# original .vss stencil files turned out not to be extractable -- see the
+# changelog). Each is a small transparent PNG, base64-encoded so the whole
+# app stays one file. Six source icons cover the guessed device types that
+# have a real-world equivalent in that stencil; 'device' (unidentified)
+# has no real analog there, so it keeps the hand-drawn "?" glyph instead
+# of being forced into a misleading icon.
+_NM_SCAN_ICON_B64 = {
+    'router_icon':      "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",
+    'server_tower_icon':"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",
+    'mainframe_icon':   "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",
+    'printer_icon':     "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",
+    'hub_icon':         "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",
+    'wireless_icon':    "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",
+}
+_NM_DTYPE_ICON_KEY = {
+    'router':  'router_icon',
+    'self':    'server_tower_icon',
+    'windows': 'server_tower_icon',
+    'server':  'mainframe_icon',
+    'printer': 'printer_icon',
+    'nas':     'hub_icon',
+    'iot':     'wireless_icon',
+    # 'device' (unidentified) intentionally has no entry -- see docstring.
+}
+
+
+class _EtherApeScanWindow:
+    """LAN Scan — active, on-demand host discovery + port scan + full name
+    resolution, shown as an icon topology map plus a sortable table.
+    Distinct from the rest of EtherApe, which is purely passive (it only
+    ever draws traffic it happens to observe): this one goes out and asks
+    the network directly. One-shot per click: SCAN runs a single
+    ping-sweep + ARP-read + per-host port-scan + resolve pass and stops;
+    click again (RESCAN) to refresh.
+
+    The map is a star: your default gateway (router) in the middle, every
+    other discovered host connected to it by a line. That is a deliberate
+    choice, not a shortcut -- this app has no way to see which physical
+    switch port each device is actually plugged into (that needs SNMP/
+    LLDP access to a managed switch, which almost no home router exposes),
+    so drawing a real per-port switch diagram isn't something it can do
+    honestly. What it DOES know for certain is which hosts answered ARP/
+    ping on your subnet and which one is the gateway (from the OS's own
+    routing table) -- "every device reaches the network through the
+    router" is the accurate way to draw that.
+
+    The little icon per host (router / PC / printer / NAS / etc.) is also
+    a best-effort GUESS from open ports, MAC vendor, and hostname -- never
+    a verified fact -- which is why every icon's caption says "(guessed)".
+    """
+
+    _ICON_COLORS = {
+        'router':  '#39ff14',
+        'self':    '#38b8f0',
+        'windows': '#00b3ff',
+        'server':  '#9b4dff',
+        'printer': '#ffb300',
+        'nas':     '#ff8c1a',
+        'iot':     '#ff3ec8',
+        'device':  '#6a9ab8',
+    }
+    _ICON_LABELS = {
+        'router':  'Router / Gateway',
+        'self':    'This PC',
+        'windows': 'Windows PC (guessed)',
+        'server':  'Server / SSH (guessed)',
+        'printer': 'Printer (guessed)',
+        'nas':     'NAS / Storage (guessed)',
+        'iot':     'IoT / Smart device (guessed)',
+        'device':  'Device (unidentified)',
+    }
+
+    def __init__(self, ea):
+        self._ea      = ea
+        self._closed  = False
+        self._scanning = False
+        self._results  = {}     # ip -> {ip,name,mac,vendor,ports,ts}
+        self._selected_ip = None
+        self._sort_rev = {}
+        self._gateway_ip = ''
+        self._my_ip = ''
+
+        import tkinter as tk
+        import tkinter.ttk as ttk
+        self._tk = tk; self._ttk = ttk
+
+        self.root = tk.Toplevel()
+        self.root.title('EtherApe — LAN Scan')
+        self.root.configure(bg='#010810')
+        self.root.geometry('1500x900')
+        try: self.root.state('zoomed')   # maximise on Windows
+        except Exception: _exc('__init__')
+        self.root.minsize(1000, 620)
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+        ACC='#38b8f0'; BG='#010810'; PNL='#060f1c'; TICK='#6a9ab8'
+
+        # Header
+        hdr = tk.Frame(self.root, bg=BG, height=44)
+        hdr.pack(fill='x'); hdr.pack_propagate(False)
+        tk.Frame(self.root, bg=ACC, height=2).pack(fill='x')
+        tk.Label(hdr, text='  \U0001f5a7  LAN SCAN — Active Host & Port Discovery',
+                 bg=BG, fg=ACC, font=(_NM_MONO, 11, 'bold')).pack(side='left', padx=14, pady=10)
+        self._status_var = tk.StringVar(value='Click SCAN to discover hosts on your subnet.')
+        tk.Label(hdr, textvariable=self._status_var, bg=BG, fg=TICK,
+                 font=(_NM_MONO, 8)).pack(side='right', padx=14)
+
+        # Toolbar
+        tb = tk.Frame(self.root, bg=BG, pady=4)
+        tb.pack(fill='x')
+        tk.Frame(self.root, bg='#0d2030', height=1).pack(fill='x')
+
+        def _tbtn(text, cmd, acc=ACC):
+            b = tk.Button(tb, text=text, command=cmd, bg='#060f1c', fg=acc,
+                          activebackground=acc, activeforeground='#000',
+                          relief='flat', font=(_NM_MONO, 8, 'bold'),
+                          cursor='hand2', padx=10, pady=4,
+                          highlightthickness=1, highlightbackground=acc)
+            b.pack(side='left', padx=3)
+            return b
+
+        self._scan_btn = _tbtn('▶  SCAN', self._start_scan, '#39ff14')
+        tk.Label(tb, text=' Full subnet (/24) · ~1,140 TCP ports/host · several hosts scanned '
+                          'at once · one-shot, click to rescan',
+                 bg=BG, fg='#2a4a6a', font=(_NM_MONO, 7)).pack(side='left', padx=10)
+
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill='both', expand=True)
+
+        # ── Bottom strip: sortable results table + selected-host detail ──
+        bottom = tk.Frame(outer, bg=BG, height=250)
+        bottom.pack(side='bottom', fill='x')
+        bottom.pack_propagate(False)
+        tk.Frame(outer, bg='#0a1828', height=1).pack(side='bottom', fill='x')
+
+        tright = tk.Frame(bottom, bg=PNL, width=320)
+        tright.pack(side='right', fill='y')
+        tright.pack_propagate(False)
+        tk.Frame(bottom, bg='#0a1828', width=1).pack(side='right', fill='y')
+        tk.Label(tright, text='SELECTED HOST', bg=PNL, fg=TICK,
+                 font=(_NM_MONO, 8, 'bold')).pack(anchor='w', padx=10, pady=(10, 2))
+        self._detail_var = tk.StringVar(value='Click a row, or an icon on the map, to see details.')
+        tk.Label(tright, textvariable=self._detail_var, bg=PNL, fg='#c8dff0',
+                 font=(_NM_MONO, 8), justify='left', anchor='nw', wraplength=300
+                 ).pack(fill='both', expand=True, padx=10, pady=(0, 10))
+
+        tleft = tk.Frame(bottom, bg=BG)
+        tleft.pack(side='left', fill='both', expand=True)
+
+        cols = ('ip', 'name', 'mac', 'vendor', 'ports', 'last')
+        hdrs = ('IP Address', 'Hostname', 'MAC', 'Vendor', 'Open Ports', 'Last Scanned')
+        wids = (120, 170, 155, 110, 320, 100)
+        self._tree = ttk.Treeview(tleft, columns=cols, show='headings',
+                                   style='EA.Treeview', selectmode='browse')
+        for c, h, w in zip(cols, hdrs, wids):
+            self._tree.heading(c, text=h, anchor='w', command=lambda cc=c: self._sort_by(cc))
+            self._tree.column(c, width=w, minwidth=40, stretch=(c == 'ports'))
+        vsb = ttk.Scrollbar(tleft, orient='vertical', command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        self._tree.pack(fill='both', expand=True, padx=(4, 0), pady=4)
+        self._tree.bind('<<TreeviewSelect>>', self._on_row_select)
+
+        # ── Top: icon-based network map, router hub + connected spokes ──
+        mapwrap = tk.Frame(outer, bg=PNL)
+        mapwrap.pack(side='top', fill='both', expand=True)
+        maphdr = tk.Frame(mapwrap, bg=PNL)
+        maphdr.pack(fill='x')
+        tk.Label(maphdr, text='NETWORK MAP', bg=PNL, fg=TICK,
+                 font=(_NM_MONO, 8, 'bold')).pack(side='left', padx=10, pady=(8, 4))
+        tk.Label(maphdr, text='your router in the middle, every discovered host wired to it · '
+                              'click an icon for detail · device type is a best-effort guess, not verified',
+                 bg=PNL, fg='#2a4a6a', font=(_NM_MONO, 7)).pack(side='left', padx=4, pady=(8, 4))
+
+        canvasholder = tk.Frame(mapwrap, bg=PNL)
+        canvasholder.pack(fill='both', expand=True, padx=10, pady=(0, 10))
+        canvasholder.rowconfigure(0, weight=1)
+        canvasholder.columnconfigure(0, weight=1)
+        self._map_canvas = tk.Canvas(canvasholder, bg='#040c1a', highlightthickness=0)
+        mvbar = ttk.Scrollbar(canvasholder, orient='vertical', command=self._map_canvas.yview)
+        mhbar = ttk.Scrollbar(canvasholder, orient='horizontal', command=self._map_canvas.xview)
+        self._map_canvas.configure(yscrollcommand=mvbar.set, xscrollcommand=mhbar.set)
+        self._map_canvas.grid(row=0, column=0, sticky='nsew')
+        mvbar.grid(row=0, column=1, sticky='ns')
+        mhbar.grid(row=1, column=0, sticky='ew')
+
+        self._icon_photos = {}
+        for _key, _b64 in _NM_SCAN_ICON_B64.items():
+            try:
+                self._icon_photos[_key] = tk.PhotoImage(data=_b64)
+            except Exception:
+                _exc('_EtherApeScanWindow.__init__ (icon load: %s)' % _key)
+
+        self._redraw_map()
+
+    # ── Icon drawing: real device artwork cropped from the Visio stencil, one
+    # per guessed device type, with a hand-drawn "?" fallback for the types
+    # that stencil has no real equivalent for (or if image loading failed).
+    def _draw_device_icon(self, cx, cy, dtype, tag, selected=False, has_ports=False):
+        c = self._map_canvas
+        color = self._ICON_COLORS.get(dtype, '#6a9ab8')
+        s = 23
+        if selected:
+            c.create_oval(cx - s - 7, cy - s - 7, cx + s + 7, cy + s + 7,
+                          outline='#ffffff', width=2, tags=(tag, 'icon'))
+        icon_key = _NM_DTYPE_ICON_KEY.get(dtype)
+        photo = self._icon_photos.get(icon_key) if icon_key else None
+        if photo is not None:
+            c.create_image(cx, cy, image=photo, anchor='center', tags=(tag, 'icon'))
+        else:  # 'device' (unidentified), or an icon that failed to load
+            c.create_oval(cx - s * 0.75, cy - s * 0.75, cx + s * 0.75, cy + s * 0.75,
+                          outline=color, width=3, fill='#040c1a', tags=(tag, 'icon'))
+            c.create_text(cx, cy, text='?', fill=color, font=(_NM_MONO, 12, 'bold'), tags=(tag, 'icon'))
+        if has_ports:
+            bx, by = cx + s * 0.6, cy - s * 0.6
+            c.create_oval(bx - 5, by - 5, bx + 5, by + 5,
+                          fill='#ff9f43', outline='#040c1a', width=1, tags=(tag, 'icon'))
+
+    @staticmethod
+    def _ports_caption(ports):
+        if not ports:
+            return 'no open ports'
+        if len(ports) <= 4:
+            return ', '.join(str(p) for p in ports)
+        return ', '.join(str(p) for p in ports[:4]) + f' +{len(ports) - 4} more'
+
+    # ── Full redraw: layout is recomputed from self._results every time ────────────
+    def _redraw_map(self):
+        import math
+        c = self._map_canvas
+        c.delete('all')
+
+        ips = list(self._results.keys())
+        hub_ip = self._gateway_ip if self._gateway_ip in self._results else None
+        spokes = [ip for ip in ips if ip != hub_ip]
+        include_self = bool(self._my_ip)
+        n = len(spokes) + (1 if include_self else 0)
+
+        node_w, node_h = 130, 100
+        if n == 0:
+            cw = max(600, self._map_canvas.winfo_width() or 600)
+            ch = max(400, self._map_canvas.winfo_height() or 400)
+            c.create_text(cw // 2, ch // 2,
+                          text='Click ▶ SCAN to discover hosts on your subnet.',
+                          fill='#2a4a6a', font=(_NM_MONO, 10))
+            c.configure(scrollregion=(0, 0, cw, ch))
+            return
+
+        min_arc = 140
+        radius = max(190, int((min_arc * n) / (2 * math.pi)))
+        cw = radius * 2 + node_w * 2 + 60
+        ch = radius * 2 + node_h * 2 + 60
+        vw = self._map_canvas.winfo_width() or cw
+        vh = self._map_canvas.winfo_height() or ch
+        cw = max(cw, vw); ch = max(ch, vh)
+        cx, cy = cw // 2, ch // 2
+
+        positions = {}   # id -> (x, y, dtype, row-or-None)
+        if hub_ip:
+            positions[hub_ip] = (cx, cy, 'router', self._results[hub_ip])
+        elif self._gateway_ip:
+            positions['__gw__'] = (cx, cy, 'router', None)
+        else:
+            positions['__gw__'] = (cx, cy, 'device', None)
+
+        spoke_ids = list(spokes) + (['__self__'] if include_self else [])
+        for i, ip in enumerate(spoke_ids):
+            ang = (2 * math.pi * i) / max(len(spoke_ids), 1) - math.pi / 2
+            x = cx + radius * math.cos(ang)
+            y = cy + radius * math.sin(ang)
+            if ip == '__self__':
+                positions[ip] = (x, y, 'self', None)
+            else:
+                row = self._results[ip]
+                dtype = _nm_guess_device_type(row.get('ports'), row.get('vendor'), row.get('name'))
+                positions[ip] = (x, y, dtype, row)
+
+        hub_id = hub_ip or '__gw__'
+        hub_x, hub_y = positions[hub_id][0], positions[hub_id][1]
+
+        # Links first, so icons/labels draw on top.
+        for ip, (x, y, dtype, row) in positions.items():
+            if ip == hub_id:
+                continue
+            sel = (ip == self._selected_ip) or (ip == '__self__' and self._selected_ip == '__self__')
+            c.create_line(hub_x, hub_y, x, y,
+                          fill='#38b8f0' if sel else '#173a54',
+                          width=2 if sel else 1, tags=('link',))
+
+        for ip, (x, y, dtype, row) in positions.items():
+            tag = f'node_{ip}'
+            sel = (ip == self._selected_ip)
+            has_ports = bool(row and row.get('ports'))
+            self._draw_device_icon(x, y, dtype, tag, selected=sel, has_ports=has_ports)
+            caption = self._ICON_LABELS.get(dtype, dtype)
+            c.create_text(x, y - 34, text=caption, fill=self._ICON_COLORS.get(dtype, '#6a9ab8'),
+                          font=(_NM_MONO, 7, 'bold'), tags=(tag, 'label'))
+            if ip == '__self__':
+                name_line = 'This device'
+                ip_line = self._my_ip
+                ports_line = 'not scanned (this is the scanning PC)'
+            elif ip == '__gw__':
+                name_line = 'Gateway (not seen in scan)'
+                ip_line = self._gateway_ip
+                ports_line = ''
+            else:
+                nm = row.get('name') or ip
+                name_line = nm if len(nm) <= 18 else nm[:17] + '…'
+                ip_line = ip
+                ports_line = self._ports_caption(row.get('ports'))
+            c.create_text(x, y + 30, text=name_line, fill='#c8dff0',
+                          font=(_NM_MONO, 8, 'bold'), tags=(tag, 'label'))
+            c.create_text(x, y + 43, text=ip_line, fill='#6a9ab8',
+                          font=(_NM_MONO, 7), tags=(tag, 'label'))
+            if ports_line:
+                c.create_text(x, y + 56, text=ports_line,
+                              fill='#ff9f43' if has_ports else '#3a5a78',
+                              font=(_NM_MONO, 7), tags=(tag, 'label'))
+            if ip not in ('__gw__',):
+                c.tag_bind(tag, '<Button-1>', lambda e, ip=ip: self._select_ip(ip))
+
+        c.configure(scrollregion=(0, 0, cw, ch))
+
+    # ── Scan orchestration (background thread; only touches widgets via .after) ────
+    def _start_scan(self):
+        if self._scanning:
+            return
+        self._scanning = True
+        self._results = {}
+        self._selected_ip = None
+        self._gateway_ip = ''
+        self._my_ip = ''
+        try:
+            self._tree.delete(*self._tree.get_children())
+        except Exception: _exc('_start_scan')
+        self._redraw_map()
+        self._detail_var.set('Click a row, or an icon on the map, to see details.')
+        self._scan_btn.config(state='disabled', text='⏳  SCANNING')
+        self._status_var.set('Determining local subnet...')
+
+        def _worker():
+            import concurrent.futures as _cf
+            try:
+                gw = _nm_default_gateway()
+                self._gateway_ip = gw
+                network_cidr, my_ip = _nm_local_subnet()
+                self._my_ip = my_ip or ''
+                if not network_cidr:
+                    self.root.after(0, lambda: self._scan_done_fail(
+                        'Could not determine local subnet (no route out).'))
+                    return
+                self.root.after(0, lambda: self._status_var.set(
+                    f'Discovering hosts on {network_cidr}...'))
+
+                def _dprog(done, total):
+                    self.root.after(0, lambda: self._status_var.set(
+                        f'Discovering hosts on {network_cidr}... {done}/{total}'))
+                arp_map = _nm_ping_sweep(network_cidr, on_progress=_dprog)
+                live_ips = [ip for ip in arp_map if ip != my_ip]
+                live_ips.sort(key=lambda ip: tuple(int(x) for x in ip.split('.')))
+
+                if not live_ips:
+                    self.root.after(0, lambda: self._scan_done_fail(
+                        f'No other hosts found on {network_cidr}.'))
+                    return
+
+                n = len(live_ips)
+                self.root.after(0, lambda: self._status_var.set(
+                    f'{n} host(s) found — scanning ports on all of them at once...'))
+
+                # Scan several hosts CONCURRENTLY instead of one at a time --
+                # this is the actual bottleneck fix. Scanning host-by-host used
+                # to mean total time = N x (port-scan time + resolve time); a
+                # host behind a firewall that silently drops probes (the common
+                # case for a Windows PC with its default firewall on) pays the
+                # full per-port timeout on every port, so one such host alone
+                # could take several seconds -- multiplied by N hosts, serial.
+                # Now up to HOST_PARALLEL hosts scan at the same time, and each
+                # host's own port-scan and name-resolution (previously back to
+                # back) run concurrently with each other too. Total port-thread
+                # budget is kept roughly constant (spread across whichever
+                # hosts are active) rather than just cranking concurrency up
+                # unboundedly, so this doesn't turn into hundreds of hosts each
+                # opening hundreds of sockets at once.
+                HOST_PARALLEL = max(1, min(6, n))
+                PORT_THREAD_BUDGET = 720
+                per_host_workers = max(40, PORT_THREAD_BUDGET // HOST_PARALLEL)
+
+                def _scan_one_host(ip):
+                    with _cf.ThreadPoolExecutor(max_workers=2) as pex:
+                        fut_ports = pex.submit(_nm_scan_ports, ip,
+                                                max_workers=per_host_workers, timeout=0.4)
+                        fut_name = pex.submit(_nm_full_resolve, ip)
+                        open_ports = fut_ports.result()
+                        name = fut_name.result()
+                    mac = arp_map.get(ip, '')
+                    vendor = _nm_oui_vendor(mac)
+                    return {'ip': ip, 'name': name, 'mac': mac, 'vendor': vendor,
+                            'ports': open_ports, 'ts': time.time()}
+
+                total_ports = 0   # tallied only in this thread, as each future
+                                  # completes in the loop below -- self._results
+                                  # is only ever mutated on the main thread via
+                                  # the .after(0, _add_result) calls, so reading
+                                  # it back from here would race and undercount
+                                  # (this is the same fix as the earlier
+                                  # port-count race, just applied to the new
+                                  # concurrent-hosts structure).
+                done_hosts = 0
+                with _cf.ThreadPoolExecutor(max_workers=HOST_PARALLEL) as hex_:
+                    futs = {hex_.submit(_scan_one_host, ip): ip for ip in live_ips}
+                    for fut in _cf.as_completed(futs):
+                        if self._closed:
+                            return
+                        ip = futs[fut]
+                        try:
+                            row = fut.result()
+                        except Exception:
+                            _exc('_EtherApeScanWindow._scan_one_host')
+                            continue
+                        done_hosts += 1
+                        total_ports += len(row['ports'])
+                        dh, tp = done_hosts, total_ports
+                        self.root.after(0, lambda: self._status_var.set(
+                            f'Scanning... {dh}/{n} hosts complete ({tp} open port(s) so far)'))
+                        self.root.after(0, lambda r=row: self._add_result(r))
+
+                self.root.after(0, lambda: self._scan_done_ok(len(live_ips), total_ports))
+            except Exception:
+                _exc('_EtherApeScanWindow._start_scan')
+                self.root.after(0, lambda: self._scan_done_fail('Scan failed — see log.'))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _scan_done_ok(self, n_hosts, n_ports):
+        if self._closed: return
+        self._scanning = False
+        self._scan_btn.config(state='normal', text='▶  RESCAN')
+        self._status_var.set(f'Done — {n_hosts} host(s), {n_ports} open port(s) total')
+        self._redraw_map()
+
+    def _scan_done_fail(self, msg):
+        if self._closed: return
+        self._scanning = False
+        self._scan_btn.config(state='normal', text='▶  SCAN')
+        self._status_var.set(msg)
+        self._redraw_map()
+
+    def _add_result(self, row):
+        if self._closed: return
+        self._results[row['ip']] = row
+        ports_str = ', '.join(str(p) for p in row['ports']) if row['ports'] else '—'
+        last_str = datetime.fromtimestamp(row['ts']).strftime('%H:%M:%S')
+        iid = row['ip']
+        vals = (row['ip'], row['name'] or '—', row['mac'] or '—',
+                row['vendor'] or '—', ports_str, last_str)
+        if self._tree.exists(iid):
+            self._tree.item(iid, values=vals)
+        else:
+            self._tree.insert('', 'end', iid=iid, values=vals)
+        self._redraw_map()
+        if row['ip'] == self._selected_ip:
+            self._select_ip(row['ip'])   # refresh the detail panel too
+
+    # ── Selection sync: table row <-> map icon ──────────────────────────────────
+    def _on_row_select(self, event=None):
+        sel = self._tree.selection()
+        if not sel: return
+        self._select_ip(sel[0], from_tree=True)
+
+    def _select_ip(self, ip, from_tree=False):
+        self._selected_ip = ip
+        if ip == '__self__':
+            self._detail_var.set(
+                f"This device\n"
+                f"IP:      {self._my_ip or 'unknown'}\n"
+                f"(This is the machine running the scan — it isn't\n"
+                f"port-scanned or name-resolved against itself.)"
+            )
+            if not from_tree:
+                try: self._tree.selection_remove(*self._tree.selection())
+                except Exception: _exc_debug('_select_ip')
+            self._redraw_map()
+            return
+        row = self._results.get(ip)
+        if row:
+            ports_str = ', '.join(str(p) for p in row['ports']) if row['ports'] else 'none found'
+            dtype = _nm_guess_device_type(row.get('ports'), row.get('vendor'), row.get('name'))
+            is_gw = (ip == self._gateway_ip)
+            type_line = 'Router / Gateway' if is_gw else f'{self._ICON_LABELS.get(dtype, dtype)}'
+            self._detail_var.set(
+                f"IP:      {row['ip']}\n"
+                f"Name:    {row['name'] or 'unresolved'}\n"
+                f"MAC:     {row['mac'] or 'unknown'}\n"
+                f"Vendor:  {row['vendor'] or 'unknown'}\n"
+                f"Type:    {type_line}\n"
+                f"Ports:   {ports_str}\n"
+                f"Scanned: {datetime.fromtimestamp(row['ts']).strftime('%H:%M:%S')}"
+            )
+        if not from_tree:
+            try:
+                self._tree.selection_set(ip)
+                self._tree.see(ip)
+            except Exception: _exc('_select_ip')
+        self._redraw_map()
+
+    def _sort_by(self, col):
+        rev = self._sort_rev.get(col, False)
+        items = [(self._tree.set(k, col), k) for k in self._tree.get_children('')]
+        def _key(pair):
+            v = pair[0]
+            if col == 'ip':
+                try: return tuple(int(x) for x in v.split('.'))
+                except Exception: return (0, 0, 0, 0)
+            return v.lower()
+        items.sort(key=_key, reverse=rev)
+        for idx, (_, k) in enumerate(items):
+            self._tree.move(k, '', idx)
+        self._sort_rev[col] = not rev
+
+    def _on_close(self):
+        self._closed = True
+        try: self.root.destroy()
+        except Exception: _exc_debug('_on_close')  # TclError on recursive destroy is harmless
+
 
 class WiresharkWindow:
     # The Treeview was capped but the Python lists behind it were not, so a long
@@ -18008,8 +18808,13 @@ class UserGuideWindow:
                    'Each is a filled line chart with the metric’s theme colour.'),
             ('h2', 'Live network traffic (bottom-left)'),
             ('p',  'A rolling, real-time chart of actual TX/RX throughput on the machine, sampled continuously '
-                   'via psutil (not the recorded speed-test history). Shows the last 120 samples. If psutil '
-                   'is not installed this panel simply stays empty — nothing else on the dashboard depends on it.'),
+                   'via psutil (not the recorded speed-test history). Shows the last 120 samples. Styled like a '
+                   'hardware-monitor overlay — glowing RX/TX lines on a dark panel with a bright green frame, a '
+                   'colour-coded "● RX / ● TX" readout up top, and a small triangle marker pinned to each line’s '
+                   'current value at the right edge. It refreshes on its own faster timer (every 400ms) '
+                   'independent of the rest of the dashboard, so it visibly animates in real time rather than only '
+                   'moving in step with the other panels. If psutil is not installed this panel simply stays '
+                   'empty — nothing else on the dashboard depends on it.'),
             ('h2', 'DNS history (bottom-centre)'),
             ('p',  'Plots the last 80 DNS check results as a filled line chart in amber.'),
             ('h2', 'Statistics (bottom-right)'),
@@ -18163,7 +18968,7 @@ class UserGuideWindow:
              '┌─ Toolbar Row 1 ──────────────────────────────────────────────────┐\n'
              '│  ▶ START  ⏹ STOP  [Interface ▾]  FILTER[ALL▾]  ☑Hold ☑Labels  │\n'
              '│  ⇉ SANKEY  ● LIVE [════█═══]  live   ⏻ KILL CONNECTION        │\n'
-             '│  ☑Legend  ⊕ GEO MAP  ⊛ SPREAD                                  │\n'
+             '│  ☑Legend  ⊕ GEO MAP  🖧 LAN SCAN  ⊛ SPREAD                     │\n'
              '└──────────────────────────────────────────────────────────────────┘\n'
              '┌─ Toolbar Row 2 ──────────────────────────────────────────────────┐\n'
              '│  FLOW WIDTH [════════] BPF FILTER [ port 443            ▾]     │\n'
@@ -18178,6 +18983,7 @@ class UserGuideWindow:
             ('bullet', 'Labels — toggle IP address labels on nodes'),
             ('bullet', 'Legend — toggle the protocol colour key'),
             ('bullet', '⊕ GEO MAP — open the global geographic map window'),
+            ('bullet', '🖧 LAN SCAN — open the live LAN network map (see LAN Scan section below)'),
             ('bullet', '⊛ SPREAD — redistribute nodes into a clean radial layout'),
             ('bullet', '⇉ SANKEY / ◎ RADIAL — switch between the bipartite ribbon layout '
                        '(internal hosts on the left, external servers on the right) and the '
@@ -18206,6 +19012,31 @@ class UserGuideWindow:
             ('bullet', 'Drag background — pan the view'),
             ('bullet', 'Drag a node — pin it in place; drag again to release'),
             ('bullet', 'Double-click a node — opens geo info + per-IP firewall block/unblock popup'),
+            ('h2', 'LAN Scan'),
+            ('p',  'Unlike the rest of this window, LAN Scan is active: it probes your network '
+                   'instead of only watching traffic go by. Click 🖧 LAN SCAN to open it, then '
+                   '▶ SCAN to run a one-shot scan of your local /24 subnet.'),
+            ('bullet', 'Discovery — pings every address on your subnet to elicit ARP replies, '
+                       'then reads the live hosts and MAC addresses back from the OS ARP table'),
+            ('bullet', 'Ports — a ~1,140-port TCP connect-scan per host (all well-known ports '
+                       'plus common database/RDP/dev-server/NAS ports)'),
+            ('bullet', 'Name — reverse DNS first, falling back to a NetBIOS query for local '
+                       'Windows/SMB machines without a PTR record'),
+            ('bullet', 'Results stream in host-by-host as icons on the map above a sortable table '
+                       '(IP, Hostname, MAC, Vendor, Open Ports, Last Scanned)'),
+            ('bullet', 'The map is a star: your router sits in the middle, every discovered host '
+                       'is drawn connected to it, with its hostname/IP/ports underneath its icon'),
+            ('bullet', 'Icons are real device artwork (router, PC, printer, NAS, server, wireless '
+                       'device) — a "?" icon means the type could not be guessed at all'),
+            ('bullet', 'Which icon is picked is still a best-effort GUESS at device type from open '
+                       'ports, MAC vendor, and hostname; it is never a verified fact, which is why '
+                       'each caption says "(guessed)"'),
+            ('bullet', 'An orange dot on a corner of an icon means that host had at least one '
+                       'open port'),
+            ('bullet', 'Click a table row or a map icon to select that host and see its full detail'),
+            ('bullet', '▶ RESCAN re-runs the scan; results from the previous scan are replaced'),
+            ('tip', 'This scan only touches devices already on your own LAN — it never sends '
+                   'traffic anywhere on the internet.'),
             ('h2', 'Web dashboard Topology tab'),
             ('p',  'The web dashboard Topology tab streams the same graph as a live canvas, '
                    'polling every 800 ms. It starts automatically when the desktop app opens.'),
@@ -29413,6 +30244,7 @@ class ModernWindow:
         _MODERN_MODE = True
         self._build_ui()
         self.root.after(200, self._refresh)
+        self.root.after(600, self._refresh_live_fast)
         self.root.after(1000, self._open_etherape)
         self.root.mainloop()
         _MODERN_MODE = False
@@ -29902,40 +30734,9 @@ class ModernWindow:
         line(self._axes['ul'],  times, ul_t, ul_c, 'Upload',   'Mbps')
         line(self._axes['pg'],  times, pg_t, pg_c, 'Latency',  'ms')
 
-        # Live network traffic (psutil TX/RX)
-        ax = self._axes['live']; style(ax)
-        try:
-            import psutil as _psu, time as _t
-            if not hasattr(self, '_net_hist'):
-                self._net_hist = {'tx': [], 'rx': [], 'last': None, 'last_t': None}
-            c2 = _psu.net_io_counters(); now = _t.time()
-            if self._net_hist['last'] is not None:
-                dt2 = now - self._net_hist['last_t']
-                if dt2 > 0:
-                    tx_s = (c2.bytes_sent - self._net_hist['last'][0]) / dt2 / 1e6 * 8
-                    rx_s = (c2.bytes_recv - self._net_hist['last'][1]) / dt2 / 1e6 * 8
-                    self._net_hist['tx'].append(max(0, tx_s))
-                    self._net_hist['rx'].append(max(0, rx_s))
-                    if len(self._net_hist['tx']) > 120: self._net_hist['tx'].pop(0)
-                    if len(self._net_hist['rx']) > 120: self._net_hist['rx'].pop(0)
-            self._net_hist['last'] = (c2.bytes_sent, c2.bytes_recv)
-            self._net_hist['last_t'] = now
-            tx = self._net_hist['tx']; rx = self._net_hist['rx']
-            if tx and rx:
-                xs2 = list(range(len(tx)))
-                ax.fill_between(xs2, rx, alpha=0.2, color=dl_c)
-                ax.plot(xs2, rx, color=dl_c, lw=1.4, label='RX')
-                ax.fill_between(xs2, tx, alpha=0.15, color=ul_c)
-                ax.plot(xs2, tx, color=ul_c, lw=1.2, label='TX')
-                ax.set_xlim(0, 120); ax.set_xticks([])
-                pk = max(max(tx), max(rx), 0.1)
-                ax.set_ylim(0, pk * 1.3)
-                ax.legend(frameon=False, fontsize=7, labelcolor=self.TEXT,
-                         loc='upper left', handlelength=1)
-        except Exception:
-            _exc('line')
-        ax.set_title('Live network traffic  Mbps', loc='left', color=self.TICK,
-                    fontsize=8, fontfamily=_NM_MONO, pad=4)
+        # Live network traffic (psutil TX/RX) -- own method, see docstring there
+        # for why this panel is styled/updated differently from the others.
+        self._update_live_traffic(dl_c, ul_c)
 
         # DNS history
         ax_dns = self._axes['dns']; style(ax_dns)
@@ -30002,6 +30803,103 @@ class ModernWindow:
                         fontsize=8, fontfamily=_NM_MONO, pad=4)
 
         self._mpl_canvas.draw_idle()
+
+    # ── Live traffic panel: glow-line hardware-monitor look, own fast timer ────
+    @staticmethod
+    def _glow_line(ax, xs, ys, color, lw=1.6):
+        # Several progressively wider, fainter copies of the same line behind
+        # a crisp top line reads as a soft neon glow at matplotlib's normal
+        # anti-aliased line rendering -- no image filters or extra deps needed.
+        for i in (3, 2, 1):
+            ax.plot(xs, ys, color=color, linewidth=lw + i * 2.6, alpha=0.07,
+                    solid_capstyle='round', solid_joinstyle='round')
+        ax.plot(xs, ys, color=color, linewidth=lw, alpha=0.95,
+                solid_capstyle='round', solid_joinstyle='round')
+
+    def _update_live_traffic(self, dl_c, ul_c):
+        """The 'Live traffic' panel (bottom-left of the main dashboard) is
+        deliberately styled and refreshed differently from the five panels
+        around it: those are historical charts that only need to move when
+        new data lands (every couple of seconds at most), but this one is
+        meant to read as a live hardware-monitor-style waveform -- glowing
+        lines, a grid, a bright "this is live" frame, and a marker pinned to
+        the current value at the right edge, updating on its own faster
+        timer (see `_refresh_live_fast`) independent of the rest of the
+        dashboard's 2-second refresh.
+        """
+        ax = self._axes['live']
+        ax.cla()
+        ax.set_facecolor(self.PANEL)
+        ax.tick_params(colors=self.TICK, labelsize=7, length=2)
+        LIVE_ACC = '#39ff14'   # the app's established "this is live/active" green
+        for sp in ax.spines.values():
+            sp.set_color(LIVE_ACC); sp.set_linewidth(1.1); sp.set_alpha(0.55)
+        ax.xaxis.grid(True, color=LIVE_ACC, linewidth=0.4, alpha=0.10)
+        ax.yaxis.grid(True, color=LIVE_ACC, linewidth=0.4, alpha=0.14)
+        try:
+            import psutil as _psu, time as _t
+            if not hasattr(self, '_net_hist'):
+                self._net_hist = {'tx': [], 'rx': [], 'last': None, 'last_t': None}
+            c2 = _psu.net_io_counters(); now = _t.time()
+            if self._net_hist['last'] is not None:
+                dt2 = now - self._net_hist['last_t']
+                if dt2 > 0:
+                    tx_s = (c2.bytes_sent - self._net_hist['last'][0]) / dt2 / 1e6 * 8
+                    rx_s = (c2.bytes_recv - self._net_hist['last'][1]) / dt2 / 1e6 * 8
+                    self._net_hist['tx'].append(max(0, tx_s))
+                    self._net_hist['rx'].append(max(0, rx_s))
+                    if len(self._net_hist['tx']) > 120: self._net_hist['tx'].pop(0)
+                    if len(self._net_hist['rx']) > 120: self._net_hist['rx'].pop(0)
+            self._net_hist['last'] = (c2.bytes_sent, c2.bytes_recv)
+            self._net_hist['last_t'] = now
+            tx = self._net_hist['tx']; rx = self._net_hist['rx']
+            if tx and rx:
+                xs2 = list(range(len(tx)))
+                ax.fill_between(xs2, rx, alpha=0.10, color=dl_c)
+                ax.fill_between(xs2, tx, alpha=0.08, color=ul_c)
+                self._glow_line(ax, xs2, rx, dl_c, lw=1.5)
+                self._glow_line(ax, xs2, tx, ul_c, lw=1.3)
+                ax.set_xlim(0, 120); ax.set_xticks([])
+                pk = max(max(tx), max(rx), 0.1)
+                ax.set_ylim(0, pk * 1.3)
+                # Current-value marker at the right edge, like a hardware
+                # monitor's live readout -- clip_on=False lets the triangle
+                # poke slightly past the frame the way a real OSD does.
+                lastx = xs2[-1]
+                ax.plot(lastx, rx[-1], marker='<', color='#e8f4ff',
+                        markersize=6, clip_on=False, zorder=5)
+                ax.plot(lastx, tx[-1], marker='<', color='#e8f4ff',
+                        markersize=6, clip_on=False, zorder=5)
+                # Colour-coded live readout up top, in place of a plain title
+                # -- mirrors a hardware monitor's "series name in its own
+                # colour" header instead of one neutral-coloured title.
+                ax.text(0.01, 1.14, f'● RX {rx[-1]:.1f}', transform=ax.transAxes,
+                        color=dl_c, fontsize=8, fontweight='bold',
+                        fontfamily=_NM_MONO, va='bottom')
+                ax.text(0.24, 1.14, f'● TX {tx[-1]:.1f}', transform=ax.transAxes,
+                        color=ul_c, fontsize=8, fontweight='bold',
+                        fontfamily=_NM_MONO, va='bottom')
+                ax.text(0.99, 1.14, 'Mbps', transform=ax.transAxes,
+                        color=self.TICK, fontsize=7, ha='right',
+                        fontfamily=_NM_MONO, va='bottom')
+                return
+        except Exception:
+            _exc('_update_live_traffic')
+        ax.set_title('Live network traffic  Mbps', loc='left', color=self.TICK,
+                    fontsize=8, fontfamily=_NM_MONO, pad=4)
+
+    def _refresh_live_fast(self):
+        # Independent faster timer just for the live-traffic panel, so it
+        # visibly animates in real time instead of only moving in step with
+        # the rest of the dashboard's 2-second refresh.
+        if self._closed: return
+        try:
+            c = self._monitor.colors
+            self._update_live_traffic(c['download'], c['upload'])
+            self._mpl_canvas.draw_idle()
+        except Exception:
+            _exc('_refresh_live_fast')
+        self.root.after(400, self._refresh_live_fast)
 
     # ── Button actions ────────────────────────────────────────────────────────
     def _run_test(self):
