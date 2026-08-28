@@ -1,6 +1,6 @@
-# Changes this session — build `b-bfd27b6e`
+# Changes this session — build `b-6e4d9e40`
 
-Thirty-one things this session. Build IDs for reference:
+Thirty-two things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -70,7 +70,136 @@ Thirty-one things this session. Build IDs for reference:
     shapes.
 31. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
     glowing hardware-monitor-style waveform, updating on its own faster
-    timer (this one, current).
+    timer.
+32. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
+    removed; new "System" button opens a full System Monitor window built
+    after watching Dave Plummer's Task Manager OG demo (this one, current).
+
+## New: "System" button — a Task-Manager-OG-inspired System Monitor window
+
+**What you asked for:** "in the main page remove the duplicated agents
+wireshark and topology buttons at the top. create a system button. then
+watch this video untill the 11 minute mark [Shop Talk #91, Dave Plummer]
+... create everything shown in the video all working that launches when
+the button is clicked."
+
+**Removing the duplicated top-bar buttons:** the top bar's Agents /
+Wireshark / Topology shortcuts opened the exact same three windows as the
+sidebar's WS CAPTURE / TOPOLOGY / AGENTS buttons — genuinely duplicated,
+not just similarly named. Removed all three from the top bar; they're
+still one click away on the sidebar, nothing lost. The top bar now shows
+just Dashboard and the new System button.
+
+**What's in the video (first 11 minutes), and what I could actually
+verify about it:** the video is "Windows Task Manager's Creator Rebuilt
+It 30 Years Later | Shop Talk #91" (Dave's Attic). I can't literally watch
+video — I pulled the title via YouTube's oembed endpoint, then a
+transcript for 0:00-11:00, plus a couple of tech-press writeups (Windows
+Central, Tom's Hardware) covering the same tool for corroboration. Dave
+Plummer — who wrote the original 1994 Windows NT Task Manager — demos a
+from-scratch rebuild he calls "Task Manager OG": a live CPU graph with
+green = usage and red = kernel time, a GPU/temperature section, a
+top-processes list where "rows that change get a green background," tiles
+for memory/disk/network/energy/GPU/NPU/thermal, and a customization panel
+with a saturation slider that "goes to 11" (default 7), an independent
+bloom on/off toggle, and colour-scheme presets (mono, green phosphor,
+amber, blue, plus light mode).
+
+**What I built:** his app is closed-source and not (yet) available for
+Windows, so this isn't a copy of his code — it's a working recreation of
+the features actually described, wired to this app's own live telemetry
+via `psutil`:
+
+- A new `SystemMonitorWindow`, opened by the System button: a glowing CPU
+  (green-ish) / kernel-time (red-ish) line chart with a soft neon-glow
+  render (same layered-alpha technique as the Live Traffic panel above),
+  a temperature line on a second axis when a sensor is available, and a
+  triangle marker on the current value at the right edge, same as the
+  video's readout style.
+- A top-processes list (`psutil.process_iter`, sorted by CPU%, refreshed
+  every cycle) where a row flashes the theme's accent colour when that
+  process's CPU% just moved by 3+ points, and gets a distinct colour the
+  first time a process appears in the list — "rows that change get a
+  green background" and "processes as they come in and leave," as
+  described.
+- Six tiles: Memory, Disk (with read/write MB/s), Network (RX/TX Mbps),
+  Energy/Battery, GPU/NPU, and Thermal.
+- The customization panel described: a THEME picker with six presets
+  (Neon — this app's own default, plus Mono, Green Phosphor, Amber, Blue,
+  and Light, covering every scheme the video names), an independent BLOOM
+  checkbox, and a SATURATION slider running 0-11 with a default of 7 —
+  same range and default the video calls out. Saturation scales how many
+  extra glow layers get drawn; bloom is a separate all-or-nothing switch
+  for whether there's any glow at all, matching the video's "these are two
+  separate controls" framing.
+- CPU%, CPU clock speed, memory, disk usage/IO, network, and battery are
+  all real readings from this machine via `psutil` — not placeholders.
+
+**Verified (not assumed):**
+
+- Headless functional test: constructed the window under `xvfb-run`,
+  confirmed the chart actually draws lines (10 canvas lines with bloom on
+  and default saturation — 4 glow layers + 1 crisp line, × 2 series), that
+  switching every one of the 6 themes doesn't throw, and that toggling
+  saturation to 0 collapses the chart to 4 flat lines (no glow) while
+  saturation 11 with bloom back on produces 14 lines (more glow layers) —
+  proving the sliders actually change what's drawn, not just cosmetic
+  labels.
+- Same test confirmed real, moving numbers: CPU%, CPU clock (2.80 GHz),
+  memory (10-11%, real used/total bytes), disk usage and I/O rate, and
+  network RX/TX all populated with this sandbox's actual values across
+  three timed snapshots — not hardcoded strings.
+- Rendered a full screenshot of the window (sent alongside this
+  changelog) — visual confirmation of the glowing chart, the coloured "●
+  CPU / ● Kernel" readout, the top-processes list (with a process that had
+  just appeared correctly flashed green), and all six tiles rendering
+  their real values within their card bounds — this took two passes: the
+  first screenshot showed the tile row nearly invisible because the
+  chart's expand="True" area was squeezing it toward zero height, which I
+  fixed with the same fixed-height-frame technique this file already uses
+  for its top bar and view bar, then re-verified.
+- Confirmed via a separate headless test that clicking the actual "System"
+  button in the real top bar (not just constructing the class directly)
+  opens the window without raising an exception, and that the top bar's
+  button list is now exactly `['Dashboard', 'System']`.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface +
+  JS checks; `/guide` route changed — updated the Top Bar section and
+  added a System button section — re-baselined, no other route changed)
+  and 35/35 passed, 1 skipped (Python 3.12 under `xvfb-run`, desktop
+  window + honeypot radar checks).
+
+**Not done / your call:**
+
+- This is an honest recreation of what the video describes, not a
+  pixel-exact clone — I don't have Dave Plummer's actual app to copy, only
+  a transcript and press coverage. If you've since tried the real Task
+  Manager OG yourself and want something specific matched more closely
+  (exact colours, exact layout, specific meter styles), tell me what to
+  change and I will.
+- CPU temperature: `psutil.sensors_temperatures()` isn't implemented on
+  Windows at all (it's a Linux/macOS-only psutil feature) — on your
+  Windows machine this will always show "N/A on this platform," same as
+  it does in the sandbox screenshot I'm sending (this sandbox has no
+  thermal sensors exposed either, so both platforms hit the honest
+  fallback, just for different reasons). If you want real CPU temps on
+  Windows, that needs a separate library (e.g. `OpenHardwareMonitor`/
+  `LibreHardwareMonitor` via WMI, or `wmi` + a vendor-specific sensor
+  driver) — not something I added, since it's a real extra dependency and
+  install step, not a one-line addition.
+- GPU utilization only works with an NVIDIA GPU and the optional `pynvml`
+  package installed; without both it honestly shows "N/A (needs NVIDIA +
+  pynvml)" rather than a fake number. AMD/Intel GPU stats aren't wired up
+  at all — there's no single cross-vendor Python library for that.
+- NPU always shows "N/A (no OS API yet)" — there's no standard way to read
+  NPU utilization from Python on any OS today, so I didn't fake one.
+- The refresh cycle runs every 500ms in this build (visible in the "cycle
+  __ms" readout in the window's top-right), not the 60Hz the video
+  mentions — a Tkinter+matplotlib canvas redraw doing this much per frame
+  can't honestly hit 60Hz, so I picked a rate that's still clearly "live"
+  (twice the Live Traffic panel's own 400ms) without claiming a number I
+  can't back up. The on-screen "cycle Xms" label reports the real measured
+  time each refresh actually takes, so you can see for yourself rather
+  than take my word for it.
 
 ## New: Live traffic panel now looks and updates like a hardware monitor
 

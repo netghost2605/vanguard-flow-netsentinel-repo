@@ -2432,7 +2432,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-bfd27b6e'
+_NM_BUILD_ID = 'b-6e4d9e40'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -18739,9 +18739,18 @@ class UserGuideWindow:
             ('p',  'The dashboard is a single sidebar-based window: a slim top bar, an icon sidebar down the '
                    'left edge, and a main content area holding the gauge strip, the view bar and the chart grid.'),
             ('h2', 'Top bar'),
-            ('p',  'Shows the app name, four navigation shortcuts (Dashboard, Agents, Wireshark, Topology — the '
-                   'same windows the sidebar opens), a LIVE badge that switches to amber TESTING or DNS CHECK '
+            ('p',  'Shows the app name, two navigation shortcuts (Dashboard, and System — the Agents/Wireshark/'
+                   'Topology shortcuts that used to sit here were dropped for duplicating the sidebar buttons '
+                   'that open those same windows), a LIVE badge that switches to amber TESTING or DNS CHECK '
                    'while a check is running, and a live clock.'),
+            ('h2', 'System button (top bar)'),
+            ('p',  'Opens a separate System Monitor window: a live CPU/kernel-time/temperature graph with a '
+                   'glowing hardware-monitor look, a top-processes list that flashes rows as they change or '
+                   'appear, and tiled Memory/Disk/Network/Energy/GPU-NPU/Thermal readouts — plus a colour-scheme '
+                   'picker, an independent bloom toggle, and a saturation slider (0-11). Inspired by watching '
+                   'Dave Plummer demo his "Task Manager OG" rebuild; see the changelog for exactly which of its '
+                   'numbers are real sensor readings versus an honest "N/A" where this platform (notably '
+                   'Windows, for CPU temperature and most GPU/NPU stats) doesn’t expose that sensor to Python.'),
             ('h2', 'Left sidebar'),
             ('p',  'A column of icon buttons runs down the left edge:'),
             ('bullet', '▶ RUN — trigger an immediate speed test'),
@@ -22192,6 +22201,564 @@ class MonitorWindow:
         except Exception: _exc_debug('_on_close')
         try: self.root.destroy()
         except Exception: _exc_debug('_on_close')
+
+
+# =============================================================================
+#  SystemMonitorWindow — "Task Manager OG"-inspired live system monitor.
+#
+#  Built after watching the first 11 minutes of Dave Plummer's Shop Talk #91
+#  ("Windows Task Manager's Creator Rebuilt It 30 Years Later"), where he
+#  demos the from-scratch task manager rebuild he calls "Task Manager OG".
+#  I don't have his actual (closed-source, not-yet-released-for-Windows)
+#  app to copy pixel-for-pixel — this recreates the features he actually
+#  demoed on screen, using this app's own live telemetry: a glowing
+#  CPU/kernel/temp graph, a top-processes list with change highlighting,
+#  tiled Memory/Disk/Network/Energy/GPU/Thermal readouts, and the
+#  customization panel he showed off (saturation slider that "goes to 11",
+#  an independent bloom toggle, and a colour-scheme picker with mono,
+#  green-phosphor, amber, and blue presets). See the changelog for exactly
+#  which numbers are real sensor readings vs. an honest "N/A" where this
+#  platform genuinely doesn't expose that sensor.
+# =============================================================================
+class SystemMonitorWindow:
+    BG = '#050d1a'; PANEL = '#060f1c'; PANEL2 = '#0a1828'; SPIN = '#12283f'
+    TEXT = '#c8dff0'; TICK = '#6a9ab8'
+
+    # Each entry recolours the whole window, not just the chart lines — this
+    # is what the video's "mono / green phosphor / amber / blue / light"
+    # colour-scheme picker maps onto here.
+    THEMES = {
+        'Neon':           {'cpu': '#39ff14', 'kernel': '#ff3b3b', 'temp': '#ff9f43',
+                            'frame': '#39ff14', 'bg': '#050d1a', 'panel': '#060f1c', 'text': '#c8dff0'},
+        'Mono':           {'cpu': '#e8f4ff', 'kernel': '#9fb8cc', 'temp': '#6a9ab8',
+                            'frame': '#c8dff0', 'bg': '#050d1a', 'panel': '#060f1c', 'text': '#c8dff0'},
+        'Green Phosphor': {'cpu': '#39ff14', 'kernel': '#1a8f0a', 'temp': '#8aff6a',
+                            'frame': '#39ff14', 'bg': '#020a02', 'panel': '#031403', 'text': '#8aff6a'},
+        'Amber':          {'cpu': '#ffb000', 'kernel': '#c97e00', 'temp': '#ffd27a',
+                            'frame': '#ffb000', 'bg': '#0a0600', 'panel': '#140b00', 'text': '#ffb000'},
+        'Blue':           {'cpu': '#38b8f0', 'kernel': '#1a5f8a', 'temp': '#7ad4ff',
+                            'frame': '#38b8f0', 'bg': '#020a14', 'panel': '#04101f', 'text': '#c8e8ff'},
+        'Light':          {'cpu': '#0a8f3c', 'kernel': '#c02020', 'temp': '#c96a00',
+                            'frame': '#0a5a8f', 'bg': '#eef3f8', 'panel': '#ffffff', 'text': '#0c1a26'},
+    }
+
+    def __init__(self, monitor):
+        import tkinter as tk
+        from tkinter import ttk
+        self._monitor = monitor; self._tk = tk; self._ttk = ttk
+        self._closed = False
+        self._theme_name = 'Neon'
+        self._saturation = 7          # 0-11, default 7 — "these go to eleven"
+        self._bloom = True
+        self._proc_last = {}          # pid -> last CPU% seen, for flash-on-change
+        self._net_hist2 = {'last': None, 'last_t': None}
+        self._disk_hist = {'last': None, 'last_t': None}
+        self._cpu_hist = {'cpu': [], 'kernel': [], 'temp': []}
+        self._nvml_inited = False
+
+        self.root = tk.Toplevel()
+        self.root.title('Vanguard Flow NetSentinel — System Monitor')
+        self.root.configure(bg=self.BG)
+        self.root.geometry('1180x780')
+        self.root.minsize(900, 620)
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+        # Prime psutil's per-process CPU% counters. The first cpu_percent()
+        # call on any Process always returns 0.0 (there's no time delta to
+        # measure against yet). psutil.process_iter() is documented to
+        # cache and reuse the same Process objects across calls, so priming
+        # every process here means the very first real refresh already has
+        # a meaningful number instead of a wall of 0.0%.
+        try:
+            import psutil
+            for p in psutil.process_iter(['pid']):
+                try: p.cpu_percent(None)
+                except Exception: pass
+        except Exception:
+            _exc_debug('SystemMonitorWindow.__init__ (psutil priming)')
+
+        self._build_ui()
+        self.root.after(150, self._refresh)
+
+    def _on_close(self):
+        self._closed = True
+        try: self.root.destroy()
+        except Exception: _exc_debug('SystemMonitorWindow._on_close')
+
+    def theme(self):
+        return self.THEMES[self._theme_name]
+
+    @staticmethod
+    def _human(b):
+        b = float(b or 0)
+        if b >= 1e9: return '%.1f GB' % (b / 1e9)
+        if b >= 1e6: return '%.1f MB' % (b / 1e6)
+        if b >= 1e3: return '%.0f KB' % (b / 1e3)
+        return '%.0f B' % b
+
+    # ── UI scaffold ──────────────────────────────────────────────────────────
+    def _build_ui(self):
+        tk = self._tk; th = self.theme()
+        self.root.configure(bg=th['bg'])
+
+        top = tk.Frame(self.root, bg=th['panel'], height=44)
+        top.pack(fill='x'); top.pack_propagate(False)
+        tk.Label(top, text='  ◈  SYSTEM MONITOR', bg=th['panel'], fg=th['frame'],
+                 font=(_NM_MONO, 11, 'bold')).pack(side='left', pady=10)
+        tk.Label(top, text='inspired by Task Manager OG (Dave Plummer)', bg=th['panel'],
+                 fg=self.TICK, font=(_NM_MONO, 7)).pack(side='left', padx=10)
+
+        ctl = tk.Frame(top, bg=th['panel']); ctl.pack(side='right', padx=10)
+        tk.Label(ctl, text='THEME', bg=th['panel'], fg=self.TICK,
+                 font=(_NM_MONO, 7)).pack(side='left', padx=(0, 4))
+        self._theme_var = tk.StringVar(value=self._theme_name)
+        theme_menu = tk.OptionMenu(ctl, self._theme_var, *self.THEMES.keys(),
+                                   command=self._on_theme_change)
+        theme_menu.config(bg=self.PANEL2, fg=th['text'], activebackground='#123a5e',
+                          relief='flat', font=(_NM_MONO, 7), highlightthickness=0,
+                          cursor='hand2')
+        theme_menu['menu'].config(bg=self.PANEL2, fg=th['text'], font=(_NM_MONO, 8))
+        theme_menu.pack(side='left', padx=(0, 10))
+
+        self._bloom_var = tk.BooleanVar(value=self._bloom)
+        tk.Checkbutton(ctl, text='BLOOM', variable=self._bloom_var,
+                       command=self._on_bloom_toggle, bg=th['panel'], fg=self.TICK,
+                       selectcolor=self.PANEL2, activebackground=th['panel'],
+                       activeforeground=th['text'], font=(_NM_MONO, 7),
+                       borderwidth=0, highlightthickness=0).pack(side='left', padx=(0, 10))
+
+        tk.Label(ctl, text='SATURATION', bg=th['panel'], fg=self.TICK,
+                 font=(_NM_MONO, 7)).pack(side='left', padx=(0, 4))
+        self._sat_var = tk.IntVar(value=self._saturation)
+        sat = tk.Scale(ctl, from_=0, to=11, orient='horizontal', length=110,
+                       variable=self._sat_var, bg=th['panel'], fg=th['text'],
+                       troughcolor=self.SPIN, highlightthickness=0,
+                       showvalue=True, font=(_NM_MONO, 7),
+                       command=self._on_saturation_change)
+        sat.pack(side='left')
+
+        self._refresh_lbl_var = tk.StringVar(value='')
+        tk.Label(top, textvariable=self._refresh_lbl_var, bg=th['panel'], fg=self.TICK,
+                 font=(_NM_MONO, 7)).pack(side='right', padx=12)
+
+        tk.Frame(self.root, bg=self.SPIN, height=1).pack(fill='x')
+
+        body = tk.Frame(self.root, bg=th['bg']); body.pack(fill='both', expand=True)
+
+        self._meter_refs = {}
+        meters = tk.Frame(body, bg=th['bg']); meters.pack(fill='x', padx=10, pady=(10, 0))
+        self._build_meters(meters)
+
+        mid = tk.Frame(body, bg=th['bg']); mid.pack(fill='both', expand=True, padx=10, pady=8)
+        left = tk.Frame(mid, bg=th['bg']); left.pack(side='left', fill='both', expand=True)
+        right = tk.Frame(mid, bg=th['bg'], width=340); right.pack(side='left', fill='y', padx=(8, 0))
+        right.pack_propagate(False)
+        self._build_chart(left)
+        self._build_process_list(right)
+
+        self._tile_refs = {}
+        # Fixed height + pack_propagate(False), same pattern used for the top
+        # bar and view bar elsewhere in this file — without it, the chart
+        # area's expand=True would keep squeezing this row toward zero height.
+        tiles = tk.Frame(body, bg=th['bg'], height=118)
+        tiles.pack(fill='x', padx=10, pady=(0, 10))
+        tiles.pack_propagate(False)
+        self._build_tiles(tiles)
+
+    def _rebuild_ui(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+        self._build_ui()
+
+    def _on_theme_change(self, value):
+        self._theme_name = value
+        self._rebuild_ui()
+
+    def _on_saturation_change(self, value):
+        try: self._saturation = int(float(value))
+        except Exception: _exc_debug('_on_saturation_change')
+
+    def _on_bloom_toggle(self):
+        self._bloom = bool(self._bloom_var.get())
+
+    # ── Top meter strip: CPU / Clock / Temp / GPU ─────────────────────────────
+    def _build_meters(self, parent):
+        tk = self._tk; th = self.theme()
+        for key, label, unit, col_key in [
+            ('cpu',  'CPU',       '%',   'cpu'),
+            ('freq', 'CPU Clock', 'GHz', 'cpu'),
+            ('temp', 'CPU Temp',  '°C', 'temp'),
+            ('gpu',  'GPU',       '%',   'kernel'),
+        ]:
+            col = th[col_key]
+            card = tk.Frame(parent, bg=th['panel'], highlightthickness=1,
+                           highlightbackground=self.SPIN, padx=12, pady=8)
+            card.pack(side='left', fill='x', expand=True, padx=(0, 8))
+            tk.Label(card, text=label.upper(), bg=th['panel'], fg=self.TICK,
+                    font=(_NM_MONO, 8)).pack(anchor='w')
+            val_v = tk.StringVar(value='—')
+            tk.Label(card, textvariable=val_v, bg=th['panel'], fg=col,
+                    font=(_NM_MONO, 22, 'bold'), anchor='w').pack(fill='x')
+            tk.Label(card, text=unit, bg=th['panel'], fg=self.TICK,
+                    font=(_NM_MONO, 8), anchor='w').pack(fill='x')
+            self._meter_refs[key] = val_v
+
+    # ── Main glow chart: CPU (green-ish) / Kernel (red-ish) / Temp (2nd axis) ──
+    def _build_chart(self, parent):
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        import matplotlib.figure as _mf
+        th = self.theme(); tk = self._tk
+        wrap = tk.Frame(parent, bg=th['panel'], highlightthickness=1,
+                       highlightbackground=th['frame'])
+        wrap.pack(fill='both', expand=True)
+        fig = _mf.Figure(figsize=(7.2, 4.2), facecolor=th['panel'])
+        ax = fig.add_subplot(111)
+        ax2 = ax.twinx()
+        fig.subplots_adjust(left=0.06, right=0.94, top=0.86, bottom=0.06)
+        canvas = FigureCanvasTkAgg(fig, master=wrap)
+        canvas.get_tk_widget().pack(fill='both', expand=True, padx=2, pady=2)
+        self._fig = fig; self._ax = ax; self._ax2 = ax2; self._chart_canvas = canvas
+
+    def _draw_chart(self):
+        th = self.theme()
+        ax = self._ax; ax2 = self._ax2
+        ax.cla(); ax2.cla()
+        self._fig.set_facecolor(th['panel'])
+        ax.set_facecolor(th['panel'])
+        ax.tick_params(colors=self.TICK, labelsize=7, length=2)
+        for sp in ax.spines.values():
+            sp.set_color(th['frame']); sp.set_linewidth(1.1); sp.set_alpha(0.6)
+        ax.xaxis.grid(True, color=th['frame'], linewidth=0.4, alpha=0.10)
+        ax.yaxis.grid(True, color=th['frame'], linewidth=0.4, alpha=0.14)
+        for sp in ax2.spines.values(): sp.set_visible(False)
+        ax2.tick_params(colors=self.TICK, labelsize=7, length=2)
+
+        cpu_h = self._cpu_hist['cpu']; ker_h = self._cpu_hist['kernel']; temp_h = self._cpu_hist['temp']
+        if not cpu_h:
+            ax.set_title('CPU / Kernel / Temp — waiting for samples…', loc='left',
+                         color=self.TICK, fontsize=8, fontfamily=_NM_MONO, pad=4)
+            ax2.set_yticks([])
+            return
+        xs = list(range(len(cpu_h)))
+        # Saturation (0-11, default 7) scales how intense the glow reads;
+        # bloom is an independent on/off for whether there's any glow at all
+        # — matches the two separate controls shown in the video.
+        sat_mult = max(0.0, self._saturation / 7.0)
+
+        def _line(axis, ys, color, lw):
+            if self._bloom and sat_mult > 0:
+                ModernWindow._glow_line(axis, xs, ys, color, lw=lw)
+                extra = min(3, int(round(max(0.0, sat_mult - 1.0) * 3)))
+                for i in range(extra):
+                    axis.plot(xs, ys, color=color, linewidth=lw + (i + 4) * 2.6,
+                             alpha=0.05, solid_capstyle='round', solid_joinstyle='round')
+            else:
+                axis.plot(xs, ys, color=color, linewidth=lw, alpha=0.9,
+                         solid_capstyle='round')
+
+        _line(ax, cpu_h, th['cpu'], 1.5)
+        _line(ax, ker_h, th['kernel'], 1.4)
+        ax.set_xlim(0, 120); ax.set_xticks([]); ax.set_ylim(0, 100)
+
+        temp_vals = [v for v in temp_h if v is not None]
+        if temp_vals:
+            temp_plot = [v if v is not None else 0.0 for v in temp_h]
+            _line(ax2, temp_plot, th['temp'], 1.3)
+            ax2.set_ylim(0, 110)
+        else:
+            ax2.set_yticks([])
+
+        lastx = xs[-1]
+        ax.plot(lastx, cpu_h[-1], marker='<', color=th['text'], markersize=6,
+               clip_on=False, zorder=5)
+        ax.plot(lastx, ker_h[-1], marker='<', color=th['text'], markersize=6,
+               clip_on=False, zorder=5)
+
+        ax.text(0.01, 1.12, '● CPU %.0f%%' % cpu_h[-1], transform=ax.transAxes,
+               color=th['cpu'], fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
+        ax.text(0.28, 1.12, '● Kernel %.0f%%' % ker_h[-1], transform=ax.transAxes,
+               color=th['kernel'], fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
+        if temp_vals:
+            ax.text(0.60, 1.12, '● Temp %.0f°C' % temp_h[-1], transform=ax.transAxes,
+                   color=th['temp'], fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
+        else:
+            ax.text(0.60, 1.12, 'Temp: N/A on this platform', transform=ax.transAxes,
+                   color=self.TICK, fontsize=7, fontfamily=_NM_MONO, va='bottom')
+
+    # ── Top-processes list, right column ───────────────────────────────────────
+    def _build_process_list(self, parent):
+        tk = self._tk; ttk = self._ttk; th = self.theme()
+        tk.Label(parent, text='TOP PROCESSES', bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8, 'bold')).pack(anchor='w', pady=(0, 4))
+        style_name = 'SysMon.Treeview'
+        st = ttk.Style(self.root)
+        try: st.theme_use('clam')
+        except Exception: _exc_debug('_build_process_list')
+        st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
+                     foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
+        st.configure(style_name + '.Heading', background=self.PANEL2, foreground=self.TICK,
+                     font=(_NM_MONO, 7, 'bold'), relief='flat')
+        st.map(style_name, background=[('selected', '#123a5e')])
+        cols = ('PID', 'Name', 'CPU%', 'Mem')
+        tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=24)
+        for c, w in zip(cols, (52, 148, 56, 76)):
+            tv.heading(c, text=c); tv.column(c, width=w, anchor='w')
+        tv.pack(fill='both', expand=True)
+        # "Rows that change get a green background" (or the theme's accent
+        # colour) — a one-cycle flash on any process whose CPU% just moved by
+        # a noticeable amount, plus a distinct tag for processes that weren't
+        # in the list a moment ago ("processes as they come in and leave").
+        tv.tag_configure('flash', background=th['frame'], foreground=th['bg'])
+        tv.tag_configure('new', background=th['cpu'], foreground=th['bg'])
+        self._proc_tree = tv
+
+    def _update_processes(self):
+        import psutil
+        tv = self._proc_tree
+        rows = []
+        try:
+            for p in psutil.process_iter(['pid', 'name', 'memory_info']):
+                try:
+                    cpu = p.cpu_percent(None)
+                    info = p.info
+                    mi = info.get('memory_info')
+                    rows.append((info['pid'], info.get('name') or '?', cpu,
+                                mi.rss if mi else 0))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            _exc('SystemMonitorWindow._update_processes')
+            return
+        rows.sort(key=lambda r: r[2], reverse=True)
+        rows = rows[:22]
+
+        tv.delete(*tv.get_children())
+        new_last = {}
+        for pid, name, cpu, mem in rows:
+            prev = self._proc_last.get(pid)
+            tag = ''
+            if prev is None:
+                tag = 'new'
+            elif abs(cpu - prev) >= 3.0:
+                tag = 'flash'
+            tv.insert('', 'end', values=(pid, name, '%.1f' % cpu, self._human(mem)),
+                     tags=(tag,) if tag else ())
+            new_last[pid] = cpu
+        self._proc_last = new_last
+
+    # ── Bottom tiles: Memory / Disk / Network / Energy / GPU+NPU / Thermal ─────
+    def _build_tiles(self, parent):
+        tk = self._tk; th = self.theme()
+        for key, title in [
+            ('mem', 'MEMORY'), ('disk', 'DISK'), ('net', 'NETWORK'),
+            ('energy', 'ENERGY'), ('gpu', 'GPU / NPU'), ('thermal', 'THERMAL'),
+        ]:
+            card = tk.Frame(parent, bg=th['panel'], highlightthickness=1,
+                           highlightbackground=self.SPIN, padx=10, pady=6)
+            card.pack(side='left', fill='both', expand=True, padx=(0, 8))
+            tk.Label(card, text=title, bg=th['panel'], fg=self.TICK,
+                    font=(_NM_MONO, 7, 'bold')).pack(anchor='w')
+            v = tk.StringVar(value='—')
+            tk.Label(card, textvariable=v, bg=th['panel'], fg=th['text'],
+                    font=(_NM_MONO, 8), anchor='w', justify='left',
+                    wraplength=172).pack(anchor='w', fill='x', pady=(2, 0))
+            self._tile_refs[key] = v
+
+    # ── Sampling ─────────────────────────────────────────────────────────────
+    def _read_cpu_temp(self, psutil):
+        if not hasattr(psutil, 'sensors_temperatures'):
+            return None   # not implemented on this platform (notably Windows)
+        try:
+            temps = psutil.sensors_temperatures()
+        except Exception:
+            return None
+        if not temps:
+            return None
+        for key in ('coretemp', 'k10temp', 'cpu_thermal', 'acpitz'):
+            if temps.get(key):
+                return temps[key][0].current
+        for entries in temps.values():
+            if entries:
+                return entries[0].current
+        return None
+
+    def _read_gpu_pct(self):
+        # Best-effort NVIDIA-only GPU utilisation via the optional pynvml
+        # package. No vendor-neutral, dependency-free way to read GPU load
+        # exists across AMD/Intel/NVIDIA from Python, so anything else
+        # honestly reports N/A rather than guessing.
+        try:
+            import pynvml
+        except Exception:
+            return None
+        try:
+            if not self._nvml_inited:
+                pynvml.nvmlInit()
+                self._nvml_inited = True
+            h = pynvml.nvmlDeviceGetHandleByIndex(0)
+            u = pynvml.nvmlDeviceGetUtilizationRates(h)
+            return float(u.gpu)
+        except Exception:
+            return None
+
+    def _net_rate(self, io):
+        if io is None:
+            return None
+        now = time.time()
+        h = self._net_hist2
+        rate = None
+        if h['last'] is not None and h['last_t'] is not None:
+            dt = now - h['last_t']
+            if dt > 0:
+                rx = (io.bytes_recv - h['last'][1]) / dt / 1e6 * 8
+                tx = (io.bytes_sent - h['last'][0]) / dt / 1e6 * 8
+                rate = (max(0.0, rx), max(0.0, tx))
+        h['last'] = (io.bytes_sent, io.bytes_recv); h['last_t'] = now
+        return rate
+
+    def _disk_io_rate(self, io):
+        if io is None:
+            return None
+        now = time.time()
+        h = self._disk_hist
+        rate = None
+        if h['last'] is not None and h['last_t'] is not None:
+            dt = now - h['last_t']
+            if dt > 0:
+                r = (io.read_bytes - h['last'][0]) / dt / 1e6
+                w = (io.write_bytes - h['last'][1]) / dt / 1e6
+                rate = (max(0.0, r), max(0.0, w))
+        h['last'] = (io.read_bytes, io.write_bytes); h['last_t'] = now
+        return rate
+
+    def _sample_metrics(self):
+        import os, psutil
+        m = {}
+        m['cpu_total'] = psutil.cpu_percent(None)
+        try:
+            ct = psutil.cpu_times_percent(None)
+            m['cpu_kernel'] = getattr(ct, 'system', None)
+        except Exception:
+            m['cpu_kernel'] = None
+        try:
+            fr = psutil.cpu_freq()
+            m['cpu_freq_ghz'] = (fr.current / 1000.0) if fr and fr.current else None
+        except Exception:
+            m['cpu_freq_ghz'] = None
+        m['cpu_temp'] = self._read_cpu_temp(psutil)
+        m['gpu_pct'] = self._read_gpu_pct()
+        try:
+            vm = psutil.virtual_memory()
+            m['mem_pct'] = vm.percent; m['mem_used'] = vm.used; m['mem_total'] = vm.total
+        except Exception:
+            m['mem_pct'] = None
+        try:
+            root = (os.environ.get('SystemDrive', 'C:') + os.sep) if os.name == 'nt' else '/'
+            du = psutil.disk_usage(root)
+            m['disk_pct'] = du.percent; m['disk_used'] = du.used; m['disk_total'] = du.total
+        except Exception:
+            m['disk_pct'] = None
+        try:
+            m['disk_io'] = psutil.disk_io_counters()
+        except Exception:
+            m['disk_io'] = None
+        try:
+            m['net_io'] = psutil.net_io_counters()
+        except Exception:
+            m['net_io'] = None
+        try:
+            m['battery'] = psutil.sensors_battery()
+        except Exception:
+            m['battery'] = None
+        return m
+
+    def _update_tiles(self, m):
+        if m.get('mem_pct') is not None:
+            self._tile_refs['mem'].set('%.0f%%  (%s / %s)' % (
+                m['mem_pct'], self._human(m['mem_used']), self._human(m['mem_total'])))
+        else:
+            self._tile_refs['mem'].set('N/A')
+
+        if m.get('disk_pct') is not None:
+            txt = '%.0f%% used  (%s / %s)' % (
+                m['disk_pct'], self._human(m['disk_used']), self._human(m['disk_total']))
+            rate = self._disk_io_rate(m.get('disk_io'))
+            if rate:
+                txt += '\nR %.1f MB/s   W %.1f MB/s' % rate
+            self._tile_refs['disk'].set(txt)
+        else:
+            self._tile_refs['disk'].set('N/A')
+
+        rate = self._net_rate(m.get('net_io'))
+        self._tile_refs['net'].set('RX %.2f Mbps\nTX %.2f Mbps' % rate if rate else '—')
+
+        b = m.get('battery')
+        if b is not None:
+            state = 'charging' if b.power_plugged else 'on battery'
+            eta = ''
+            secs = getattr(b, 'secsleft', None)
+            if isinstance(secs, (int, float)) and secs > 0:
+                eta = '  (%dh %dm left)' % (secs // 3600, (secs % 3600) // 60)
+            self._tile_refs['energy'].set('%.0f%%  %s%s' % (b.percent, state, eta))
+        else:
+            self._tile_refs['energy'].set('No battery detected\n(desktop, or not exposed by the OS)')
+
+        gpu_txt = ('%.0f%% (NVIDIA/pynvml)' % m['gpu_pct']) if m.get('gpu_pct') is not None else \
+                  'N/A (needs NVIDIA + pynvml)'
+        self._tile_refs['gpu'].set('GPU: ' + gpu_txt + '\nNPU: N/A (no OS API yet)')
+
+        import psutil as _psu3
+        if hasattr(_psu3, 'sensors_temperatures'):
+            try:
+                temps = _psu3.sensors_temperatures()
+            except Exception:
+                temps = None
+            if temps:
+                lines = []
+                for name, entries in list(temps.items())[:3]:
+                    if entries:
+                        lines.append('%s: %.0f°C' % (name, entries[0].current))
+                self._tile_refs['thermal'].set('\n'.join(lines) if lines else 'No readings')
+            else:
+                self._tile_refs['thermal'].set('No sensors detected')
+        else:
+            self._tile_refs['thermal'].set('Not supported on this OS\n(no standard sensor API)')
+
+    # ── Refresh loop ─────────────────────────────────────────────────────────
+    def _refresh_once(self):
+        m = self._sample_metrics()
+
+        self._meter_refs['cpu'].set('%.0f' % m['cpu_total'] if m.get('cpu_total') is not None else '—')
+        self._meter_refs['freq'].set('%.2f' % m['cpu_freq_ghz'] if m.get('cpu_freq_ghz') else 'N/A')
+        self._meter_refs['temp'].set('%.0f' % m['cpu_temp'] if m.get('cpu_temp') is not None else 'N/A')
+        self._meter_refs['gpu'].set('%.0f' % m['gpu_pct'] if m.get('gpu_pct') is not None else 'N/A')
+
+        h = self._cpu_hist
+        h['cpu'].append(m['cpu_total'] if m['cpu_total'] is not None else 0.0)
+        h['kernel'].append(m['cpu_kernel'] if m['cpu_kernel'] is not None else 0.0)
+        h['temp'].append(m['cpu_temp'])
+        for k in ('cpu', 'kernel', 'temp'):
+            if len(h[k]) > 120: h[k].pop(0)
+
+        self._draw_chart()
+        self._chart_canvas.draw_idle()
+        self._update_tiles(m)
+        self._update_processes()
+
+    def _refresh(self):
+        if self._closed:
+            return
+        t0 = time.time()
+        try:
+            self._refresh_once()
+        except Exception:
+            _exc('SystemMonitorWindow._refresh')
+        try:
+            self._refresh_lbl_var.set('cycle %.0fms' % ((time.time() - t0) * 1000.0))
+        except Exception:
+            pass
+        if not self._closed:
+            self.root.after(500, self._refresh)
 
 
 # =============================================================================
@@ -30266,9 +30833,7 @@ class ModernWindow:
         self._nav_btns = {}
         for label, cmd in [
             ('Dashboard',  None),
-            ('Agents',     self._open_agents),
-            ('Wireshark',  self._open_wireshark),
-            ('Topology',   self._open_etherape),
+            ('System',     self._open_system_monitor),
         ]:
             b = tk.Button(top, text=label, bg=self.PANEL2,
                          fg=self.ACC if label=='Dashboard' else '#2a4a6a',
@@ -30939,6 +31504,12 @@ class ModernWindow:
 
     def _open_agents(self):
         AgentsWindow(self._monitor)
+
+    def _open_system_monitor(self):
+        try:
+            SystemMonitorWindow(self._monitor)
+        except Exception:
+            import traceback; traceback.print_exc()
 
     def _open_report(self):
         self._monitor._open_report_dialog()
