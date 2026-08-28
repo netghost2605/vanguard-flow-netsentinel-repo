@@ -2432,7 +2432,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-9d6e28c2'
+_NM_BUILD_ID = 'b-4d3f3e7a'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -22264,6 +22264,8 @@ class SystemMonitorWindow:
         self._disk_hist = {'last': None, 'last_t': None}
         self._cpu_hist = {'cpu': [], 'kernel': [], 'temp': []}
         self._nvml_inited = False
+        self._gpu_err = None   # last real reason _read_gpu_pct() came back N/A, so the UI
+                                # can say *why* instead of just "N/A" — see _read_gpu_pct.
 
         # Multi-page state (Summary / Performance / Processes — the three
         # pages actually recreated after watching the demo; see the
@@ -22453,12 +22455,34 @@ class SystemMonitorWindow:
             self._page_btns[key] = b
 
     def _switch_page(self, key):
+        # Switching pages used to call _rebuild_ui(), which tears down and
+        # recreates the ENTIRE window (topbar OptionMenu/Scale/Checkbutton,
+        # sidebar, matplotlib figures, everything) on every click — that's
+        # what made page switches feel slow and clunky. All that actually
+        # needs to change is the content area, so just re-show the page and
+        # patch the sidebar button colours in place.
         self._page = key
-        self._rebuild_ui()
+        self._show_page(key)
+        self._update_sidebar_highlight()
+
+    def _update_sidebar_highlight(self):
+        th = self.theme()
+        for k, b in getattr(self, '_page_btns', {}).items():
+            active = (k == self._page)
+            try:
+                b.configure(bg=('#0d2540' if active else th['panel']),
+                            fg=(th['frame'] if active else self.TICK))
+            except Exception:
+                _exc_debug('_update_sidebar_highlight')
 
     def _switch_perf_subview(self, key):
+        # Same reasoning as _switch_page: only the Performance page's own
+        # content (its sub-nav + main area) needs to change, not the whole
+        # window. _show_page('performance') already destroys and rebuilds
+        # just self._content, which _build_performance_page repopulates
+        # using the new self._perf_subview.
         self._perf_subview = key
-        self._rebuild_ui()
+        self._show_page('performance')
 
     def _show_page(self, page):
         for w in self._content.winfo_children():
@@ -22711,9 +22735,21 @@ class SystemMonitorWindow:
         # package. No vendor-neutral, dependency-free way to read GPU load
         # exists across AMD/Intel/NVIDIA from Python, so anything else
         # honestly reports N/A rather than guessing.
+        #
+        # Both failure points below used to be silent `except: return None`
+        # with no logging at all, so when GPU stayed N/A after installing
+        # nvidia-ml-py there was no way to tell *why* — wrong Python env
+        # receiving the pip install, an old conflicting "pynvml" package,
+        # no NVIDIA driver, etc. Now the real exception text is kept in
+        # self._gpu_err and shown right on the GPU tile/graph, and logged
+        # via _exc_debug for the app's own debug log.
         try:
             import pynvml
-        except Exception:
+        except Exception as ex:
+            self._gpu_err = ('pynvml import failed (%s: %s) — likely installed '
+                              'into a different Python than the one running '
+                              'this app' % (type(ex).__name__, ex))
+            _exc_debug('SystemMonitorWindow._read_gpu_pct (import pynvml)')
             return None
         try:
             if not self._nvml_inited:
@@ -22721,8 +22757,11 @@ class SystemMonitorWindow:
                 self._nvml_inited = True
             h = pynvml.nvmlDeviceGetHandleByIndex(0)
             u = pynvml.nvmlDeviceGetUtilizationRates(h)
+            self._gpu_err = None
             return float(u.gpu)
-        except Exception:
+        except Exception as ex:
+            self._gpu_err = '%s: %s' % (type(ex).__name__, ex)
+            _exc_debug('SystemMonitorWindow._read_gpu_pct (nvml call)')
             return None
 
     def _net_rate(self, io):
@@ -22803,19 +22842,30 @@ class SystemMonitorWindow:
         m['disk_rate'] = self._disk_io_rate(m.get('disk_io'))
         return m
 
-    def _sample_processes(self):
+    def _sample_processes(self, light=False):
+        # Full per-process detail (name/status/user/memory) needs one extra
+        # syscall per attribute per process on Windows, so scanning ~300
+        # processes for it every 500ms is real, measurable cost. Only the
+        # Summary mini-list and the Processes page actually display that
+        # detail; the Performance>CPU footer only needs a process count and
+        # a thread-count sum, so it asks for `light=True` and skips the rest.
         import psutil
         rows = []
         try:
-            for p in psutil.process_iter(['pid', 'name', 'status', 'username',
-                                          'memory_info', 'num_threads']):
+            attrs = ['pid', 'num_threads'] if light else \
+                ['pid', 'name', 'status', 'username', 'memory_info', 'num_threads']
+            for p in psutil.process_iter(attrs):
                 try:
-                    cpu = p.cpu_percent(None)
                     info = p.info
-                    mi = info.get('memory_info')
-                    rows.append((info['pid'], info.get('name') or '?',
-                                info.get('status') or '?', info.get('username') or '—',
-                                cpu, mi.rss if mi else 0, info.get('num_threads') or 0))
+                    if light:
+                        rows.append((info['pid'], '', '', '', 0.0, 0,
+                                    info.get('num_threads') or 0))
+                    else:
+                        cpu = p.cpu_percent(None)
+                        mi = info.get('memory_info')
+                        rows.append((info['pid'], info.get('name') or '?',
+                                    info.get('status') or '?', info.get('username') or '—',
+                                    cpu, mi.rss if mi else 0, info.get('num_threads') or 0))
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception:
@@ -22861,7 +22911,7 @@ class SystemMonitorWindow:
         if m.get('gpu_pct') is not None:
             self._tile_refs['gpu'].set('%.0f%% (NVIDIA/pynvml)' % m['gpu_pct'])
         else:
-            self._tile_refs['gpu'].set('N/A (needs NVIDIA + pynvml)')
+            self._tile_refs['gpu'].set('N/A — %s' % (self._gpu_err or 'needs NVIDIA + pynvml'))
         self._draw_led_bar(self._tile_bar_refs['gpu'], m.get('gpu_pct'))
 
         self._tile_refs['npu'].set('N/A (no OS API yet)')
@@ -23041,7 +23091,8 @@ class SystemMonitorWindow:
             else:
                 fallback = 'N/A on this platform (no standard sensor API)'
         elif sub == 'gpu':
-            fallback = 'N/A — needs an NVIDIA GPU + the optional pynvml package'
+            fallback = 'N/A — %s' % (self._gpu_err or
+                                      'needs an NVIDIA GPU + the optional pynvml package')
 
         has_data = series and any(len(ys) > 1 for _, ys, _ in series)
         if has_data:
@@ -23222,7 +23273,23 @@ class SystemMonitorWindow:
     # ── Refresh loop ─────────────────────────────────────────────────────────
     def _refresh_once(self):
         m = self._sample_metrics()
-        rows = self._sample_processes()
+
+        # Scope the process scan to what the active page actually needs.
+        # Summary (top-14 mini-list) and Processes (full live table) need
+        # full per-process detail every cycle. Performance>CPU only needs a
+        # count and a thread-count sum for its footer, so it gets the cheap
+        # "light" scan. Every other Performance sub-view (Memory/Network/
+        # Disks/GPU/Thermals) doesn't touch process rows at all, so it skips
+        # the scan entirely — this used to run the full expensive scan on
+        # every page regardless, which was part of what made the window
+        # feel sluggish.
+        if self._page in ('summary', 'processes'):
+            rows = self._sample_processes()
+            self._proc_last = {r[0]: r[4] for r in rows}
+        elif self._page == 'performance' and self._perf_subview == 'cpu':
+            rows = self._sample_processes(light=True)
+        else:
+            rows = []
 
         # Histories are fed every cycle regardless of which page is showing,
         # so switching tabs never shows a gap or a chart that has to "warm
@@ -23265,7 +23332,12 @@ class SystemMonitorWindow:
         elif self._page == 'processes':
             self._update_processes_page(rows)
 
-        self._proc_last = {r[0]: r[4] for r in rows}
+        # NOTE: self._proc_last (used for flash-on-change highlighting) is
+        # updated above, only when a full process scan actually ran (see
+        # the top of this method) — not here. Overwriting it unconditionally
+        # with the light/empty `rows` used on non-CPU Performance sub-views
+        # would zero out every process's last-known CPU%, causing a burst of
+        # false "flash" highlights the next time Summary or Processes runs.
 
     def _refresh(self):
         if self._closed:

@@ -1,6 +1,6 @@
-# Changes this session — build `b-9d6e28c2`
+# Changes this session — build `b-4d3f3e7a`
 
-Thirty-three things this session. Build IDs for reference:
+Thirty-four things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -76,7 +76,10 @@ Thirty-three things this session. Build IDs for reference:
     after watching Dave Plummer's Task Manager OG demo.
 33. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
     / Performance / Processes) after watching the actual video instead of
-    working from a transcript alone (this one, current).
+    working from a transcript alone.
+34. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
+    full-window rebuild on every page/tab click that was making it feel
+    slow and clunky (this one, current).
 
 ## New: System Monitor rebuilt into three real pages after watching the video
 
@@ -181,6 +184,117 @@ approximated turned out to have a specific, checkable design:
   stays cheap — they're deliberately plainer (no glow) than the Summary
   chart, which is the one graph in this window worth spending the extra
   render cost on.
+
+## New: System Monitor — GPU now tells you why it's N/A, and page/tab clicks are no longer a full window rebuild
+
+**What you asked for:** "i installed python3 -m pip install nvidia-ml-py
+but the gpu data still doesnt populate and the new features work well but
+so slow and clunky" — two separate problems in the item-33 build: the GPU
+tile staying N/A even after installing the package that's supposed to feed
+it, and the new Summary/Performance/Processes window feeling sluggish to
+click around in.
+
+**What I did:**
+
+- **GPU: stopped guessing, made the app tell you the real reason.**
+  `_read_gpu_pct()` had two `except Exception: return None` blocks with no
+  logging at all — every possible failure (pynvml not importable, NVML
+  init failing, no GPU found, wrong Python environment, an old conflicting
+  `pynvml` package) looked identical: a silent "N/A". It now catches the
+  real exception, keeps it in `self._gpu_err`, and shows it right on the
+  GPU tile and on the Performance→GPU graph instead of a bare "N/A" —
+  logged via `_exc_debug` too. Most likely cause on your machine: you ran
+  `python3 -m pip install nvidia-ml-py`, and this app is very likely
+  launched by a *different* `python.exe` (a bundled venv from the
+  installer, or a different interpreter on PATH) than whichever `python3`
+  that pip command resolved to — the exact same class of bug we hit with
+  `psutil` earlier this session. The tile will now spell that out directly
+  (something like "pynvml import failed (ModuleNotFoundError: No module
+  named 'pynvml') — likely installed into a different Python than the one
+  running this app") instead of a dead-end "N/A", so you can tell at a
+  glance whether it's an install-location problem, a missing/older
+  NVIDIA driver, or something else — rather than me guessing which one
+  applies to your setup.
+- **Fixed the actual "slow and clunky" cause: page/tab switches were
+  rebuilding the entire window from scratch.** `_switch_page()` and
+  `_switch_perf_subview()` both called `_rebuild_ui()`, which destroys
+  *every* widget under `self.root` — topbar (including the THEME
+  dropdown, BLOOM checkbox, SATURATION slider), the sidebar, and the
+  whole page — and rebuilds all of it from nothing, on every single click
+  of SUMMARY / PERFORMANCE / PROCESSES or a Performance sub-tab. Now
+  `_switch_page()` only destroys and rebuilds the content area
+  (`_show_page()`) and patches the sidebar button colours in place, and
+  `_switch_perf_subview()` only rebuilds the Performance page's own
+  content — the topbar and its controls are never touched by a page
+  click at all. Theme changes still do a full rebuild (recolouring every
+  widget genuinely does need to touch everything), so that one control
+  is unchanged.
+- **Stopped scanning every process every 500ms regardless of which page
+  is showing.** `_sample_processes()` did a full `psutil.process_iter()`
+  walk (name, status, username, memory, thread count, per-process CPU%)
+  every refresh cycle no matter what was on screen — even on
+  Performance→Network, which never displays a single process row. It now
+  only runs the full scan on Summary and Processes (the two pages that
+  actually show per-process detail); Performance→CPU gets a cheap `light`
+  scan (just PID + thread count, for the footer's process/thread totals);
+  every other Performance sub-view (Memory/Network/Disks/GPU/Thermals)
+  skips process sampling entirely.
+
+**Verified (not assumed):**
+
+- Headless test: captured the Tk widget id of the topbar frame and all
+  three sidebar buttons, then drove the window through
+  `_switch_page('performance')` → `_switch_perf_subview('net')` →
+  `_switch_page('processes')` → `_switch_page('summary')` — the topbar's
+  widget id and every sidebar button's widget id were identical before
+  and after all four switches, confirming the topbar/sidebar are no
+  longer destroyed and recreated on page clicks (a full rebuild would
+  have produced new widget ids each time).
+- Timed the old vs. new page-switch path directly (`_rebuild_ui()` vs.
+  the new `_switch_page()`), 9 switches each, in this sandbox: old full
+  rebuild averaged **53.8ms/switch**, new content-only switch averaged
+  **35.4ms/switch** — roughly a third faster here, and that gap should be
+  larger on a real Windows machine, since the old path also had to
+  reconstruct the topbar's `OptionMenu`/`Scale`/`Checkbutton` widgets and
+  re-run `ttk.Style` setup each time, which this sandbox's minimal Tk
+  build does cheaply but a real desktop environment typically doesn't.
+  Fewer widgets being torn down and recreated also means less flicker,
+  which matters for how "clunky" a switch feels even beyond raw ms.
+- Timed `_refresh_once()` (the 500ms-cycle work) per page in this sandbox
+  (64 processes; a Windows desktop typically has 200–400, so the process-
+  scan savings below should scale up further there): Summary ~33.7ms,
+  Processes ~11.1ms, Performance→CPU (light scan) ~3.8ms, Performance→
+  Network (no scan at all — cost is only the graph redraw) ~12.6ms.
+- Forced `import pynvml` to fail with `ModuleNotFoundError` in a test and
+  confirmed `_read_gpu_pct()` returns `None` with `self._gpu_err` set to
+  the real message described above, instead of a bare unexplained "N/A".
+- Confirmed the light vs. full process-scan split actually returns
+  different data: full scan rows have real process names; light-scan rows
+  come back with blank names (as designed — Performance→CPU never
+  displays them, only counts them).
+- Full `selftest.py`: 33/33 passed (Python 3.11 — `/guide` text untouched
+  this round, no re-baseline needed) and 35/35 passed, 1 skipped (Python
+  3.12 under `xvfb-run`).
+
+**Not done / your call:**
+
+- I couldn't reproduce your exact pynvml failure here (this sandbox has no
+  NVIDIA GPU at all), so I can't tell you the precise message you'll see —
+  only that the app will now show you the real one instead of a bare
+  "N/A". If it still says "pynvml import failed" after this update, run
+  `python -c "import sys; print(sys.executable)"` using the exact same
+  Python you use to launch/build this app (not just any `python3` in a
+  terminal), then `pip install nvidia-ml-py` with *that* interpreter. If
+  it instead shows an NVML error (not an import error), that points to a
+  driver/hardware issue rather than a packaging one — paste me the exact
+  message and I'll dig into that specific error.
+- Theme switching (the THEME dropdown) still does a full window rebuild —
+  left alone on purpose, since recolouring every themed widget genuinely
+  does need to touch the whole tree, and it's an infrequent action, not
+  something you'd click repeatedly.
+- Didn't change the fixed 500ms refresh interval itself — no evidence
+  pointed at that as the cause of "clunky," and I didn't want to change
+  something un-asked-for on a guess.
 
 ## New: "System" button — a Task-Manager-OG-inspired System Monitor window
 
