@@ -1,6 +1,6 @@
-# Changes this session — build `b-6e4d9e40`
+# Changes this session — build `b-9d6e28c2`
 
-Thirty-two things this session. Build IDs for reference:
+Thirty-three things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -73,7 +73,114 @@ Thirty-two things this session. Build IDs for reference:
     timer.
 32. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
     removed; new "System" button opens a full System Monitor window built
-    after watching Dave Plummer's Task Manager OG demo (this one, current).
+    after watching Dave Plummer's Task Manager OG demo.
+33. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
+    / Performance / Processes) after watching the actual video instead of
+    working from a transcript alone (this one, current).
+
+## New: System Monitor rebuilt into three real pages after watching the video
+
+**What you asked for:** "not a bad attempt however the video is now in
+your built in browser. watch it to the 11 minute mark and add the
+functionality" — i.e. the previous build (item 32) was a reasonable first
+pass built from a transcript, but you wanted it actually checked against
+the real thing and brought up to match.
+
+**What I did:** used the browser to open the actual video and step
+through it up to the 11-minute mark (via chapter markers and direct
+timestamps, screenshotting the frames where the app's UI is on screen). A
+transcript alone had missed that Task Manager OG isn't a single page — it
+has its own left sidebar with real page navigation, and several things I'd
+approximated turned out to have a specific, checkable design:
+
+- **A left sidebar with real pages, not one long scrolling page.** Added
+  SUMMARY / PERFORMANCE / PROCESSES to the System Monitor's own sidebar
+  (separate from the main app's sidebar). Watching confirmed the real app
+  has more pages than that (System Info, Startup Apps, Users, Services,
+  Power & Freq, Benchmarks, Installed Apps, Disk Space) — see "Not done"
+  below for why those specifically were left out.
+- **Segmented LED-style bars.** Every tile and meter in the video has a
+  small multi-segment bar underneath it, not just a number — added a
+  `_draw_led_bar` helper (plain Canvas rectangles, no image assets) and
+  wired it under all 4 top meters and all 7 Summary tiles.
+- **GPU and NPU are separate tiles**, not combined — split them apart to
+  match (7 tiles now instead of 6).
+- **A Performance page** with its own left sub-nav (CPU / Memory / Network
+  / Disks / GPU / Thermals) — confirmed the real app's flagship Performance
+  view is a per-core CPU grid (one small graph per logical processor) plus
+  a stats footer (utilization, speed, process/thread counts, uptime, core
+  counts). Built that exact layout using `psutil.cpu_percent(percpu=True)`
+  for the per-core numbers, with lightweight Canvas sparklines (not
+  matplotlib) so redrawing 8-24 of them every cycle stays cheap. The other
+  five sub-views (Memory/Network/Disks/GPU/Thermals) show one big glowing
+  graph of that metric's own history, reusing the same glow-line technique
+  as the Summary chart.
+- **A real Processes page**, not just a mini top-N list — a searchable
+  (`Filter:` box, matches name or PID), sortable (click any column header)
+  table of every process, with a detail panel underneath showing whichever
+  row is selected (Identity / Processor / Memory, mirroring the video's own
+  three-column detail layout) and an "End process" button that actually
+  terminates the selected process via `psutil.Process.terminate()` — gated
+  behind a confirmation dialog first, the same way the video describes
+  (Dave chose not to demo killing a process live, but named it as a real
+  feature of his app; End Task is standard task-manager functionality, so
+  it's wired up here, just never without you confirming first).
+- The Summary mini process list and the full Processes-page table now
+  share one process sample per refresh cycle (`_sample_processes`) instead
+  of scanning `psutil.process_iter()` twice, so switching pages doesn't
+  double the per-cycle cost.
+
+**Verified (not assumed):**
+
+- Headless functional test: constructed the window, confirmed the Summary
+  page (10 chart lines, 14 mini-list rows, all 7 tile keys present, real
+  CPU/clock numbers), then switched to Performance/CPU (correct core count
+  for this sandbox, real "Processes"/"Threads"/"Up time"/core-count footer
+  values), then Performance/Memory (a real single-metric graph line drew),
+  then Processes (real row count matching the sandbox's actual process
+  list), then typed "python" into the filter and got exactly 1 matching
+  row back, then selected a row and confirmed the detail panel actually
+  rendered (2 child widgets: the identity/processor/memory columns plus
+  the End process button) — all through the real page-switching and
+  filtering code paths, not by calling internals directly.
+- Caught and fixed a real layout bug this way: the first pass at the 7-tile
+  row only showed 3 tiles, because the LED-bar Canvas widgets had no
+  explicit `width` and Tk's 200px default canvas width was starving later
+  siblings out of the row entirely. Diagnosed by reading back each tile's
+  actual `winfo_reqwidth()` (162/162/106/155/155/155/135 after the fix,
+  all fitting the available ~1072px — before the fix, three tiles were
+  reporting 412px each and the rest were reduced to 1px and invisible),
+  not by guessing from how it looked.
+- Rendered screenshots of all three pages plus a Performance/Network
+  sub-view (sent alongside this changelog) — visual confirmation of the
+  sidebar, the LED bars, the per-core grid, and the Processes table +
+  detail panel all rendering correctly together with real sandbox data.
+- Full `selftest.py`: 33/33 passed (Python 3.11, static + served-surface +
+  JS checks; `/guide` route changed — rewrote the System button's guide
+  section to describe the three pages — re-baselined, no other route
+  changed) and 35/35 passed, 1 skipped (Python 3.12 under `xvfb-run`,
+  desktop window + honeypot radar checks).
+
+**Not done / your call:**
+
+- I stopped adding pages at Summary/Performance/Processes. The video shows
+  several more sidebar sections after Processes — System Info, Startup
+  Apps, Users, Services, Power & Freq, Benchmarks, Installed Apps, Disk
+  Space. Building all of those honestly (not just as inert nav buttons)
+  would mean real OS-level enumeration for each — Windows service control
+  manager queries, startup-registry reads, user account listings, and so
+  on — which is a much bigger, more platform-specific project than what's
+  built so far. Tell me which of those (if any) you actually want and I'll
+  build that one next, rather than guessing at all of them.
+- "End process" terminates via `psutil.terminate()` (a normal SIGTERM-style
+  request), not a forced kill — a process that ignores it will keep
+  running. That's the safer default; say if you want a forced/second-stage
+  kill option too.
+- The per-core Performance grid uses simple Canvas sparklines rather than
+  matplotlib, specifically so redrawing many small graphs every cycle
+  stays cheap — they're deliberately plainer (no glow) than the Summary
+  chart, which is the one graph in this window worth spending the extra
+  render cost on.
 
 ## New: "System" button — a Task-Manager-OG-inspired System Monitor window
 
