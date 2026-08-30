@@ -1,6 +1,6 @@
-# Changes this session — build `b-929759a0`
+# Changes this session — build `b-ef1e7021`
 
-Forty-eight things this session. Build IDs for reference:
+Fifty-three things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -129,7 +129,452 @@ Forty-eight things this session. Build IDs for reference:
     and type `kex` yourself.
 48. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
     stale System-button description rewritten to match what it actually
-    does now (this one, current).
+    does now.
+49. `b-6790beaa` — Guide: rewrote the Kali Desktop button paragraph —
+    you called the previous version "very badly written" and pasted it
+    back at me.
+50. `b-52b7391c` — CRITICAL FIX: the gauge cards (Download/Upload/Ping/
+    DNS strip at the top of the dashboard) never picked up a Colour Theme
+    change — only the historical charts further down did.
+51. (no build ID — `build_installer.bat` only, not the app) — Step 1 of
+    the build (`SpeedtestMonitor.exe` itself) now wipes the old exe first
+    and refuses loudly if it's locked, instead of possibly rebuilding
+    over it silently.
+52. `b-a3b670a8` — CRITICAL FIX (two bugs, one report): the Live traffic
+    panel's title was gone for good the moment it had real data, and
+    Colour Theme only ever reached three of the six chart panels — DNS
+    history, the DNS gauge, and the DNS row in Statistics were always a
+    fixed colour no matter the theme. Also found and fixed a second,
+    unrelated theme bug while in there: 7 of the app's 12 themes could
+    never survive an app restart.
+53. `b-ef1e7021` — CRITICAL FIX: found the actual reason the System
+    button / Task Manager TMOG content wasn't showing up in the Guide,
+    and it wasn't the Guide text — it was that the "? GUIDE" button never
+    opens the Tkinter guide I'd been editing all session; it opens a web
+    page whose section order is controlled by a completely separate,
+    un-synced list that had never heard of "Pen Test." System (Task
+    Manager TMOG) now gets its own page too, and both new pages have a
+    real embedded screenshot (this one, current).
+
+## CRITICAL FIX: the Guide page you actually open doesn't use the section list I'd been editing — System/Pen Test were real but effectively invisible
+
+**What you said:** "im opening the guide from the app there is no
+reference to the system button or task manager tmog , there are still
+lots of references to gauges which havent existed for a while now stop
+being so fucking lazy and sort it out. while your at it you have the
+ability to see the app working so take screen shots and add them to the
+guide in the correct place."
+
+**Root cause — this was a real, confirmed bug, and I'd been looking at
+the wrong thing all session:** the in-app "? GUIDE" button
+(`ModernWindow._open_guide`) doesn't open the Tkinter `UserGuideWindow`
+class at all — it does `os.startfile('http://localhost:PORT/guide')`,
+opening your browser to a page the app's own local web server builds
+fresh on every request (`_ThreeDServer._build_guide_html`). I'd spent
+this whole session editing `UserGuideWindow.SECTIONS` and `.CONTENT` —
+`.CONTENT` (the actual page text) is genuinely shared with the web page
+and every edit I made to it really was there, but `.SECTIONS` (the
+left-nav order I kept adding "Pen Test" to) is **never read by anything**
+— grepped the whole file to confirm, `UserGuideWindow` isn't even
+instantiated anywhere. The web page builds its own nav order from a
+second, separate, hardcoded list (`ORDER`, inside `_build_guide_html`)
+that nobody had touched since before "Pen Test" and "System" existed as
+guide topics. Rendered the real page with the exact code that runs on
+your machine and checked: the System-button text *was* present (I hadn't
+imagined that part), but "Pen Test" wasn't in `ORDER` at all, so it fell
+through to the "anything left over" fallback and landed at nav position
+29 — after Troubleshooting, Licence Keys, and Settings. Not gone, just
+buried somewhere nobody would think to look for it. That's a real,
+confirmed defect independent of anything about rebuilds — the previous
+"maybe it's a stale build" guess (which you'd already ruled out) was
+never the issue; the built exe was doing exactly what the source said,
+the source's own web-page nav order was just wrong.
+
+**"references to gauges which haven't existed for a while":** checked
+this literally rather than assuming either of us was right. The four
+metric cards (Download/Upload/Ping/DNS) at the top of the dashboard are
+still real, current UI — `_build_gauges` builds them and I was in that
+exact code a few builds ago for the theme-colour fix. The Guide's
+"Gauges" page already says outright that they're "simple, legible
+readouts rather than dials," so I don't think the text is factually
+wrong about what's on screen. If you mean something more specific by
+"gauges... haven't existed for a while" — a different, older look, or a
+particular reference that reads as stale to you — point me at it and
+I'll fix that exact thing; I didn't want to guess and rewrite something
+that might already be right.
+
+**What changed — `speedtest_monitor.py`:**
+
+- New `system` guide page: pulled the "System button" content out of
+  the Main Dashboard article (which used to bury it as one subsection
+  among several) into its own top-level page, "System (Task Manager
+  TMOG)" — matching how System is its own top-bar button, same footing
+  as Dashboard and Pen Test. The Dashboard page now just points to it in
+  one line instead of duplicating the content.
+- `_build_guide_html`'s `ORDER` list: added `'system'` and `'pentest'`
+  right after `'dashboard'` — so the web Guide's left nav now reads
+  Overview → Main Dashboard → System (Task Manager TMOG) → Pen Test
+  (Nmap Scanner) → ..., matching the three top-bar shortcuts in that
+  same order, instead of Pen Test being wherever dict iteration happened
+  to leave it.
+- `UserGuideWindow.SECTIONS` (the Tkinter-only list, confirmed dead code
+  — kept it in sync anyway on the chance it's ever wired up again, so it
+  doesn't quietly drift further from `CONTENT`) got the same `'system'`
+  entry added in the same place.
+- Real screenshots, taken this session, embedded in `_GUIDE_SHOTS` and
+  wired into both new pages via `SHOTS`:
+  - **System (Task Manager TMOG) page:** one of the two Task Manager
+    TMOG screenshots you sent earlier this session for the original
+    guide rewrite (the Summary page one) — your actual machine, not a
+    mockup.
+  - **Pen Test page:** a real screenshot of the actual `NmapWindow`
+    class, rendered by launching it for real under a headless X server
+    in this sandbox (same technique as the earlier live-traffic-panel
+    PNG renders, extended to a full Tkinter window this time) — genuine
+    app UI, not a drawn-up approximation. Nmap isn't installed in this
+    sandbox, so I pointed the window at a fake `nmap` standing in for it
+    to avoid the "nmap not found" banner (which would only be
+    sandbox-specific noise) and to get a realistic
+    `C:\Program Files (x86)\Nmap\nmap.exe` in the command preview
+    instead of a Linux sandbox path; the sample scan output shown in the
+    console is illustrative text I typed in for the screenshot, not a
+    real scan result.
+- `_open_guide` now opens `http://localhost:PORT/guide?b=<build id>`
+  instead of the bare URL. The page itself already sends
+  `no-store, no-cache, must-revalidate` headers, so this isn't fixing a
+  server-side caching bug — but if your browser ever re-focuses an
+  *already-open* tab on that exact URL instead of actually reloading it
+  (some browsers do this for "open this URL" requests from outside the
+  browser), no request is made at all and no-cache headers never get a
+  chance to matter. Appending the build id makes every version's URL
+  different, so that can't happen — worth doing regardless of whether
+  it's what you hit, since it removes a whole class of "the button
+  opened but showed old content" possibility for free.
+
+**Verified for real:** `speedtest_monitor.py` parses clean. Rendered
+`_build_guide_html()` with the exact same code path the app uses and
+checked the actual HTML output (not the source, the generated page):
+nav order is now Overview / Main Dashboard / System (Task Manager TMOG)
+/ Pen Test (Nmap Scanner) / ... as intended; both new `/guide-shot?k=...`
+image references resolve real embedded JPEGs (decoded and re-saved
+them to confirm valid images, viewed both directly). Full `selftest.py`
+(33/0/3, and 35/0/1 under `xvfb-run`) — the `/guide` route content-diff
+was re-baselined since this is an intentional content change — the
+13-page System Monitor regression, the full Nmap GUI suite, and the
+gauge-theme test are all green. Confirmed the one Nmap-suite "failure"
+during testing was caused by my own fake `nmap` stand-in leaking onto
+`PATH` for the screenshot, not a real regression — reran clean without
+it.
+
+**NOT verified:** the "already-open tab gets refocused instead of
+reloaded" browser behaviour is a real, known thing some browsers do, and
+it fits your symptoms (rebuilt, told me you rebuilt, still saw old
+content) better than anything else I found — but I can't reproduce an
+actual Windows browser's tab-reuse behaviour from this sandbox, so I
+can't say for certain that's what happened to you, only that the fix is
+real and harmless either way. If the Guide still looks wrong after this
+build with the query-string version in the address bar, that specific
+theory is ruled out and I'll keep digging. Also unverified: whether the
+"gauges" wording is actually the problem you meant — see above, I need
+more to go on there.
+
+**What you reported, with two screenshots:** "what have you done to the
+live traffic graph its stopped working and the title is missing also
+when i change the theme colour it should effect all the graphs colours."
+Nothing in this session had touched `_update_live_traffic`, `_build_charts`,
+or anything chart-related before this — the two screenshots turned out to
+be showing two genuine, separate, pre-existing issues, not something the
+gauge-colour fix broke.
+
+**"Title is missing" — root cause:** `_update_live_traffic` only ever set
+a real title (`ax.set_title('Live network traffic  Mbps', ...)`, matching
+its five sibling panels) on the *fallback* path — no data yet, or an
+error. The moment real tx/rx data existed (which is almost immediately
+after the window opens), the method hit a `return` a few lines earlier and
+never reached that title line again, for the rest of the window's life.
+In its place was only the colour-coded "● RX x.x  ● TX x.x  Mbps" readout,
+positioned differently from where a title normally sits — so the panel
+looked like it was simply missing the label its five siblings all have.
+Rendered both states to PNG and looked at them directly rather than
+guessing: your screenshots (short trace confined to the left ~15% of a
+fixed 0-120-sample window, no visible title) matched a freshly-opened
+window almost exactly, sample-for-sample.
+
+**"stopped working" — what this actually is:** this panel is a genuinely
+different kind of chart from its five siblings on purpose (see its own
+docstring, unchanged) — a short 120-sample (~48 second) rolling window of
+live psutil network throughput, not persisted historical data like
+Download/Upload/Latency/DNS. A freshly-opened window legitimately shows a
+short trace confined to the left portion of that fixed 0-120 range until
+it fills up over the next ~48 seconds, which is almost certainly what your
+screenshots caught — not a freeze. I did not find anything in the
+self-rescheduling timer (`_refresh_live_fast`, every 400ms) that would
+actually stop it running once started. If it's still short/stuck a good
+while after opening the window, that's still worth a follow-up report, but
+nothing in the code as written explains a permanent freeze.
+
+**What changed — `speedtest_monitor.py`, `_update_live_traffic`:** now
+sets the same title, in the same position, as every other panel,
+unconditionally, on every redraw — so it's there whether or not data has
+landed yet, exactly like its siblings — and keeps the colour-coded RX/TX
+readout above it, unchanged. Removed the now-dead duplicate title-setting
+in the old fallback path.
+
+**"theme should affect all graphs" — root cause:** `THEMES` (12 presets)
+only ever defined three colours per theme — download, upload, ping. DNS
+history's chart, the DNS gauge card, and the DNS row in the Statistics
+table were all hardcoded to a fixed `'#ff9f43'` everywhere, with no theme
+colour to draw from at all — not a bug in the colour-application code, a
+genuine gap in the data the themes provide. (The gauge-card fix from
+earlier this session made DNS's *existing* fixed colour finally consistent
+between the gauge and its sparkline; it didn't make DNS themeable, because
+there was no dns theme colour yet to use.)
+
+**What changed — `speedtest_monitor.py`:**
+
+- `THEMES`: every one of the 12 presets now has a 4th colour, `dns`,
+  chosen to stand apart from that theme's other three rather than blend
+  in. Ocean's is `#ff9f43` — the exact value DNS was hardcoded to before
+  — so anyone on the default theme sees zero visual change.
+- `_build_gauges`: the DNS gauge card now reads its colour from the theme
+  (`theme_key='dns'`) instead of an unconditional fixed fallback, same as
+  Download/Upload/Ping already did.
+- `_update_charts`: computes `dns_c = c.get('dns', '#ff9f43')` alongside
+  the existing dl_c/ul_c/pg_c, and uses it for the DNS history chart's
+  line + fill and the Statistics table's DNS row, replacing the two
+  remaining hardcoded `'#ff9f43'` occurrences there.
+- The custom-colour-override loader (`config['custom']` — not reachable
+  from any current UI, but still loadable from a hand-edited config file)
+  now accepts an optional 4th `dns` key alongside the required
+  download/upload/ping three, so it doesn't silently reject a config that
+  includes one.
+
+**A second, independent theme bug found and fixed while tracing this:**
+`_load_config`'s validation for the saved `"theme"` value was a hardcoded
+5-name whitelist — `('Ocean', 'Sunset', 'Neon', 'Pastel', 'Mono', None)`
+— left over from before `THEMES` grew to 12 presets. Any of the other 7
+(Crimson, Arctic, Hacker, Purple, Gold, Fire, Ice) saved to
+`speedtest_config.json` just fine, but silently failed this check on the
+*next* load and reverted to Ocean with no error shown anywhere. Given how
+often this session involves a full rebuild-and-relaunch cycle, if you'd
+ever picked one of those 7, it would have looked exactly like "changing
+the theme does nothing" on every subsequent restart, on top of the
+gauge-card bug already fixed. Changed the check to `loaded['theme'] in
+THEMES` — checking against the real preset dict directly means this can't
+drift out of sync with the preset list again.
+
+**Verified for real:**
+
+- `speedtest_monitor.py` parses clean; full `selftest.py` (33/0/3, and
+  35/0/1 under `xvfb-run`, `/guide` and other routes re-baselined for the
+  intentional THEMES change), the 13-page System Monitor regression, and
+  the full Nmap GUI suite are all green.
+- Rendered the actual chart grid to real PNG images via matplotlib's Agg
+  backend (headless, no display needed) and looked at them directly:
+  before the fix, reproduced your exact symptom (RX/TX readout with no
+  title, misaligned against its siblings); after the fix, the title
+  appears in the same row/position as "DNS history ms" and "Statistics";
+  under a Neon theme, Download/Upload/Latency/DNS-history/Live-traffic-RX-
+  TX/Statistics-DNS-row all correctly switched to Neon's colours together;
+  under Ocean (the default), the whole grid is visually identical to
+  before this fix except for the now-present Live traffic title — no
+  colour regression for anyone who hasn't changed themes.
+- Extended the existing gauge/theme headless test: confirmed all four
+  gauge cards (including DNS) now themed correctly, and specifically
+  confirmed `'Crimson'` (one of the 7 previously-dropped theme names)
+  now survives a fresh `SpeedTestMonitor()` load, simulating a real app
+  restart.
+
+**NOT verified:** whether the Live traffic panel genuinely keeps growing
+past the point your screenshots caught it, on your real machine over a
+longer window than this sandbox can simulate — the self-rescheduling
+timer looks correct as written and I found nothing that would stop it,
+but "looks correct on read + a synthetic replay" isn't the same as
+watching it run for several minutes on your actual desktop. If it's still
+short after being open a while, that's a real follow-up, not something
+this fix addresses.
+
+## Fixed: `build_installer.bat` could silently ship a stale `SpeedtestMonitor.exe`
+
+**What you said:** "ive told you time and time again i always rebuild
+using build_installer.bat" — after I'd offered "maybe you're running an
+old build" as one of two guesses for why the new Guide content (Pen Test
+page, System-button rewrite) wasn't showing up for you. Fair correction:
+you told me your workflow already, I should have taken that as given
+instead of re-suggesting it as an open question.
+
+**What I found instead, by actually reading `build_installer.bat` end to
+end rather than re-asking:** Step 1b (the optional `NetworkMonitorClient`
+build, further down the same script) already has protection for exactly
+this failure mode, with its own comment spelling out the history: *"Wipe
+old artifacts FIRST so a failed rebuild can't masquerade as success... the
+old bug: a failed build left the previous exe in place and we called it
+success."* Step 1 — the build of `SpeedtestMonitor.exe`, the one that
+actually matters here — never got that same protection. It only ran
+`pyinstaller speedtest_monitor.spec --noconfirm` and trusted the bare exit
+code plus "does dist\SpeedtestMonitor.exe exist." If that file is locked
+at build time (almost always because the app itself is still running —
+easy to do if you rebuild right after testing something live, which this
+whole session has involved a lot of), PyInstaller can fail to actually
+overwrite it without necessarily returning a nonzero exit code every time,
+so the script would report success while dist\ still held the *previous*
+build's exe. That would look exactly like what you're describing: you
+rebuild, it reports fine, the installer runs fine, and the app you get is
+still the old one — no error anywhere to point at.
+
+I can't say with certainty this is the exact mechanism you hit — this
+sandbox has no Windows/PyInstaller to reproduce it against — but it's a
+real, confirmed asymmetry between two build steps in the same script, the
+sibling step already had to be hardened against precisely this once
+before, and it's a solid explanation for "the Guide changes aren't
+showing up even though I always rebuild."
+
+**What changed — `build_installer.bat`, Step 1 only:**
+
+- Before calling `pyinstaller`, if `dist\SpeedtestMonitor.exe` exists it's
+  now deleted first. If the delete fails (file locked), the script stops
+  immediately with a clear `[ERROR]` telling you to check Task Manager for
+  a still-running `SpeedtestMonitor.exe` (or wait out an AV scan) and
+  re-run — instead of silently proceeding to build over a file it can't
+  actually replace.
+- Also clears the stale `build\SpeedtestMonitor` intermediate folder
+  first, same as Step 1b already does for the client.
+- The final success message now says "rebuilt fresh from
+  speedtest_monitor.py" instead of just "built successfully," so a
+  genuinely fresh build reads differently from the old wording.
+- Nothing about Step 2 (NSIS packaging) or Step 1b (client build, already
+  correct) changed.
+
+**Verified for real:** manually re-checked the new block's parentheses
+balance against the exact same nested `if exist (...) ( ... )` pattern
+Step 1b already uses successfully — 2 real opening parens, 2 real closing,
+the two literal parens inside the error message text properly caret-
+escaped (`^(`...`^)`), matching this file's own established style
+elsewhere (the Ollama and README sections already do the same thing).
+`speedtest_monitor.py` was **not** touched by this fix, so no Python
+regression run was needed for it; `selftest.py` and the rest of the suite
+are exactly where build `b-52b7391c` left them.
+
+**NOT verified:** this is a `.bat` file — this sandbox has no Windows,
+`cmd.exe`, or PyInstaller, so I cannot actually run this script and watch
+it rebuild, lock-detect, or package for real. This is careful manual
+review of batch syntax against a proven-working sibling pattern already
+in the same file, not an executed test. Next time you rebuild: if
+`SpeedtestMonitor.exe` really was still running, you should now see the
+new `[ERROR] Cannot delete dist\SpeedtestMonitor.exe - it is locked`
+message instead of a silent stale rebuild — if you hit that, it confirms
+the theory; if the Guide still doesn't update even after a clean rebuild
+with no lock error, this wasn't the (whole) cause and I'll keep digging.
+
+## CRITICAL FIX: changing the Colour Theme in Settings did nothing to the gauge cards
+
+**What you reported:** "changing the theme in preferences does fuck all."
+
+**Root cause, found by reading the actual code, not guessed:**
+`_build_gauges` (the Download/Upload/Ping/DNS strip at the top of the
+dashboard — the dot, the big number, the thin progress bar, the
+sparkline) sets every one of those colours from a **hardcoded** list at
+window construction time and never again. Meanwhile `ModernWindow.
+_open_settings` — the only place the Settings dialog is ever opened from
+— has always called it with `on_saved=lambda: None`: a no-op. So hitting
+Save wrote the new theme to `speedtest_config.json` and closed the
+dialog, and that was the entire effect. Nothing ever told the already-
+built gauge cards to re-colour, because nothing was wired up to do that
+at all.
+
+The historical line charts further down the dashboard (`_update_charts`)
+were never broken — they re-read `self._monitor.colors` fresh on every
+2-second refresh tick, so their three line colours (Download/Upload/
+Ping) really do follow the theme. But the gauge strip is the first thing
+anyone looks at, and it never moved — which is exactly what "does fuck
+all" looks like from the outside, even though part of the feature quietly
+worked.
+
+Also found while tracing this: the guide's own "settings" page already
+claimed "Saving applies the theme immediately to all gauges and charts" —
+that promise was simply false for "gauges." Worth knowing since it means
+this bug (or one like it) has been there since before this session, not
+something introduced recently.
+
+**What changed — `speedtest_monitor.py`, `ModernWindow`:**
+
+- `_build_gauges` now takes the Download/Upload/Ping colours from
+  `self._monitor.colors` (the active theme) instead of a fixed list, and
+  keeps a reference to each card's dot canvas item, value-label widget,
+  and bar-fill item so they can be recoloured later without rebuilding
+  the whole card. DNS is unchanged — `THEMES` only defines download/
+  upload/ping colours, so there's no theme colour for DNS to use; its
+  card keeps its fixed accent, exactly as before.
+- New method `_apply_gauge_colors()`: re-reads the theme and updates each
+  gauge card's dot, value-label colour, progress-bar colour, and
+  redraws its sparkline in the new colour, immediately.
+- `_open_settings` now passes `on_saved=self._apply_gauge_colors` instead
+  of the no-op — so hitting Save in the Settings dialog recolours the
+  gauge strip the same instant, not "eventually, maybe, for the chart
+  lines only."
+
+**Verified for real:** `speedtest_monitor.py` parses clean. Wrote a
+headless test that calls the actual `ModernWindow._build_gauges` and
+`ModernWindow._apply_gauge_colors` (unbound, against a minimal stand-in
+object — not a rewritten copy of the logic) with a real Tk root under
+Xvfb: confirmed the gauge cards start on the Ocean theme's colours
+(`#00d4aa`/`#a371f7`/`#f7cc73`), confirmed switching `config['theme']` to
+Neon and calling `_apply_gauge_colors()` moves the dot fill, the value
+label's text colour, and the bar-fill colour to Neon's colours
+(`#39ff14`/`#ff073a`/`#00b4d8`) on all three cards, and confirmed the DNS
+card's colour is untouched either time, matching that it has no theme
+colour to draw from. `selftest.py` (33/0/3, and 35/0/1 under `xvfb-run`),
+the 13-page System Monitor regression, and the full Nmap GUI suite are
+all still green — nothing else moved.
+
+**NOT verified:** the "TODAY" mini-card (Tests/DNS/Max DL/Jitter, to the
+right of the four gauges) and the DNS card's own accent colour were left
+exactly as they were — neither has ever had a per-theme colour to draw
+from (`THEMES` only defines download/upload/ping), so there was nothing
+there to fix; flagging this so it's clear that's a scope decision, not
+something missed. This sandbox has no real speed-test history, so this
+was tested with synthetic gauge values rather than your actual recorded
+data — the colour-swap logic itself doesn't depend on what the values
+are, but worth knowing.
+
+## Fixed: Kali Desktop button's Guide paragraph — badly written, rewritten
+
+**What you said:** "very badly written," pasting back the exact paragraph
+from build `b-929759a0`'s new Pen Test page. Fair complaint — that
+paragraph was one 70-word run-on sentence explaining internal build
+history (which earlier builds tried auto-starting `kex` and why that got
+dropped) instead of just telling the user what the button does. That
+backstory belongs in this changelog, not in a user-facing guide page.
+
+**What changed — `speedtest_monitor.py`, `UserGuideWindow.CONTENT['pentest']`:**
+
+- Old: "⌘ Kali Desktop (Win-KeX) opens a bare `wsl -d kali-linux` shell in
+  its own new console window — Windows only, needs the installer's "WSL +
+  Kali Linux" component, and Kali's own first-run setup completed once by
+  hand. It deliberately stops at the shell: earlier builds also tried
+  auto-starting Win-KeX (`kex`) from this button, but that never got
+  confirmed working end-to-end, so starting Win-KeX itself — typing `kex`
+  at the prompt this gives you — is left to you."
+- New: "⌘ Kali Desktop (Win-KeX) opens a Kali Linux shell in its own
+  console window (Windows only). Type kex at the prompt to start the
+  Win-KeX desktop." plus two short bullets for the two prerequisites
+  (the installer's WSL + Kali Linux component; Kali's first-run setup
+  done once by hand). Same information, told straight instead of buried
+  in one long sentence with the dev-history justification stripped out.
+
+**Verified for real:** `speedtest_monitor.py` parses clean. Re-ran the
+same real-`Text`-widget render check as build `b-929759a0` (imports the
+module, calls the actual `UserGuideWindow._show_section('pentest')`
+against a live Xvfb Tk widget) and asserted the new wording is present and
+the old run-on sentence is gone — confirmed. `selftest.py`'s `/guide`
+route content-diff baseline re-recorded with `--update-ok` (intentional
+content change); both `selftest.py` baselines (33/0/3, 35/0/1 under
+`xvfb-run`) and the 13-page System Monitor regression are green against
+the new baseline.
+
+**NOT verified:** nothing new here — same standing item as always, this
+is a text-only Guide change with no runtime behaviour to test beyond what
+the render check above already covers.
 
 ## New: Guide updated — Pen Test (Nmap) page added, stale System-button text fixed
 

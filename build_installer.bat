@@ -260,6 +260,30 @@ echo  │  Step 1: Building SpeedtestMonitor.exe  │
 echo  └─────────────────────────────────────────┘
 echo.
 
+:: Wipe the old exe FIRST so a failed or blocked rebuild can't masquerade
+:: as success -- the same fix Step 1b below already has for the optional
+:: client build, now applied here too, for the exe that actually matters.
+:: If the exe won't delete, it's locked -- almost always because
+:: SpeedtestMonitor.exe is still running (you're testing the live app) or
+:: AV is mid-scan. `pyinstaller --noconfirm` does not reliably fail loudly
+:: when it can't overwrite a locked target, so trusting its exit code
+:: alone isn't enough: it can report success while quietly leaving the
+:: previous build's exe sitting in dist\ untouched -- which looks exactly
+:: like a real rebuild until you notice the new code just isn't there.
+if exist "dist\SpeedtestMonitor.exe" (
+    del /f /q "dist\SpeedtestMonitor.exe" >nul 2>&1
+    if exist "dist\SpeedtestMonitor.exe" (
+        echo  [ERROR] Cannot delete dist\SpeedtestMonitor.exe - it is locked.
+        echo          It is almost certainly still running - check Task Manager
+        echo          for SpeedtestMonitor.exe and close it ^(or wait for any AV
+        echo          scan to finish^), then re-run this script.
+        echo          Refusing to build over it and risk shipping a stale exe.
+        pause
+        exit /b 1
+    )
+)
+if exist "build\SpeedtestMonitor" rmdir /s /q "build\SpeedtestMonitor" >nul 2>&1
+
 pyinstaller speedtest_monitor.spec --noconfirm
 
 if errorlevel 1 (
@@ -273,7 +297,7 @@ if not exist "dist\SpeedtestMonitor.exe" (
     pause & exit /b 1
 )
 echo.
-echo  [OK] SpeedtestMonitor.exe built successfully.
+echo  [OK] SpeedtestMonitor.exe rebuilt fresh from speedtest_monitor.py.
 
 :: -- Step 1b: Build the optional client exe -------------------------------
 if exist "nm_client.py" (
