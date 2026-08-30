@@ -25,6 +25,32 @@ if not exist "speedtest.exe" (
     echo         The installer fetches librespeed-cli automatically instead.
 )
 
+:: Task Manager TMOG (real system-monitor app) - unlike Wireshark/Npcap/
+:: Ollama/librespeed-cli, this one IS bundled directly (not downloaded at
+:: install time), because there is no stable public silent-download URL
+:: for it. installer.nsi embeds it and installs it silently; the app's
+:: "System" button launches the real installed exe. Missing here just
+:: means installer.nsi's own !if /FileExists guard skips that section
+:: cleanly - not a build failure.
+if not exist "TMOGTaskManagerSetup.exe" (
+    echo  [WARN] TMOGTaskManagerSetup.exe not found - the installer will skip
+    echo         bundling Task Manager TMOG, and the app's System button will
+    echo         show its own "not found" message until it is installed some
+    echo         other way. Put TMOGTaskManagerSetup.exe in this folder to
+    echo         include it.
+) else (
+    echo  [OK] TMOGTaskManagerSetup.exe found - will be bundled and installed.
+)
+
+:: WSL + Kali Linux (pen testing environment) - nothing to bundle here. Unlike
+:: TMOG above, Kali has no installer file of its own to include: installer.nsi
+:: runs `wsl --install -d kali-linux`, which fetches the Kali image itself
+:: straight from Microsoft's own distribution at install time on the end
+:: user's machine. So there is nothing for this build script to check for.
+echo  [INFO] Task Manager TMOG's "System" button aside, the installer also
+echo         sets up WSL + Kali Linux (a pen-testing environment) - it
+echo         downloads Kali itself at install time, nothing bundled here.
+
 :: ── Check Python ──────────────────────────────────────────────────────────────
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -45,7 +71,17 @@ echo  [OK] PyInstaller ready.
 :: ── Check / install Python dependencies ──────────────────────────────────────
 echo  Installing Python dependencies...
 pip install numpy matplotlib mplcursors Pillow --quiet
-echo  [OK] Python dependencies installed.
+:: nvidia-ml-py (imported as "pynvml") gives the System Monitor real NVIDIA
+:: GPU readings — name, utilization, memory, power, temperature, clock — via
+:: NVML. It is pure Python (no compiled extension), so bundling it here means
+:: PyInstaller's own import scan of speedtest_monitor.py picks it up and
+:: freezes it into SpeedtestMonitor.exe automatically; nothing else to wire
+:: up. It's a no-op on a machine with no NVIDIA GPU/driver — the app already
+:: catches that ImportError/NVMLError itself and shows "Unavailable" with the
+:: real reason, never a fabricated reading. Installed here (build time) so it
+:: ships INSIDE the exe; end users never need to pip install anything.
+pip install nvidia-ml-py --quiet
+echo  [OK] Python dependencies installed (including nvidia-ml-py for GPU readings).
 
 :: ── Check / install Ollama (local AI engine) ─────────────────────────────────
 ::    The app runs its AI locally via Ollama (no API key). Make sure it's present
@@ -158,12 +194,42 @@ echo   - Wireshark packet capture frontend
 echo   - EtherApe network topology visualiser
 echo   - Optional remote client ^(connects to this or another PC^)
 echo   - AI-powered capture analysis ^(local, via Ollama — no API key^)
+echo   - "System" button opens Task Manager TMOG, the real system
+echo     monitor app ^(bundled and installed alongside this app^)
+echo   - WSL + Kali Linux installed for pen testing your own network
+echo   - "Pen Test" button opens an Nmap scanner with an AI assistant
+echo     that can craft scans and recommend next steps
 echo.
 echo Requirements:
-echo   - Windows 10 or later ^(64-bit^)
+echo   - Windows 10 version 2004 ^(build 19041^) or later, or Windows 11
+echo     ^(older Windows 10 still runs the app, just without WSL/Kali^)
 echo   - Wireshark ^(silent^) + Npcap ^(one short wizard to click^)
+echo   - Nmap ^(silent — installed by the installer^)
 echo   - Ollama ^(local AI engine — installed by the build script^)
 echo   - Run as Administrator for packet capture
+echo.
+echo WSL + Kali Linux:
+echo   Installed via `wsl --install -d kali-linux` — Kali's own official
+echo   WSL install method. A brand-new WSL install commonly needs ONE
+echo   restart before Kali is ready; the installer tells you if so.
+echo   After that ^(or right away if WSL was already set up^), open a
+echo   Command Prompt and run once:
+echo     wsl -d kali-linux
+echo   to finish Kali's own first-time setup ^(it asks you to create a
+echo   UNIX username and password — that's Kali's own step, not this
+echo   installer's^). The "Pen Test" button in the app itself now opens
+echo   a Kali desktop directly via Win-KeX, once that first-time setup
+echo   is done.
+echo.
+echo Pen Test ^(Nmap scanner^):
+echo   The app's "Pen Test" button opens an Nmap scan builder: pick a
+echo   target and a scan profile ^(or describe what you want in plain
+echo   English and let the built-in AI craft the flags^), watch the scan
+echo   run live, then ask the AI to recommend next steps from the
+echo   results. A "Kali Desktop ^(Win-KeX^)" button in that same window
+echo   still opens the Kali desktop directly, same as before.
+echo   Only scan hosts and networks you own or have explicit permission
+echo   to test.
 echo.
 echo AI features:
 echo   The app runs its AI locally through Ollama and starts it
@@ -182,7 +248,8 @@ echo   Npcap cannot be installed silently ^(that is a paid OEM
 echo   feature^), so the installer opens its short wizard - just
 echo   click through with the defaults. Wireshark itself installs
 echo   silently, and Npcap is skipped entirely if already present.
-echo   Nmap is NOT required and is no longer installed.
+echo   Nmap ^(for the "Pen Test" button^) installs silently right after,
+echo   reusing that same Npcap install rather than bringing its own.
 echo   If capture fails, try running as Administrator.
 ) > README.txt
 
@@ -287,6 +354,8 @@ echo  ║  Output: NetworkMonitorSetup.exe                     ║
 echo  ║                                                      ║
 echo  ║  This installer will:                                ║
 echo  ║    • Install Vanguard Flow NetSentinel to Program Files        ║
+echo  ║    • Install Task Manager TMOG (real system monitor) ║
+echo  ║    • Install WSL + Kali Linux (pen testing)          ║
 echo  ║    • Install Wireshark + Npcap (1 click)             ║
 echo  ║    • Install Ollama (local AI engine)                ║
 echo  ║    • Install a speed-test CLI (librespeed-cli)       ║
@@ -294,11 +363,14 @@ echo  ║    • Optional: remote client app                     ║
 echo  ║    • Create Desktop and Start Menu shortcuts         ║
 echo  ║    • Register proper uninstaller                     ║
 echo  ║                                                      ║
-echo  ║  Note: Wireshark, Npcap, Ollama and librespeed-cli   ║
-echo  ║  are NOT bundled into this installer. Each end       ║
-echo  ║  user's PC downloads them fresh from each project's  ║
-echo  ║  own official site the first time the installer      ║
-echo  ║  runs — no third-party NSIS plugin needed either.    ║
+echo  ║  Note: Wireshark, Npcap, Ollama, librespeed-cli and   ║
+echo  ║  Kali Linux are NOT bundled into this installer. Each ║
+echo  ║  end user's PC downloads them fresh — Kali straight   ║
+echo  ║  from Microsoft/Kali via `wsl --install`, the rest    ║
+echo  ║  from each project's own site — no third-party NSIS   ║
+echo  ║  plugin needed either. Task Manager TMOG IS bundled   ║
+echo  ║  directly (no download URL for it exists) — see       ║
+echo  ║  TMOGTaskManagerSetup.exe.                            ║
 echo  ║                                                      ║
 echo  ╚══════════════════════════════════════════════════════╝
 echo.

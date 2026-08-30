@@ -1,6 +1,6 @@
-# Changes this session — build `b-4d3f3e7a`
+# Changes this session — build `b-929759a0`
 
-Thirty-four things this session. Build IDs for reference:
+Forty-eight things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -79,7 +79,1118 @@ Thirty-four things this session. Build IDs for reference:
     working from a transcript alone.
 34. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
     full-window rebuild on every page/tab click that was making it feel
-    slow and clunky (this one, current).
+    slow and clunky.
+35. `b-a1d07a24` — System Monitor: full 13-page rebuild to match the real
+    TMOG app you screen-recorded (System Info, App history, Startup apps,
+    Users, Services, Power & Freq, Connections, Installed Apps, Disk
+    Space, Benchmarks — the 8 pages the video has that the 3-page rebuild
+    in #33 didn't), plus `nvidia-ml-py` now bundled into the installer
+    build automatically.
+36. `b-028de0ed` — CRITICAL FIX: the CPU benchmark added in #35 was
+    launching a full new copy of the entire app (new window, new threads,
+    everything) once per CPU core every time it ran, because of a
+    Windows/PyInstaller multiprocessing pitfall I didn't catch in the
+    Linux sandbox. Fixed — see the entry above this one.
+37. `b-5cbb9230` — "System" button now launches the real Task Manager
+    TMOG app (bundled + silently installed by the installer) instead of
+    the from-scratch rebuild from #33-#35.
+38. (no build ID — installer script only) — installer now installs and
+    configures WSL, then installs Kali Linux, as a pen-testing
+    environment. Step 1 of 2 — GUI panels to drive specific tools inside
+    it are a planned follow-up, not built yet.
+39. (no build ID — installer script only) — CRITICAL FIX: #38's WSL
+    detection reported "not found" on a machine that genuinely had WSL
+    installed and working, because of a 32-bit-installer/WOW64 path bug.
+    Fixed.
+40. `b-5ecee4c5` — new "Pen Test" button next to "System" on the main
+    dashboard, runs `wsl -d kali-linux -- kex --sl -s`.
+41. `b-b6a3a1fb` + installer script — "Pen Test" now opens an Nmap scanner
+    GUI with an AI box that crafts scans and recommends next steps; Kali
+    desktop is still one click away inside it.
+42. `b-30771036` — Nmap GUI: new "Report" button generates a self-contained
+    HTML report of the scan.
+43. `b-6e2b823c` — "Kali Desktop" button now runs `wsl -d kali-linux` then
+    plain `kex` — dropped the `--sl -s` (seamless mode + sound) flags.
+44. `b-c4249a31` — CRITICAL FIX: #43's button crashed Xfce on your real
+    machine ("Unable to start notification daemon ... wlr-layer-shell")
+    even though typing the same two steps by hand worked fine. Fixed by
+    running `kex` through a login shell.
+45. `b-c6e3c79a` — CRITICAL FIX: #44's Xfce crash was gone, but the button
+    still didn't work — console popped up and closed immediately, no
+    desktop. Bare `kex` has no mode flag; switched to Kali's own
+    documented `kex --win -s` recipe.
+46. `b-0618aa6b` — CORRECTION to #45: you pasted the real `kex --help`
+    output — window mode IS the default, so #45's "needs a mode flag"
+    diagnosis was wrong. The real remaining gap was interactive vs
+    non-interactive shell (`~/.bashrc` only loads for interactive shells);
+    switched from `bash -lc` to `bash -lic`.
+47. `b-c71b6fc3` — "Kali Desktop" button simplified back to bare
+    `wsl -d kali-linux`, no `kex` at all — you asked to just get a shell
+    and type `kex` yourself.
+48. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
+    stale System-button description rewritten to match what it actually
+    does now (this one, current).
+
+## New: Guide updated — Pen Test (Nmap) page added, stale System-button text fixed
+
+**What you asked for:** "update the guide with all new features," alongside
+a screenshot of the real Task Manager TMOG app's Summary page.
+
+**What I found while doing it:** the in-app Guide (the `? GUIDE` button /
+`/guide` web route — `UserGuideWindow.CONTENT` in `speedtest_monitor.py`)
+had two real gaps, not just missing text for the newest features:
+
+- No "Pen Test" page existed at all — the Nmap scanner GUI, its AI panel,
+  the Report button and the Kali Desktop button (added earlier this
+  session) were completely undocumented.
+- The Guide's existing "System button" text was actively wrong, not just
+  stale: it described the old from-scratch `SystemMonitorWindow`
+  recreation (3 pages: Summary/Performance/Processes) as if that's still
+  what the System button opens. It isn't — build `b-c954532e`-era work
+  (see entries higher up) switched that button over to launching the real,
+  separately-installed Task Manager TMOG app instead, and left that old
+  Python class in the file but unwired. The Guide never caught up. The
+  "Top bar" text above it also still said "two navigation shortcuts"
+  (Dashboard, System) when there have been three (Dashboard, System, Pen
+  Test) since the Nmap GUI shipped.
+
+**What changed — `speedtest_monitor.py`, `UserGuideWindow`:**
+
+- New `'pentest'` section (added to both `SECTIONS`, right after "Main
+  Dashboard," and `CONTENT`): scan builder (Target/Profile/Args/Start/
+  Stop), all six scan profiles with their exact flags, the AI panel (Craft
+  Scan, Recommend Next Steps), the Report button, and the Kali Desktop
+  button — including the current, honest state of that last one: it opens
+  a bare `wsl -d kali-linux` shell and stops there, not a claim that it
+  starts Win-KeX for you.
+- "Top bar" text now says three shortcuts and names Pen Test.
+- "System button" text rewritten using your screenshot as the reference
+  for what's actually on screen: the Summary page's CPU/Clock/Temp/GPU
+  meters, the CPU Overview graph's Utilization/Temperature/Kernel tabs,
+  the Top CPU processes list's columns, the Memory Utilization graph, the
+  Disks/Network/CPU Power/Thermals tiles, and Task Manager TMOG's own left
+  sidebar (Summary, Performance, Processes, System Info, App history,
+  Startup apps, Users, Services, then a Power & Freq / Connections /
+  Installed Apps / Disk Space / Benchmarks group), plus its Settings/
+  Colours buttons and status bar. Also now explains it's a real separate
+  app the installer sets up, not part of this app's own window, and what
+  happens if that installer component was skipped.
+
+**Verified for real:** `speedtest_monitor.py` parses clean. Wrote a
+one-off script that imports the module and calls the real
+`UserGuideWindow._show_section('pentest')` and `._show_section('dashboard')`
+against a live (Xvfb) Tk `Text` widget — not just checking the data
+structure — and asserted the actual rendered text contains the new Pen
+Test content and the rewritten System-button wording, with zero exceptions
+from the Tkinter renderer. `selftest.py`'s `/guide` route content-diff
+check (which exists specifically to flag unintended Guide changes) was
+re-baselined with `--update-ok` since this change to `/guide` content is
+intentional; both `selftest.py` baselines (33/0/3, 35/0/1 under `xvfb-run`)
+and the 13-page System Monitor regression (`test_all_pages.py`) are green
+against the new baseline.
+
+**NOT verified:** whether the System-button description now matches your
+screenshot in every last visual detail (exact tile order, exact column
+names) — it's built from reading the screenshot carefully, not from
+running the real Task Manager TMOG app myself, since that app isn't
+present in this sandbox. If anything in that section doesn't match what
+you actually see, point out the specific line and I'll fix the wording.
+
+## Changed: "Kali Desktop" button — back to bare `wsl -d kali-linux`, no `kex`
+
+**What you said:** "just make the button run wsl -d -kali-linux i will
+fucking just type kex myself ffs." Fair — four straight builds (#43-#46)
+tried to also auto-launch Win-KeX from this button and none of them ever
+got confirmed actually working on your real machine. Cutting `kex` out of
+it entirely removes that whole unconfirmed chain from the button's job.
+
+**What changed — `speedtest_monitor.py`, `NmapWindow._launch_kali_kex`:**
+
+- The command is now exactly `wsl -d kali-linux` — no `--`, no `bash`, no
+  `kex` in any form. Still opens in its own new console window (unchanged
+  reasoning: Win-KeX's first run needs an interactive password prompt, so a
+  fresh window makes sense regardless of what runs in it). The long history
+  comment above `_nm_wsl_exe_path` was rewritten to summarize the four
+  earlier attempts plainly, ending with this one, rather than deleting that
+  history.
+- The error dialog text and the module-level comment block were both
+  updated to match — nothing left referencing `kex`, `bash -lic`, or any of
+  the earlier flag combinations.
+
+**Verified for real:** `speedtest_monitor.py` parses clean
+(`ast.parse`). Updated `test_nmap_gui.py`'s Kali-launcher check to assert
+the exact `subprocess.Popen` argument list is now
+`['<wsl.exe>', '-d', 'kali-linux']` — confirmed
+(`ALL NMAP GUI CHECKS OK`). Both `selftest.py` baselines (33 passed/0
+failed/3 skipped without a display; 35 passed/0 failed/1 skipped under
+`xvfb-run`) and the 13-page System Monitor regression
+(`test_all_pages.py`, `ALL PAGES OK`) all still pass.
+
+**NOT verified:** this sandbox has no WSL, so whether `wsl -d kali-linux`
+by itself opens a working shell for you hasn't been re-run here — though
+that part was never in question; it's the same bare command you said
+already works when you type it yourself. The open item is still whether
+Win-KeX (`kex`, typed by hand from that shell) gives you a working desktop
+now — no news on that either way yet.
+
+## CORRECTION: the real gap was interactive-shell sourcing, not a missing mode flag
+
+**What you provided:** the actual `kex --help` output, after I'd suggested
+running it as a troubleshooting step. It says plainly: `"Mode: [none] :
+Window Mode (default)"` and `"Command: [none] : Start Win-KeX server and
+launch Win-KeX client"`. That directly disproves what build `b-c6e3c79a`'s
+changelog entry claimed — that bare `kex` needs an explicit mode flag to
+do anything. It doesn't; window mode is already the default, so `kex`
+alone should behave the same as `kex --win`. That guess was wrong, and
+this entry says so plainly rather than quietly overwriting it.
+
+**Revised diagnosis:** you'd already told me typing `wsl -d kali-linux`
+then bare `kex` by hand works. The one difference between that and any
+script-driven `bash -lc "kex ..."` invocation that survives after fixing
+the login-shell environment (build `b-c4249a31`) is **interactive vs
+non-interactive**: `bash -l` (login) sources `/etc/profile` and
+`~/.profile` either way, but bash only sources `~/.bashrc` for
+**interactive** shells. If Kali's WSL/WSLg setup does anything relevant in
+`~/.bashrc` specifically (rather than `~/.profile`), a login-but-not-
+interactive `bash -lc` would still miss it — which would produce exactly
+"pops up and closes immediately," same symptom, different cause than
+first assumed.
+
+**What changed — `speedtest_monitor.py`, `NmapWindow._launch_kali_kex`:**
+
+- Command is now `wsl -d kali-linux -- bash -lic "kex -s"` — `-i` added
+  alongside the existing `-l`, so the shell is both login AND interactive,
+  as close as a non-interactive script invocation can get to "a human
+  typed this at a real prompt." Dropped the `--win` from the previous
+  build since it was only ever redundant with the default, not wrong to
+  include, but there's no reason to keep an unnecessary flag once its
+  original justification turned out to be incorrect; kept `-s` (sound),
+  which is straight from Kali's own documented `kex -s` example. Comments
+  and the error-dialog text updated, including an honest note that the
+  mode-flag theory was wrong.
+
+**Verified for real:** updated `test_nmap_gui.py`'s Kali-launcher check to
+assert the exact `subprocess.Popen` argument list is now
+`['<wsl.exe>', '-d', 'kali-linux', '--', 'bash', '-lic', 'kex -s']` —
+confirmed. Both `selftest.py` baselines, the 13-page System Monitor
+regression, and the rest of `test_nmap_gui.py` are all still green.
+
+**NOT verified — same limitation as the last two entries, worth repeating
+plainly given the previous fix turned out to be wrong:** this sandbox has
+no WSL/WSLg/Win-KeX, so none of these `kex` invocation changes have been
+run against a real desktop. This one is grounded in the actual `kex --help`
+output you provided rather than another guess, but "grounded in real docs"
+and "confirmed working" are not the same thing — this needs a real test on
+your machine before treating it as done. If it still doesn't work, the
+next most useful thing to check is `kex --status` (or `--verbose`) run the
+same two ways — interactively vs via this exact `bash -lic` form — to see
+what actually differs between them on your machine, rather than guessing
+again from here.
+
+## CRITICAL FIX: "Kali Desktop" button opened and closed a console with no desktop
+
+**What you reported:** "yes that error has gone still doesnt launch a cli
+pops up and closes straight away." The Xfce/Wayland crash from #44 was
+confirmed fixed, but the button still didn't produce a desktop — just a
+console flashing open and closed.
+
+**Root cause:** bare `kex` (no mode flag) doesn't start a session by
+itself. Per Kali's own Win-KeX documentation
+(https://www.kali.org/docs/wsl/win-kex/), you combine `kex` with a mode
+flag — `--win` (its own window), `--sl` (seamless, integrated into
+Windows), or `--esm` (RDP-based) — to actually launch a desktop; the docs'
+own example for launching non-interactively *from Windows* (a shortcut —
+exactly this button's situation) is `wsl -d kali-linux kex --win -s`.
+Without a mode flag, `kex` has nothing to do and returns immediately,
+which is exactly "pops up and closes straight away": the launching
+console had nothing left to stay open for.
+
+**What changed — `speedtest_monitor.py`, `NmapWindow._launch_kali_kex`:**
+
+- The command is now `wsl -d kali-linux -- bash -lc "kex --win -s"` —
+  keeps the `bash -lc` login-shell fix from build `b-c4249a31` (still
+  needed; that fixed a real, separately-confirmed problem) and adds
+  Kali's own documented `--win -s` flags on top: `--win` opens the Kali
+  desktop in its own window (not seamless-mode app integration — you'd
+  asked to drop `--sl -s`'s seamless mode back in build `b-6e2b823c`, and
+  `--win` is the closest match to "just give me a normal desktop
+  window"), `-s` enables sound, same as before. Comments and the
+  error-dialog text updated to match.
+
+**Verified for real:** updated `test_nmap_gui.py`'s Kali-launcher check to
+assert the exact `subprocess.Popen` argument list is now
+`['<wsl.exe>', '-d', 'kali-linux', '--', 'bash', '-lc', 'kex --win -s']` —
+confirmed. Both `selftest.py` baselines, the 13-page System Monitor
+regression, and the rest of `test_nmap_gui.py` are all still green.
+
+**NOT verified — needs your real machine, same limitation as the last two
+entries:** whether Win-KeX's windowed desktop actually appears now. This
+sandbox has no WSL/WSLg/Win-KeX to launch a real desktop against, so this
+fix follows Kali's own documented recipe for exactly this scenario rather
+than another guess, but it hasn't been run against your actual Kali
+install. If it still doesn't come up, the next thing worth checking on
+your end is `kex --help` / `man kex` run directly inside an interactive
+`wsl -d kali-linux` session, to see what Win-KeX itself reports.
+
+## CRITICAL FIX: "Kali Desktop" button crashed Xfce; typing it by hand worked
+
+**What you reported:** screenshots showing Win-KeX's Xfce session failing
+partway through startup ("Xfce Notify Daemon: Unable to start notification
+daemon — Your Wayland compositor does not support required protocol
+wlr-layer-shell") when launched via the button, with: "if i type wsl -d
+kali-linux and then type kex it works the button throws the attached
+screenshot." A real bug report with the exact symptom, not a guess.
+
+**Root cause:** `wsl -d <distro> -- <command>` and typing `wsl -d <distro>`
+interactively then typing a command at the resulting prompt are NOT the
+same thing. The interactive path gives you a real **login shell**, which
+sources `.profile`/`.bashrc` — including whatever WSLg sets up there
+(`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, the session's dbus address, and
+similar). `wsl -d <distro> -- kex` runs `kex` directly, WITHOUT a login
+shell, so none of that gets sourced — `kex` starts Xfce with a bare
+environment, and Xfce's own components (like the notification daemon
+trying to talk to a Wayland compositor that was never properly wired up)
+fail partway through instead of a desktop appearing. This matches
+Microsoft's own documented behavior difference between an interactive WSL
+session and `wsl -- <command>`, and matches exactly what you reported:
+typing it in two real interactive steps works (real login shell both
+times), the button's one-shot non-interactive form didn't (no login
+shell, environment missing).
+
+**What changed — `speedtest_monitor.py`, `NmapWindow._launch_kali_kex`:**
+
+- The command is now `wsl -d kali-linux -- bash -lc kex` — `bash -lc`
+  forces bash to run as a **login shell** (`-l`) executing `kex` (`-c`),
+  which sources the same `.profile`/`.bashrc` chain an interactive session
+  gets for free. Comments and the error-dialog text updated to match.
+  Nothing else about the button changed (still its own new console
+  window, since Win-KeX's first-ever run on a machine needs to prompt
+  interactively for a Kex password).
+
+**Verified for real:** updated `test_nmap_gui.py`'s Kali-launcher check
+(the one that mocks the Windows branch and captures the real
+`subprocess.Popen` call) to assert the exact argument list is now
+`['<wsl.exe>', '-d', 'kali-linux', '--', 'bash', '-lc', 'kex']` —
+confirmed. Both `selftest.py` baselines, the 13-page System Monitor
+regression, and the rest of `test_nmap_gui.py` are all still green.
+
+**NOT verified — needs your real machine, same as before:** whether
+Win-KeX's Xfce session now actually comes up cleanly with the login-shell
+environment in place. This sandbox has no WSL/WSLg/Wayland to reproduce
+the original failure against, so this fix is based on the documented WSL
+login-shell-vs-command behavior difference and matches your report
+exactly, but hasn't been re-run against the real error you hit.
+
+## Changed: "Kali Desktop" button — `kex` instead of `kex --sl -s`
+
+**What you asked for:** "make the kali desktop button run wsl -d
+kali-linux and then kex." Dropped `--sl -s` — Win-KeX now launches in its
+normal windowed-desktop mode instead of seamless mode with sound.
+
+**What changed — `speedtest_monitor.py`, `NmapWindow._launch_kali_kex`:**
+
+- The command built and launched is now exactly
+  `wsl -d kali-linux -- kex` (previously
+  `wsl -d kali-linux -- kex --sl -s`) — same collapse-two-steps-into-one
+  reasoning as before (a button can't type a second command into an
+  interactive shell for itself), same new-console-window launch, same
+  error message on failure, just the two dropped flags. Comments and the
+  error-dialog text updated to match; nothing else about the button
+  changed.
+
+**Verified for real:** extended `test_nmap_gui.py`'s Kali-launcher check —
+it already called the real, unmodified `_launch_kali_kex()` on the
+non-Windows branch; added a second real call with `sys.platform` and
+`_nm_wsl_exe_path()` mocked to simulate Windows and `subprocess.Popen`
+mocked to capture the call, asserting the exact list of arguments built is
+now `['<wsl.exe path>', '-d', 'kali-linux', '--', 'kex']` — confirmed, not
+assumed. Both `selftest.py` baselines, the 13-page System Monitor
+regression, and the rest of `test_nmap_gui.py` (scan run/stop, AI
+craft/recommend, Report generation, singleton guard) are all still green,
+unchanged by this edit.
+
+## New: Nmap GUI "Report" button
+
+**What you asked for:** "add a report button to nmap gui."
+
+**What changed — `speedtest_monitor.py`, `NmapWindow` class:**
+
+- New **📄 Report** button in the toolbar, next to "Kali Desktop
+  (Win-KeX)". Disabled until a scan has produced output, same as
+  "Recommend Next Steps" (both enable together in `_finish_scan`).
+- Clicking it asks where to save (`filedialog.asksaveasfilename`,
+  defaulting to `nmap_scan_<target>_<timestamp>.html`), then builds a
+  self-contained HTML report in a background thread and writes it to
+  disk: target, exact command run, the full scan console output, the AI's
+  "Recommend Next Steps" answer if one was generated for that scan (with
+  a note explaining it's missing if not), and the same "only scan systems
+  you own or are authorized to test" line baked into the report itself,
+  not just shown in the app. Opens the saved file afterwards
+  (`os.startfile` / `open` / `xdg-open` depending on platform) and tells
+  you where it landed.
+- This deliberately reuses the exact pattern the Wireshark AI panel's
+  existing "Generate Report" button already uses elsewhere in this app
+  (self-contained styled HTML, "print to PDF from your browser" — that
+  button is labelled "Generate Report" but has only ever produced HTML,
+  not a real PDF) rather than inventing a new report format or pulling in
+  a PDF library just for this one button. Re-styled with a blue/cyan
+  accent instead of that panel's violet, to read as "this is the Pen Test
+  report" rather than "this is Wireshark's."
+- `_ai_recommend()` now stashes its answer in `self._last_recommendation`
+  so the Report button can include it; `_start_scan()` clears that
+  (along with resetting the Report/Recommend buttons to disabled) at the
+  start of every new scan, so a report can't accidentally show a
+  recommendation left over from a *previous* scan against a different
+  target.
+
+**Verified for real, in this sandbox:** extended the same real-`mainloop()`
+test from the previous entry (`test_nmap_gui.py`) with a new step that
+drives the Report button through the actual UI — mocked only the save-file
+dialog (would otherwise block on real user input) and the "Report Saved"
+info dialog (would otherwise block the mainloop), left everything else
+real: ran an actual scan (`/bin/bash -c 'echo ...; sleep 5'`, stopped
+mid-flight, so there's real captured output before the stop), ran a real
+AI recommendation through the mocked-AI-response path from the previous
+entry, clicked Report, and then actually opened the resulting file from
+disk and asserted on its contents — the real target, the real console
+output, the real stored AI recommendation text, and the authorization
+line, all genuinely present in the written HTML, not just "no exception
+was thrown." Also confirmed exactly one "Report Saved" dialog fired and
+zero error dialogs did. Both `selftest.py` baselines and the 13-page
+System Monitor regression test are still green, unchanged from before this
+change.
+
+**NOT verified — needs your real Windows machine:** what the report looks
+like opened in an actual Windows browser, and whether "File → Print → Save
+as PDF" produces something you're happy with — this sandbox only confirmed
+the HTML file is written correctly and contains the right content, not how
+it renders.
+
+## New: Nmap scanner GUI with an AI assistant — "Pen Test" now opens this
+
+**What you asked for:** "create a gui for nmap in the style of this app
+with an ai box that will specifically craft nmap scans and recommend next
+steps. then make the pen test button open that." This is step 2 of the
+two-phase plan from earlier ("first install WSL + Kali, then develop guis
+to run certain commands") — the first GUI panel.
+
+**What changed — `speedtest_monitor.py`, new `NmapWindow` class + helpers:**
+
+- `_nm_find_nmap_exe()` — locates `nmap.exe`: PATH first (`shutil.which`),
+  then `%PROGRAMFILES%\Nmap\nmap.exe` / `%ProgramFiles(x86)%\Nmap\nmap.exe`
+  / `%ProgramW6432%\Nmap\nmap.exe` on Windows, the usual Homebrew/system
+  paths on macOS and Linux. Only finds it — `installer.nsi` is what
+  actually installs it (see below).
+- `NmapWindow` — a new Toplevel, styled with the app's own header helper
+  (`_make_header`) and colour scheme, opened by the "Pen Test" button
+  (`ModernWindow._open_pen_test`, singleton-guarded like the other window
+  launches so repeat clicks focus the existing window instead of stacking
+  new ones — same discipline as the multiprocessing/duplicate-instances
+  fix earlier this session):
+  - **Target** field, **Profile** dropdown (ping sweep / quick / standard
+    OS+service / service+script / full port / UDP top-ports), and an
+    editable **Args** field the profile fills in — Start Scan runs
+    `[nmap] + shlex.split(args) + [target]` directly (no shell string
+    concatenation), with a live "will run: ..." preview line above the
+    console so what's about to execute is never a surprise.
+  - **Start/Stop** run the scan as a real subprocess, streaming
+    stdout+stderr line-by-line into a live console (the same
+    Popen(stdout=PIPE) + background-thread + `root.after(0, ...)` pattern
+    already used for tshark capture elsewhere in the app). Stop calls
+    `proc.terminate()`.
+  - If `nmap.exe` isn't found, Start Scan is disabled and an inline notice
+    explains why, with a **Re-check** button (in case Nmap gets installed
+    after the window was already open) rather than making you close and
+    reopen it.
+  - A static, always-visible reminder: "Only scan hosts and networks you
+    own or have explicit permission to test." Not a blocking dialog —
+    scanning isn't a one-shot destructive action the way, say, deleting a
+    file is — just an honest label, the same tone as the rest of the app's
+    warnings.
+  - **"Kali Desktop (Win-KeX)" button** — the exact `wsl -d kali-linux --
+    kex --sl -s` launch that used to be the whole of the "Pen Test" button
+    (build `b-5ecee4c5`, above) is still one click away here, unchanged,
+    as `NmapWindow._launch_kali_kex`. Nothing that was already verified
+    working got dropped when the button's primary action changed.
+  - **AI Assistant panel** (violet accent, matching the existing Wireshark
+    "AI Capture Analysis" panel's look, so "this box talks to the AI"
+    reads the same way across the app): reuses the app's existing
+    module-level `_nm_ai_complete()` — the same provider-agnostic
+    function the Wireshark AI panel and honeypot AI summary already call,
+    local Ollama by default (no API key, nothing leaves the machine),
+    Anthropic as an opt-in alternative if you've set that up elsewhere in
+    the app.
+    - **Craft Scan** — describe what you want in plain English; the AI is
+      prompted to return *only* nmap flags (never the word `nmap`, never
+      the target, never markdown), which get parsed and dropped straight
+      into the Args field. It never runs on its own — you still have to
+      click Start Scan yourself.
+    - **Recommend Next Steps** — enabled once a scan has produced output;
+      sends the command + output to the AI and shows its recommendations
+      in the same response panel.
+    - Both AI prompts (`_nm_ai_craft_nmap_args`, `_nm_ai_recommend_next_steps`)
+      explicitly tell the model to stay defensive/informational — standard
+      reconnaissance flags only, no flags meant to disrupt or damage a
+      target when crafting a scan; hardening/investigation advice only, no
+      exploit code or attack instructions when recommending next steps.
+      That's on top of the on-screen reminder, not instead of it.
+
+**What changed — `installer.nsi`:**
+
+- New `!define NMAP_URL` pointing at nmap.org's official Windows
+  self-installer (`nmap-7.991-setup.exe` — nmap.org has no "latest" alias
+  URL, same situation as Npcap, so this needs bumping by hand later; the
+  comment above it says so and records when it was last checked).
+- New `Section "Nmap (network scanner)" SecNmap`, placed right after the
+  Wireshark+Npcap section on purpose: Nmap's own Windows installer bundles
+  Npcap and offers to install it, but by this point in the install Npcap
+  is already present (from the section above, or pre-existing on the
+  machine), so Nmap's installer detects that and skips its own copy —
+  same download-via-generated-PowerShell-script-then-`ExecWait` pattern as
+  Wireshark/Npcap/Ollama above it, then `nmap_setup.exe /S` (Nmap's
+  installer is itself NSIS-based and documents `/S` for a fully silent
+  install — unlike Npcap's free build, it doesn't need an interactive
+  wizard). Checks `$PROGRAMFILES\Nmap\nmap.exe` and
+  `$PROGRAMFILES64\Nmap\nmap.exe` both before and after, so a machine that
+  already has Nmap skips the download entirely.
+- Component description text and the final "was NOT removed" uninstall
+  reminder both updated to mention Nmap.
+- `build_installer.bat`'s generated `README.txt` updated to describe the
+  new button and fix a stale line that flatly said "Nmap is NOT required
+  and is no longer installed" — leftover from before this feature existed,
+  and actively wrong now.
+
+**Verified for real, in this sandbox (Linux, no display, no nmap, no
+WSL, no Ollama — so every "not available" branch below is the actual
+code path running, not a guess about what it would do):**
+
+- `python3 -m ast` syntax check on the full file.
+- The standing 13-page `SystemMonitorWindow` regression test — untouched
+  by this change, still green (13/13 pages, no exceptions).
+- Both `selftest.py` baselines — plain (33 passed / 0 failed / 3 skipped)
+  and `xvfb-run` (35 passed / 0 failed / 1 skipped) — unchanged from
+  before this change, confirming nothing else broke.
+- A new dedicated test (`test_nmap_gui.py`), run under Xvfb with a real Tk
+  `mainloop()` (not just a manual `update()` poll loop — that matters,
+  because `NmapWindow`'s worker threads call `self.root.after(0, ...)` to
+  hand results back to the UI thread, and Python 3.12's tkinter refuses to
+  register a Tcl command from a background thread unless the main thread
+  is genuinely inside `mainloop()`; only a real mainloop lets that handoff
+  actually run instead of raising "main thread is not in main loop"):
+  - `_nm_find_nmap_exe()` really called on this box → correctly returns
+    `None` (no nmap here).
+  - `_nm_ai_craft_nmap_args()` / `_nm_ai_recommend_next_steps()` really
+    called with no Ollama running → both return the genuine "Ollama is not
+    installed..." error text end-to-end, not a mock.
+  - The craft-parser's "strip `nmap` and the target from the AI's answer"
+    logic, checked against a fake AI response.
+  - A real `NmapWindow` constructed against a real `SpeedTestMonitor()` —
+    no exception, nmap-not-found notice shown, Start Scan correctly
+    disabled, command preview updates live as target/args change.
+  - `_start_scan()` called directly with no nmap installed → safe no-op,
+    status message set, no crash.
+  - **A real scan run**: pointed `_nmap_exe` at `/bin/echo` (standing in
+    for nmap so the actual `Popen`/streaming/finish machinery runs for
+    real), started it, watched it stream its output into the console and
+    the Recommend button enable itself on completion.
+  - **A real Stop**: pointed `_nmap_exe` at `/bin/sleep 5`, confirmed it
+    was genuinely running, called Stop, confirmed the process actually
+    died and the status flipped to "stopped."
+  - **Craft Scan and Recommend Next Steps driven end-to-end through the
+    real UI** with `_nm_ai_complete` swapped for a canned response (since
+    there's no Ollama here to answer for real): confirmed the AI's answer
+    lands in the Args field / response panel exactly as the button
+    handlers are supposed to route it.
+  - `_launch_kali_kex()` — the exact unmodified method — called on the
+    non-Windows branch (this sandbox is Linux): confirmed exactly one
+    info dialog, no crash.
+  - `ModernWindow._open_pen_test` bound to a stub object and called twice:
+    confirmed the second call reuses the first `NmapWindow` instead of
+    creating a duplicate (the singleton guard actually works).
+- `installer.nsi` compiled for real with `makensis` (NSIS 3.09) after the
+  edit — genuinely produces `NetworkMonitorSetup.exe` with 10 sections
+  including the new `SecNmap`, zero errors. (One unrelated hiccup along
+  the way, noted honestly: `makensis` segfaults in this sandbox whenever a
+  filename containing an em dash — `Network Monitor — User Manual.html`,
+  already present in the project folder — sits in the working directory;
+  bisected it down to that one file by process of elimination, confirmed
+  it's a pre-existing environment/NSIS quirk completely unrelated to this
+  change by reproducing the same crash on a trivial 8-line script with
+  that file present and zero crashes without it, then compiled the real,
+  unmodified `installer.nsi` after moving that file aside. It's back in
+  place now; nothing about it or the real installer script was changed to
+  work around this.)
+- The nmap.org download URL/version (`nmap-7.991-setup.exe`) came from
+  fetching nmap.org's own download page just now, not from memory —
+  same "verify, don't guess" standard as the Npcap URL already pinned in
+  this file.
+
+**NOT verified — needs your real Windows machine, no way around that from
+this sandbox:**
+
+- Whether `nmap-7.991-setup.exe /S` actually installs silently and
+  produces a working `nmap.exe` at one of the checked paths — no Windows
+  box, no network access to nmap.org's actual binary from this sandbox
+  network policy, so the installer logic is right by inspection and
+  compiles, but the real download+install has not run.
+- Whether a real scan (against a real target, with real nmap) produces
+  output the console/AI-recommendation flow handles well end-to-end —
+  the subprocess plumbing was verified with `/bin/echo` and `/bin/sleep`
+  standing in for nmap, which proves the mechanism works, but not what
+  real nmap's actual output looks like flowing through it.
+- Whether the AI craft/recommend features produce genuinely good nmap
+  flags or genuinely useful recommendations from a real local Ollama
+  model — the AI plumbing (threading, error handling, response routing)
+  was verified for real; the *quality* of a real model's answers wasn't,
+  since no Ollama runs here.
+
+## New: "Pen Test" button — runs `wsl -d kali-linux` then `kex --sl -s`
+
+**What you asked for:** "add a button on the main page next to system
+called pen test that runs wsl -d kali-linux and then kex --sl -s." Exactly
+that — no extra scope, no new checks or wrappers beyond what makes those
+two steps work as one button.
+
+**What changed — `speedtest_monitor.py` only, `ModernWindow` class:**
+
+- Top bar now has `Dashboard | System | Pen Test`, in that order, styled
+  the same as the existing `System` button.
+- The two commands you described — "run `wsl -d kali-linux`, then inside
+  that run `kex --sl -s`" — are what typing them by hand at a prompt looks
+  like. A button can't type a second command into an interactive shell
+  for itself, so it's collapsed into wsl's own documented equivalent for
+  that: `wsl -d kali-linux -- kex --sl -s` (the `--` tells `wsl.exe`
+  "everything after this is the command to run inside the distro," so it
+  doesn't try to interpret `kex`'s own `--sl`/`-s` flags as its own).
+- New `_nm_wsl_exe_path()` finds `wsl.exe` via `Sysnative` first, same
+  reasoning as the fix just made to `installer.nsi` (a 32-bit process on
+  64-bit Windows gets `System32` silently redirected to `SysWOW64`, where
+  `wsl.exe` never exists) — falling back to `System32` then bare `wsl` on
+  PATH. This app's own exe is very likely 64-bit already (PyInstaller
+  normally matches its host Python's architecture), so this probably
+  wasn't going to bite here the way it did in the 32-bit NSIS installer —
+  but checking `Sysnative` first costs nothing and keeps it correct
+  either way, rather than assuming.
+- Launched in its own new console window (`CREATE_NEW_CONSOLE`), not
+  hidden in the background — Win-KeX's first run on a machine asks the
+  user to set a Kex password interactively, so hiding that prompt would
+  just make the button look like it did nothing.
+- Not Windows: shows a plain "Windows-only" message instead of trying
+  and failing silently.
+- Launch failure (wsl/Kali/kex not actually set up yet): a real error
+  dialog naming the exact command that failed and pointing back at the
+  installer's WSL + Kali component / the one-time `wsl -d kali-linux`
+  setup step from a couple of messages ago, not a silent no-op.
+
+**Verified (not assumed):**
+
+- Ran the real, unmodified `ModernWindow._open_pen_test` method itself
+  (not a rewritten copy) three ways: non-Windows (confirmed exactly one
+  info dialog, no crash), a simulated Windows launch (confirmed it builds
+  the exact command `['wsl', '-d', 'kali-linux', '--', 'kex', '--sl',
+  '-s']`, no error dialog), and a simulated launch failure (confirmed one
+  clear error dialog naming the real exception, no crash). Same
+  execute-it-for-real standard as the TMOG button fix earlier, not just a
+  read-through.
+- `_nm_wsl_exe_path()` run directly: falls back to bare `'wsl'` cleanly
+  on this Linux sandbox (no `C:\Windows` here), rather than raising.
+- Full 13-page/7-subview/5-benchmark-tab headless pass still clean, both
+  `selftest.py` baselines still 33/33+3-skip and 35/35+1-skip.
+- Build ID bumped `b-5cbb9230` → `b-5ecee4c5`.
+
+**Not verified / needs your machine:**
+
+- Whether `kex --sl -s` actually launches Win-KeX's seamless desktop as
+  expected once WSL/Kali/Kex are all genuinely set up — there's no WSL on
+  this Linux sandbox to run that against for real.
+
+## CRITICAL FIX: WSL detection reported "not found" on a machine that had it
+
+**What happened:** you ran the installer and got "Windows Subsystem for
+Linux isn't available on this PC (wsl.exe not found)" — but WSL was
+genuinely installed and working on that machine. You said so directly:
+"wsl is installed on this machine."
+
+**Root cause:** this NSIS installer compiles as a 32-bit executable (NSIS's
+default target — confirmed by `makensis`'s own build output, "writing
+output (x86-unicode)"), even though it only ever runs on 64-bit Windows
+(the installer already refuses to run on anything else). A 32-bit process
+on 64-bit Windows gets its `System32` folder access silently rewritten by
+Windows itself — WOW64 File System Redirection — to `SysWOW64` instead.
+`wsl.exe` is 64-bit-only, so it exists in the REAL `System32`, but never
+in `SysWOW64`. The check I wrote, `IfFileExists
+"$WINDIR\System32\wsl.exe"`, was silently looking in the wrong folder on
+every run, regardless of whether WSL was actually installed — it could
+never have found it. This is a well-known, well-documented Windows
+behavior for 32-bit installers, not something version- or machine-
+specific; every user would have hit this.
+
+**The fix:** `$WINDIR\Sysnative` is Microsoft's own documented alias that
+lets a 32-bit process reach the real (64-bit) `System32` instead of the
+WOW64-redirected view — both for file-existence checks and for actually
+launching a process. Changed every place this installer touches `wsl.exe`
+to go through `Sysnative` instead of `System32`:
+- The initial "is WSL available at all" check.
+- Both `wsl -l -q | findstr` presence checks (before and after install).
+- The `wsl --install -d kali-linux --no-launch` call itself — this one
+  matters even more than the checks: if it had kept using a bare `wsl`
+  command, cmd.exe's own PATH search from inside a 32-bit process would
+  likely have hit the exact same WOW64 redirection and failed to find the
+  real wsl.exe there either, so this wasn't just the detection message
+  that was broken.
+- Found and fixed the *identical* bug already sitting in the pre-existing
+  Npcap detection (`$WINDIR\System32\Npcap\wpcap.dll` /
+  `$WINDIR\System32\wpcap.dll`, from before this session) while I was
+  right there — same cause, same fix, so it doesn't surface as a second
+  surprise later. Its real-world effect was milder (Npcap's own installer
+  likely no-ops harmlessly if it detects itself already present, rather
+  than showing a hard error like the WSL path did), but it was still
+  wrong for the same reason.
+
+**Separately, and unrelated to this bug:** your build also failed on
+`[ERROR] LICENSE.txt not found`. I checked the two other synced project
+folders (`setup\` and `vanguard-flow-netsentinel\`) and found a real,
+identical `LICENSE.txt` already sitting in both (byte-identical, sha256
+`61af632a...`) — just missing from the `speedtestwithexport\` root folder
+you built from. Copied that same real file into the missing spot rather
+than generating new legal text — the build script's own comment is
+explicit that this file is "a real legal document," not something to
+auto-generate a placeholder over, and I'm not the right source for actual
+license text anyway. That fix is filesystem-only (not part of the
+delivered installer.nsi/build_installer.bat), so there's nothing to
+re-download for it — just re-run the build from that folder now that the
+file's there.
+
+**Verified (not assumed):**
+
+- Recompiled `installer.nsi` with `makensis` after the fix — clean, no
+  new warnings, same as before.
+- Confirmed the WOW64/Sysnative mechanism itself against Microsoft's own
+  documentation (not from memory) — this is a standard, named Windows
+  behavior with a standard, named fix, not a novel workaround.
+- Confirmed the two existing `LICENSE.txt` copies are byte-identical
+  before copying one over, rather than assuming.
+
+**Not verified / needs your machine:**
+
+- Still can't run `wsl.exe`/Kali itself from this Linux sandbox — this
+  fix addresses the specific, confirmed cause of the specific, confirmed
+  symptom you hit (the false "not found"), but the actual Kali install
+  behavior past that point is still only checked by compiling cleanly,
+  same caveat as before.
+
+## New: installer sets up WSL + Kali Linux (pen testing, step 1 of 2)
+
+**What you asked for:** "create pen testing suite inside the app." I
+asked whether to build a set of passive/active network scan checks
+directly into the app; you said no — "instead in the installer make it
+install and configure wsl, then install kali linux. after that works we
+will develop guis to run certain commands." So this is deliberately
+scoped to just that: get a real, working WSL + Kali install landing from
+the installer. No Python/app changes this time, and no GUI panels yet —
+those come once this part is confirmed working on your machine.
+
+**What changed — `installer.nsi` only:**
+
+- New section, `SecWSLKali`, right after the speed-test CLI section.
+  Checked by default (same as the other "Full" components), independently
+  deselectable on the Components page like everything else.
+- Checks `wsl.exe` exists first (Windows 10 2004+ / Windows 11 only) —
+  if not, tells you plainly instead of failing silently, and skips.
+- Checks whether `kali-linux` is already listed in `wsl -l -q` before
+  doing anything, so re-running the installer doesn't repeat the work.
+- Installs with `wsl --install -d kali-linux --no-launch` — this is
+  Kali's own officially documented WSL install command (kali.org/docs/
+  wsl/wsl-preparations), not a third-party trick, and it needs no
+  download URL of our own: WSL fetches the real Kali image itself
+  straight from Microsoft's distribution. `--no-launch` skips popping
+  open a console at the end, since this is a silent installer.
+- Re-checks `wsl -l -q` afterward. A brand-new WSL install (first time
+  the underlying Windows features get enabled) commonly needs one
+  restart before it's actually usable — that's a real Windows/WSL
+  constraint, not something an installer can skip past — so this checks
+  for that rather than assuming either outcome, and tells you clearly if
+  a restart is needed.
+- Either way (restart needed or not), tells you to run `wsl -d
+  kali-linux` once yourself afterward — Kali's own first-run step asks
+  you to create a UNIX username and password interactively, which needs
+  a person answering it, so this installer doesn't try to fake keystrokes
+  into that prompt. That's the one manual step left after the installer
+  finishes.
+- Uninstalling this app does **not** remove WSL or Kali — same
+  established convention as Wireshark/Npcap/Ollama/TMOG; the final
+  uninstall message now says so and gives the actual removal command
+  (`wsl --unregister kali-linux`).
+
+**Deliberately NOT done, per what you asked:**
+
+- No default-root / passwordless automation setup for Kali. That would
+  help a future "GUI runs commands inside Kali non-interactively" phase,
+  but you were explicit that's a separate, later step ("after that works
+  we will develop guis") — and the way to do it (forcing `/etc/wsl.conf`
+  from the Windows side through nested shell quoting I can't test here)
+  carries real risk of a subtle quoting bug I can't verify without a real
+  Windows/WSL run. Better to get the plain install right first and design
+  the automation-friendly piece properly once we're at that step, not
+  bolt it on now.
+- No in-app pen-testing UI of any kind — that's the explicitly deferred
+  step 2.
+
+**Verified (not assumed):**
+
+- Compiled `installer.nsi` with `makensis` (available on this Linux
+  sandbox) — clean, no new warnings, both with and without
+  `TMOGTaskManagerSetup.exe` present (unrelated to this change, checked
+  it didn't regress). This confirms the script is syntactically valid
+  and the NSIS string quoting is correct.
+- Checked the actual `wsl -l -q`/`findstr` and `wsl --install` commands
+  against Microsoft's and Kali's own current documentation rather than
+  from memory.
+
+**Not verified / needs your machine:**
+
+- This is a Windows-only, WSL-only mechanism — there is no way to
+  execute or observe `wsl.exe` from this Linux build sandbox. Compiling
+  cleanly proves the *script* is well-formed; it does NOT prove the
+  *install* behaves as described. In particular: whether `wsl --install
+  -d kali-linux --no-launch` actually behaves as documented on your
+  specific Windows build, whether the restart-detection logic correctly
+  distinguishes "needs restart" from "just failed," and whether `wsl.exe`
+  piping through `findstr` works cleanly (there's a known real quirk
+  where `wsl.exe` can emit UTF-16 output when piped, which could make
+  `findstr` miss a real match on some systems — worst case that just
+  causes a redundant, harmless re-install attempt, not a broken state,
+  but it's untested here either way).
+- Also unverified: build_installer.bat's new README/banner text edits —
+  I checked by hand that the added lines follow the same `^(...^)`
+  paren-escaping the existing lines already use inside that script's one
+  parenthesis-sensitive block (the one redirected into README.txt), since
+  literal unescaped parens there would break the block — but there's no
+  way to actually run a `.bat` file on this Linux sandbox to prove it.
+
+Say what actually happens when you run this and it'll get fixed against
+that, not against what the docs say it should do.
+
+## New: "System" button now launches the real Task Manager TMOG app
+
+**What you asked for:** after seeing #35/#36 in action ("its so slow its
+unusable... why the fuck does it open loads of instances") — "forget your
+one include the free one attached in the build and make the system
+button launch that," with the real `TMOGTaskManagerSetup.exe` attached.
+Straightforward: stop reimplementing Task Manager TMOG, bundle the actual
+app, launch that.
+
+**What changed:**
+
+- `installer.nsi` — new section, `SecTMOG`, right after the main app
+  section. Bundles `TMOGTaskManagerSetup.exe` directly into the compiled
+  installer (`File` instruction — embedded, not downloaded at install
+  time like Wireshark/Npcap/Ollama/librespeed-cli are; there's no stable
+  public silent-download URL for this one, and you gave me the exact file
+  to use). Guarded with `!if /FileExists "TMOGTaskManagerSetup.exe"` —
+  same pattern already used for the optional remote-client exe — so a
+  build without the file present still compiles cleanly and just skips
+  that section, rather than failing.
+- Confirmed by inspecting the file's own embedded version resource (not
+  guessed): it's an Inno Setup installer — `CompanyName` "Plummer's
+  Software LLC", `ProductName` "Task Manager TMOG". Installed silently
+  with Inno Setup's own documented command-line switches
+  (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-`), same family of flags
+  already used for Ollama elsewhere in this installer.
+- Critically, it's installed with `/DIR="$INSTDIR\TaskManagerTMOG"` — a
+  forced, fixed subfolder of this app's own install directory. That's
+  what lets `speedtest_monitor.py` find the real exe afterwards
+  deterministically, without needing to know or guess its filename: it
+  just lists that one folder.
+- `speedtest_monitor.py` — the "System" button (`ModernWindow._open_system_monitor`)
+  no longer opens `SystemMonitorWindow` (the from-scratch rebuild from
+  #33–#35). It now calls a new `_nm_find_tmog_exe()` that looks, in order:
+  1. `$INSTDIR\TaskManagerTMOG\` next to this app's own exe — the normal
+     case, since installer.nsi controls exactly where it lands. Picks the
+     first `*.exe` that isn't an Inno Setup uninstaller (`unins000.exe`).
+  2. Windows' own Uninstall registry (same technique the Installed Apps
+     page already uses) for a `DisplayName` mentioning both "task
+     manager" and "tmog" — covers "already had it installed separately."
+  3. A couple of common Inno Setup default install folders, keyed off its
+     real product name — last-resort, tried only after 1 and 2 come up
+     empty.
+  The result is cached after the first lookup (hit or miss) so the button
+  doesn't re-scan the registry/filesystem every click. If genuinely not
+  found anywhere, it shows a real error dialog explaining why and what to
+  do, instead of silently doing nothing or falling back to the old
+  built-in window.
+- `SystemMonitorWindow` (the whole 13-page rebuild from #33–#35) is still
+  in the file, just no longer called from anywhere — left in place rather
+  than deleting ~3,000 lines while you're already dealing with a broken
+  build; say if you want it actually removed.
+- `build_installer.bat` now checks for `TMOGTaskManagerSetup.exe` in the
+  project folder (warns and continues if missing, same as its existing
+  `speedtest.exe` check) and the completion banner/README mention it.
+- Uninstalling this app does **not** remove Task Manager TMOG — same
+  established convention as Wireshark/Npcap/Ollama, which also aren't
+  removed on uninstall; the final uninstall message now says so.
+
+**Verified (not assumed):**
+
+- Confirmed the uploaded file is a genuine PE32 Windows installer and
+  identified it as Inno Setup 6.7.0 by inspecting its actual embedded
+  version resource strings (`CompanyName`/`ProductName`), not by
+  assuming.
+- Compiled `installer.nsi` with `makensis` (it's available on this Linux
+  sandbox) both with and without `TMOGTaskManagerSetup.exe` present —
+  both compile cleanly with no new warnings, and with the file present
+  the compiled installer's embedded data grew by ~6.87 MB, confirming
+  it's actually bundled in, not just referenced.
+- Ran the real `_nm_find_tmog_exe()` function (not a stand-in) against a
+  constructed fake `TaskManagerTMOG\` folder containing both a real exe
+  and an `unins000.exe` — confirmed it returns the real exe and correctly
+  skips the uninstaller.
+- Ran the real, unmodified `ModernWindow._open_system_monitor` method
+  itself (not a rewritten copy) end to end, twice: once with nothing
+  found (confirmed it shows exactly one error dialog, doesn't crash or
+  silently no-op) and once with a fake exe pre-cached (confirmed it calls
+  the launch step with that exact path, no error dialog). This is the
+  same button code path that broke last time — this time it was actually
+  executed, not just read.
+- Full 13-page/7-subview/5-benchmark-tab headless pass still clean, both
+  `selftest.py` baselines still 33/33+3-skip and 35/35+1-skip.
+
+**Not done / your call:**
+
+- Can't test the real `TMOGTaskManagerSetup.exe` actually installing and
+  running on real Windows from this Linux sandbox — the NSIS *script*
+  compiles correctly and the Python *discovery* logic is verified against
+  a realistic fake of what it'll produce, but the actual install (does
+  `/DIR=` land where expected, does the app's real exe filename get found
+  by the "first non-unins .exe" rule) needs a real run on your machine.
+  If the installed folder ever contains more than one non-uninstaller
+  exe, rule 1 above picks whichever sorts first alphabetically — tell me
+  if that's wrong and I'll pin the exact filename instead once you can
+  tell me what it actually is on your machine.
+- Left `SystemMonitorWindow` in the file rather than deleting it (see
+  above) — that's ~3,000 lines of dead code now; say if you want it gone.
+
+## CRITICAL FIX: CPU benchmark was spawning a full new app instance per CPU core
+
+**What happened:** #35's CPU benchmark tab used `multiprocessing.Pool` to
+measure multi-core throughput. On Windows, `multiprocessing` has no
+`fork()` to fall back on, so each pool worker is started by re-launching
+the executable itself and telling it "act as a worker." A frozen
+PyInstaller exe needs one extra line — `multiprocessing.freeze_support()`
+— to make that re-launch recognize itself as a worker. Without it, the
+re-launched exe has no way to tell it isn't a normal launch, so it falls
+straight through to `if __name__ == "__main__":` and runs the *entire
+app* again — new `SpeedTestMonitor`, every background thread, a whole new
+main window — once per CPU core. On any modern CPU that's not "a few
+extra windows," it's a double-digit pile of full app instances all
+fighting over the same ports, files, and CPU, the instant that one button
+is clicked. That's exactly the freeze / flood of windows you hit, and it
+would keep happening every time that tab ran, not just once.
+
+**The fix:** added `multiprocessing.freeze_support()` as the literal
+first line inside `if __name__ == "__main__":`, before anything else
+runs. This is the standard, documented fix for this exact situation (see
+PyInstaller's own "Common Issues" page, multiprocessing section) — not a
+new guess, the correct fix for the mechanism that caused it. No other
+code in the file uses `multiprocessing` anywhere, so this was the one
+place it could happen.
+
+**Verified:** syntax check clean; re-ran the full 13-page/7-subview/
+5-benchmark-tab headless pass with zero exceptions; both `selftest.py`
+variants still 33/33+3-skip and 35/35+1-skip. I can't reproduce the
+actual runaway-spawn on this Linux sandbox (Linux's `fork()` doesn't have
+this failure mode at all, which is exactly how it slipped through the
+first time) — this needs a real run on your Windows machine to be 100%
+certain, but `freeze_support()` in this exact position is the complete,
+correct fix per Python's own multiprocessing docs, not a partial patch.
+
+**On "half the functionality doesn't work":** I don't yet know which
+specific pages/features you mean — tell me which ones and I'll go
+straight at those rather than re-guessing across all 13. One thing
+already flagged honestly in #35: the Windows-only code (Startup apps,
+Installed Apps, Services, App-history admin check, the Apps/Background
+split on Processes) could only be construction-tested on this Linux
+sandbox, never run for real, so if it's one of those, that's the likely
+area — say which one and I'll fix it directly instead of shipping another
+guess.
+
+## New: full 13-page System Monitor rebuild, matching the real TMOG app + pynvml bundled into the installer
+
+**What you asked for:** you sent an actual screen recording of your own
+machine running the real "Task Manager OG" app (not the YouTube demo I'd
+watched for #33/#34) and said "its good but i want it to look exactly
+like the video." I pulled frames from it and found it's a much bigger app
+than the 3-page version already built — a 13-entry sidebar, richer
+Summary/Performance/Processes pages, and 8 pages that weren't built at
+all. I asked how far to take the match; you said "number 3" (build every
+page as a genuinely working feature, no fake "Upgrade to Pro" paywall
+since this app has no licence tiers) "and also bundle and install pynvlm
+as part of the install process."
+
+**Visual rebuild (Summary / Performance / Processes), pixel-checked
+against your recording:**
+
+- Default colour scheme changed from the earlier navy-blue guess to the
+  real app's dark charcoal/graphite (`#1b1b1b`/`#242424`/`#2c2c2c`),
+  sampled directly from video frames.
+- Per-metric accent colours matched: CPU green, Clock red, Temp orange,
+  GPU cyan, Memory purple, Disk green, Network blue, CPU Power amber.
+- Summary page's CPU/Clock/Temp/GPU meters are now vertical segmented LED
+  bars (the earlier build had horizontal ones); the CPU meter specifically
+  uses a green→yellow→orange→red "spectrum" gradient where the colour of
+  each segment is fixed by its position, not the current reading — only
+  how many light up depends on the value, matching the real app.
+- New Memory row (separate vertical meter + its own trend chart) that
+  didn't exist before.
+- Top-processes list: added a GPU column, switched the existing row
+  heat-tint from CPU% to memory-based (confirmed by pixel-comparing rows
+  in your video — a process near 0% CPU but high memory still tints,
+  System Idle Process at 26.8% CPU with near-zero memory doesn't).
+- Bottom tiles cut from 7 down to the real app's 4 (Disks / Network / CPU
+  Power / Thermals).
+- Performance page's left nav now shows a live mini-sparkline + current
+  value under each of the 7 metrics (matches the video), not just a plain
+  label list.
+- Processes page: added Apps/Background grouping (via real Win32 window
+  enumeration — a process counts as an "App" if it owns a visible top-level
+  window, same signal Windows' own Task Manager uses) and Disk read/write/
+  Command columns, kept out of the always-on 500ms refresh and only
+  sampled for the Processes page's own visible rows so it doesn't add
+  per-cycle cost to Summary.
+
+**8 new pages, all real features (not stubs, not a paywall):**
+
+- **System Info** — static hardware/OS facts, fetched once and cached
+  rather than re-queried every refresh.
+- **App history** — per-app CPU-time/network totals where the OS actually
+  tracks them; honestly blank where it doesn't rather than inventing a
+  number.
+- **Startup apps** — reads the real `StartupApproved\Run` registry values
+  (the same binary format Windows' own Task Manager writes:
+  `\x02` = enabled, `\x03` = disabled) so toggling an app here matches
+  what Task Manager itself would show, plus a real enable/disable that
+  writes that same format back.
+- **Users** — real logged-on sessions.
+- **Services** — `psutil.win_service_iter()` for the full live list, with
+  real `sc start`/`sc stop` control, not a mock list.
+- **Power & Freq** *("Pro" in the real app — built as a real feature
+  here, no paywall)* — live frequency/power readings with real running
+  min/max tracking (`_powerfreq_minmax`).
+- **Connections** *("Pro")* — real active connections table. The video's
+  3D globe couldn't be matched honestly (this app has no geolocation data
+  source and I wasn't going to fake coordinates), so this is a labelled,
+  simplified 2D radial "hub" diagram instead — real remote IPs, just not
+  plotted on a real map. Said plainly in-app, not hidden.
+- **Installed Apps** *("Pro")* — enumerates the real Windows
+  `...\Uninstall` registry keys (HKLM, HKLM\WOW6432Node, HKCU) — the
+  standard technique "Programs and Features" itself uses.
+- **Disk Space** *("Pro")* — real scanned folder sizes rendered as a
+  squarified treemap (the standard deterministic treemap algorithm,
+  implemented from scratch). The video's page uses physics-based
+  circle-packing ("balls"); treemap was a deliberate, documented
+  simplification, not a shortcut on the data itself.
+- **Benchmarks** *("Pro")* — 5 tabs, matching the video's count:
+  - *Internet* reuses this app's own existing speed-test engine — the
+    most faithful of the five, since it's literally the same measurement
+    the main dashboard already takes.
+  - *CPU* is a real trial-division-primality busy-loop
+    (`_nm_cpu_bench_ops`), run single-core and via
+    `multiprocessing.Pool` across all cores, timed for real Mops/sec.
+  - *Disk* does real 256×1MB `os.urandom()` writes with `os.fsync`, then
+    a timed read-back, to a temp file.
+  - *GPU* — this app bundles no CUDA/OpenCL/DirectX compute binding, so
+    it genuinely cannot generate a synthetic GPU compute load the way the
+    CPU/Disk tabs do. Rather than fake a score, this tab is labelled as
+    what it actually is: a live NVML instrument reading (utilization,
+    memory, power, temperature) sampled on demand, not a benchmark.
+  - *TMOG Score* combines the above into one number, weighted by
+    heuristic divisors I chose myself (not something you specified) —
+    say if you want different weighting.
+
+**Two bugs that would have crashed on first use, caught before shipping:**
+
+- `_powerfreq_minmax` was read via `.setdefault()` but never initialized
+  in `__init__` — first visit to Power & Freq would have raised
+  `AttributeError`. Fixed by adding the initializer.
+- `_nm_cpu_bench_ops` was called (including via `multiprocessing.Pool.map`,
+  so it has to be a plain module-level function to stay picklable) but was
+  never actually written — clicking "Start" on the CPU benchmark would
+  have raised `NameError`. Written and tested for real.
+
+**One more, found only by actually running the code, not reading it:**
+
+- The Summary page's CPU/Clock/Temp/GPU meter refresh was calling
+  `_draw_led_bar(self._meter_bar_refs[key], ...)` — but
+  `_meter_bar_refs[key]` is a `(canvas, color, is_spectrum)` tuple, not a
+  canvas. This would have crashed the very first 500ms refresh tick after
+  opening the Summary page (i.e., immediately, every time). Fixed by
+  routing through `_draw_meter()`, the helper that already existed to
+  unpack that tuple and pick the right vertical-bar routine. Also gave
+  the Clock meter a real fill percentage (current freq ÷ max freq from
+  `psutil.cpu_freq()`) instead of always drawing empty, which is what the
+  pre-fix code was doing.
+- `import math` was missing at module scope even though the new
+  Connections radial diagram and the Benchmarks gauge dial both call
+  `math.cos`/`math.sin`/`math.radians` unqualified — added.
+
+**pynvml, bundled into the installer build (your second, separate ask):**
+
+`build_installer.bat`'s dependency step now also runs
+`pip install nvidia-ml-py --quiet` (that's the PyPI package; it's
+imported in code as `pynvml`) before the PyInstaller build. It's pure
+Python with no compiled extension, so PyInstaller's own import scan of
+`speedtest_monitor.py` picks it up and freezes it into
+`SpeedtestMonitor.exe` automatically — nothing else needed wiring up, and
+end users never `pip install` anything themselves. On a machine with no
+NVIDIA GPU/driver it's a safe no-op — the app already catches that
+import/NVML failure itself and shows "Unavailable" with the real reason,
+never a fabricated reading. Note: this session's copy of the project
+doesn't include a PyInstaller `.spec` file (only `.bat`/`.nsi`), so I
+couldn't check it for an explicit hidden-imports list — if your real
+project's `.spec` has one and pynvml isn't in it, add
+`--hidden-import=pynvml` there too, though a plain top-level `import
+pynvml` statement (which is what this code has) is normally caught by
+PyInstaller's static scan without needing that.
+
+**Verified (not assumed):**
+
+- `python3 -c "import ast; ast.parse(...)"` clean after every edit.
+- Built a real `SystemMonitorWindow` under `xvfb-run` (Python 3.12, real
+  `psutil`/`matplotlib`/Tk, no mocks) and actually switched to all 13
+  sidebar pages, all 7 Performance sub-views, and all 5 Benchmark tabs —
+  including actually running the CPU benchmark to completion and taking a
+  live GPU sample — with zero exceptions. This is what caught the three
+  bugs above; none of this new code had been executed even once before
+  this pass.
+- `selftest.py` on plain Python 3.12: 33 passed / 0 failed / 3 skipped
+  (skips are the no-display desktop checks). Under `xvfb-run`: 35 passed /
+  0 failed / 1 skipped. Both match this session's established baseline —
+  `/guide` and every web route came back byte-identical, so nothing on
+  the web/mobile side leaked from this change.
+- Build ID bumped `b-4d3f3e7a` → `b-a1d07a24` (sha256 of the final file,
+  first 8 hex chars).
+
+**Not done / your call:**
+
+- This sandbox is Linux, so the Windows-only surfaces — `winreg` (Startup
+  apps, Installed Apps), `ctypes` Win32 window enumeration (Apps vs.
+  Background), `psutil.win_service_iter()` + `sc start`/`stop` (Services),
+  the `StartupApproved\Run` binary write — all run through the same
+  headless pass above and constructed without error (they no-op / return
+  empty on non-Windows, which is itself part of what got exercised), but
+  none of them have been exercised doing their *real* Windows-only work,
+  because this environment can't. Worth a real pass on your machine
+  before you'd call this fully proven.
+- Connections page's 2D radial hub (instead of the video's 3D globe) and
+  Disk Space's squarified treemap (instead of circle-packing "balls") are
+  deliberate simplifications, not full matches — said plainly above, not
+  hidden.
+- TMOG Score's weighting constants are my own heuristic, not something
+  you specified.
+- Didn't touch `installer.nsi` — it only packages the already-built exe
+  and handles runtime downloads (Wireshark/Npcap/Ollama/librespeed-cli);
+  it has no Python-dependency step of its own, so there was nothing in it
+  for pynvml to touch.
 
 ## New: System Monitor rebuilt into three real pages after watching the video
 

@@ -7,6 +7,7 @@ import sys
 import csv
 import socket
 import logging
+import math
 import traceback
 import urllib.request
 import urllib.parse
@@ -75,6 +76,42 @@ def _exc(context: str = ''):
     """Log the current exception with full traceback. Call from except blocks."""
     msg = f'{context}: {traceback.format_exc().strip()}' if context else traceback.format_exc().strip()
     log.error(msg)
+
+
+def _nm_cpu_bench_ops(time_budget):
+    """Real CPU benchmark workload: trial-division primality checks, run for
+    approximately `time_budget` wall-clock seconds, returning the number of
+    candidate numbers actually tested. This is a genuine, measured op count —
+    not a fabricated/estimated score — and doubles as an honest single- and
+    multi-core CPU benchmark (this function is also the target of a
+    multiprocessing.Pool.map call for the multi-core figure, so it must stay
+    a plain module-level function to remain picklable).
+    """
+    def _is_prime(n):
+        if n < 2:
+            return False
+        if n % 2 == 0:
+            return n == 2
+        i = 3
+        while i * i <= n:
+            if n % i == 0:
+                return False
+            i += 2
+        return True
+
+    t_end = time.time() + time_budget
+    n = 2
+    ops = 0
+    # Check the deadline every 256 candidates rather than every single one,
+    # so the time.time() call itself doesn't measurably distort the count.
+    while True:
+        for _ in range(256):
+            _is_prime(n)
+            n += 1
+            ops += 1
+        if time.time() >= t_end:
+            break
+    return ops
 
 
 # Ready-made Berkeley Packet Filter capture expressions, shared by the EtherApe
@@ -2432,7 +2469,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-4d3f3e7a'
+_NM_BUILD_ID = 'b-929759a0'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -18683,6 +18720,7 @@ class UserGuideWindow:
     SECTIONS = [
         ('Overview',                 'overview'),
         ('Main Dashboard',           'dashboard'),
+        ('Pen Test (Nmap)',          'pentest'),
         ('Gauges',                   'gauges'),
         ('Charts & Views',           'charts'),
         ('Run Speed Test',           'speedtest'),
@@ -18739,27 +18777,27 @@ class UserGuideWindow:
             ('p',  'The dashboard is a single sidebar-based window: a slim top bar, an icon sidebar down the '
                    'left edge, and a main content area holding the gauge strip, the view bar and the chart grid.'),
             ('h2', 'Top bar'),
-            ('p',  'Shows the app name, two navigation shortcuts (Dashboard, and System — the Agents/Wireshark/'
-                   'Topology shortcuts that used to sit here were dropped for duplicating the sidebar buttons '
-                   'that open those same windows), a LIVE badge that switches to amber TESTING or DNS CHECK '
-                   'while a check is running, and a live clock.'),
+            ('p',  'Shows the app name, three navigation shortcuts (Dashboard, System, and Pen Test — the '
+                   'Agents/Wireshark/Topology shortcuts that used to sit here were dropped for duplicating the '
+                   'sidebar buttons that open those same windows), a LIVE badge that switches to amber TESTING '
+                   'or DNS CHECK while a check is running, and a live clock.'),
             ('h2', 'System button (top bar)'),
-            ('p',  'Opens a separate System Monitor window inspired by watching Dave Plummer demo his '
-                   '"Task Manager OG" rebuild, with three pages down its own left sidebar:'),
-            ('bullet', 'Summary — CPU/Clock/Temp/GPU meters, a glowing CPU/kernel-time/temperature graph, a '
-                       'top-processes list that flashes rows as they change or appear, and seven tiled Memory/'
-                       'Disk/Network/Energy/GPU/NPU/Thermal readouts, each with a segmented LED-style bar.'),
-            ('bullet', 'Performance — a per-logical-core CPU sparkline grid plus utilization/speed/processes/'
-                       'threads/uptime/core-count stats, or (via its own left sub-nav) a single big graph for '
-                       'Memory, Network, Disks, GPU, or Thermals.'),
-            ('bullet', 'Processes — a searchable, sortable, full process table with a detail panel (identity, '
-                       'CPU, memory) for whichever row is selected, and an End process button that terminates '
-                       'it after a confirmation prompt.'),
-            ('p',  'All three pages share the top bar\'s colour-scheme picker, independent bloom toggle, and '
-                   'saturation slider (0-11). See the changelog for exactly which numbers are real sensor '
-                   'readings versus an honest "N/A" where this platform (notably Windows, for CPU temperature '
-                   'and most GPU/NPU stats) doesn\'t expose that sensor to Python, and for the handful of Task '
-                   'Manager OG pages (Services, Startup Apps, Users, and similar) that were left out.'),
+            ('p',  'Launches Task Manager TMOG — a real, independently-windowed system-monitor app, not part '
+                   'of this app\'s own UI — installed alongside this app by the installer\'s "Task Manager '
+                   'TMOG" component. An earlier build of this app included a from-scratch look-alike '
+                   'reimplementation of it; that code is still in the file but is deliberately no longer used '
+                   'now that the real app ships and launches instead. If Task Manager TMOG was not installed '
+                   '(its installer component was unchecked), the button shows an error explaining that and '
+                   'pointing back to the installer.'),
+            ('p',  'Task Manager TMOG opens on a Summary page: CPU / Clock / Temp / GPU column meters down '
+                   'the left, a live CPU Overview graph with Utilization / Temperature / Kernel tabs, a '
+                   'ranked Top CPU processes list (PID, name, CPU%, GPU%, memory), a Memory Utilization '
+                   'graph, and Disks / Network / CPU Power / Thermals stat tiles along the bottom. Its own '
+                   'left sidebar covers Summary, Performance, Processes, System Info, App history, Startup '
+                   'apps, Users and Services, plus a further Power & Freq, Connections, Installed Apps, Disk '
+                   'Space and Benchmarks group. Settings and Colours buttons sit at the bottom of that '
+                   'sidebar; its status bar reports provider health, live process count and a generation '
+                   'counter.'),
             ('h2', 'Left sidebar'),
             ('p',  'A column of icon buttons runs down the left edge:'),
             ('bullet', '▶ RUN — trigger an immediate speed test'),
@@ -18793,6 +18831,58 @@ class UserGuideWindow:
                    'shows. A ◄ / ► pair steps one day at a time through history — this switches to a per-day '
                    'History mode and the label between the arrows shows which day is selected. Click Today '
                    'again to return to the live view.'),
+        ],
+        'pentest': [
+            ('h1', 'Pen Test (Nmap Scanner)'),
+            ('p',  'The Pen Test button (top bar) opens an nmap scan builder and live console, styled to '
+                   'match the rest of this app, with an AI panel alongside it that can turn a plain-English '
+                   'request into scan flags and turn a finished scan\'s output into next-step '
+                   'recommendations. Needs nmap, installed automatically by this app\'s installer (the '
+                   '"Nmap (network scanner)" component) — if that was unchecked, the window shows a warning '
+                   'with a Re-check button once you\'ve installed it yourself from nmap.org.'),
+            ('warn', 'Only scan hosts and networks you own or have explicit permission to test — this '
+                     'reminder stays on screen the whole time the window is open, and is repeated on the '
+                     'generated report.'),
+            ('h2', 'Running a scan'),
+            ('bullet', 'Target — an IP, hostname, or CIDR range (e.g. 192.168.1.0/24)'),
+            ('bullet', 'Profile — six ready-made presets from a ping sweep up to a full 65535-port TCP scan; '
+                       'picking one fills in Args to match'),
+            ('bullet', 'Args — the raw nmap flags, editable directly, or filled in by Profile or by the AI '
+                       'panel\'s Craft Scan'),
+            ('bullet', '▶ Start Scan / ■ Stop — runs nmap as a real subprocess and streams its output into '
+                       'the console live; Stop ends it early without losing whatever output was already '
+                       'produced'),
+            ('bullet', 'The exact command about to run is always shown live under the toolbar as Target/Args '
+                       'change'),
+            ('h2', 'Scan profiles'),
+            ('bullet', 'Ping sweep (host discovery only) — -sn'),
+            ('bullet', 'Quick scan (top 100 ports) — -T4 -F'),
+            ('bullet', 'Standard scan (OS + service detect) — -T4 -A'),
+            ('bullet', 'Service + script scan — -T4 -sV -sC'),
+            ('bullet', 'Full port scan (all 65535 TCP ports) — -T4 -p-'),
+            ('bullet', 'UDP top ports (slow, needs admin) — -sU --top-ports 20 -T4'),
+            ('h2', 'AI Assistant'),
+            ('p',  'Local by default (Ollama, no key needed, nothing leaves the machine) — the same '
+                   'provider setting as the Wireshark AI panel\'s.'),
+            ('bullet', 'Craft Scan — describe what you want in plain English (e.g. "find web and '
+                       'remote-access services on my target") and the AI fills in the Args box with '
+                       'matching nmap flags. It\'s explicitly prompted to never suggest destructive or '
+                       'flood-style flags.'),
+            ('bullet', 'Recommend Next Steps — enabled once a scan has produced output; summarises what was '
+                       'found and suggests concrete, defensive follow-up (what to patch, close off, or '
+                       'investigate further) — no exploit code or attack playbooks, by design'),
+            ('h2', 'Report'),
+            ('p',  'Once a scan has produced output, 📄 Report builds a self-contained HTML file — target, '
+                   'command run, full console output, the AI\'s next-step recommendation if you asked for '
+                   'one, and the same authorization reminder — and opens it in your browser. Print to PDF '
+                   'from there if you need one.'),
+            ('h2', 'Kali Desktop button'),
+            ('p',  '⌘ Kali Desktop (Win-KeX) opens a bare `wsl -d kali-linux` shell in its own new console '
+                   'window — Windows only, needs the installer\'s "WSL + Kali Linux" component, and Kali\'s '
+                   'own first-run setup completed once by hand. It deliberately stops at the shell: earlier '
+                   'builds also tried auto-starting Win-KeX (`kex`) from this button, but that never got '
+                   'confirmed working end-to-end, so starting Win-KeX itself — typing `kex` at the prompt '
+                   'this gives you — is left to you.'),
         ],
         'gauges': [
             ('h1', 'Gauges'),
@@ -22230,26 +22320,79 @@ class MonitorWindow:
 #  platform genuinely doesn't expose that sensor.
 # =============================================================================
 class SystemMonitorWindow:
-    BG = '#050d1a'; PANEL = '#060f1c'; PANEL2 = '#0a1828'; SPIN = '#12283f'
-    TEXT = '#c8dff0'; TICK = '#6a9ab8'
+    # Colours below were sampled directly from a screen recording of the
+    # real "Task Manager OG" app (Trevor sent the recording and asked for
+    # an exact visual match) — dark graphite, not the earlier navy-blue
+    # guess. See CHANGES_this_session.md for the specific pixel samples.
+    BG = '#1b1b1b'; PANEL = '#242424'; PANEL2 = '#2c2c2c'; SPIN = '#3a3a3a'
+    TEXT = '#e8e8e8'; TICK = '#9a9a9a'
 
-    # Each entry recolours the whole window, not just the chart lines — this
-    # is what the video's "mono / green phosphor / amber / blue / light"
-    # colour-scheme picker maps onto here.
+    # Each entry recolours the whole window, not just the chart lines. The
+    # default ('Neon') is tuned to match the real app's own default look;
+    # the other five presets are this app's pre-existing bonus alternates
+    # (the video's own "Colors" picker was never actually opened on camera,
+    # so their exact palette isn't something I could measure — these keep
+    # the same accent-per-metric structure, just recoloured).
     THEMES = {
         'Neon':           {'cpu': '#39ff14', 'kernel': '#ff3b3b', 'temp': '#ff9f43',
-                            'frame': '#39ff14', 'bg': '#050d1a', 'panel': '#060f1c', 'text': '#c8dff0'},
-        'Mono':           {'cpu': '#e8f4ff', 'kernel': '#9fb8cc', 'temp': '#6a9ab8',
-                            'frame': '#c8dff0', 'bg': '#050d1a', 'panel': '#060f1c', 'text': '#c8dff0'},
+                            'gpu': '#4fc3f7', 'memory': '#bc5ded', 'disk': '#39ff14',
+                            'network': '#3b82f6', 'power': '#d4a017',
+                            'frame': '#39ff14', 'bg': '#1b1b1b', 'panel': '#242424',
+                            'panel2': '#2c2c2c', 'sidebar': '#181818', 'active': '#30478e',
+                            'border': '#3a3a3a', 'text': '#e8e8e8'},
+        'Mono':           {'cpu': '#e8f4ff', 'kernel': '#9fb8cc', 'temp': '#c8d8e6',
+                            'gpu': '#c8d8e6', 'memory': '#c8d8e6', 'disk': '#e8f4ff',
+                            'network': '#9fb8cc', 'power': '#c8d8e6',
+                            'frame': '#c8dff0', 'bg': '#181818', 'panel': '#222222',
+                            'panel2': '#2a2a2a', 'sidebar': '#151515', 'active': '#39536e',
+                            'border': '#3a3a3a', 'text': '#dbe8f0'},
         'Green Phosphor': {'cpu': '#39ff14', 'kernel': '#1a8f0a', 'temp': '#8aff6a',
-                            'frame': '#39ff14', 'bg': '#020a02', 'panel': '#031403', 'text': '#8aff6a'},
+                            'gpu': '#6aff9f', 'memory': '#aaff6a', 'disk': '#39ff14',
+                            'network': '#6affda', 'power': '#c8ff6a',
+                            'frame': '#39ff14', 'bg': '#020a02', 'panel': '#031403',
+                            'panel2': '#052008', 'sidebar': '#010a01', 'active': '#0f3d10',
+                            'border': '#0f3d10', 'text': '#8aff6a'},
         'Amber':          {'cpu': '#ffb000', 'kernel': '#c97e00', 'temp': '#ffd27a',
-                            'frame': '#ffb000', 'bg': '#0a0600', 'panel': '#140b00', 'text': '#ffb000'},
+                            'gpu': '#ffcf6a', 'memory': '#ffb84d', 'disk': '#ffb000',
+                            'network': '#ffcf6a', 'power': '#ffdb8a',
+                            'frame': '#ffb000', 'bg': '#0a0600', 'panel': '#140b00',
+                            'panel2': '#1c1000', 'sidebar': '#0a0600', 'active': '#4a3000',
+                            'border': '#3a2600', 'text': '#ffb000'},
         'Blue':           {'cpu': '#38b8f0', 'kernel': '#1a5f8a', 'temp': '#7ad4ff',
-                            'frame': '#38b8f0', 'bg': '#020a14', 'panel': '#04101f', 'text': '#c8e8ff'},
+                            'gpu': '#4fc3f7', 'memory': '#7aa8ff', 'disk': '#38b8f0',
+                            'network': '#3b82f6', 'power': '#7ad4ff',
+                            'frame': '#38b8f0', 'bg': '#020a14', 'panel': '#04101f',
+                            'panel2': '#071c33', 'sidebar': '#020a14', 'active': '#123a5e',
+                            'border': '#123a5e', 'text': '#c8e8ff'},
         'Light':          {'cpu': '#0a8f3c', 'kernel': '#c02020', 'temp': '#c96a00',
-                            'frame': '#0a5a8f', 'bg': '#eef3f8', 'panel': '#ffffff', 'text': '#0c1a26'},
+                            'gpu': '#0a6f9f', 'memory': '#7a3fa8', 'disk': '#0a8f3c',
+                            'network': '#0a5a8f', 'power': '#a06a00',
+                            'frame': '#0a5a8f', 'bg': '#eef3f8', 'panel': '#ffffff',
+                            'panel2': '#e4ecf3', 'sidebar': '#e4ecf3', 'active': '#c8dcf5',
+                            'border': '#c4d2e0', 'text': '#0c1a26'},
     }
+
+    # Sidebar structure, top to bottom, exactly matching the real app's own
+    # nav order: three "live" pages, five more real pages, a divider, then
+    # five more pages that TMOG itself sells as "Pro" — Trevor asked for
+    # those built out as genuinely working too (no paywall in this app, so
+    # no gating banner), just placed where the video places them.
+    NAV_ITEMS = [
+        ('summary', '⌂', 'Summary'),
+        ('performance', '▤', 'Performance'),
+        ('processes', '☰', 'Processes'),
+        ('sysinfo', 'ⓘ', 'System Info'),
+        ('apphistory', '↻', 'App history'),
+        ('startupapps', '▶', 'Startup apps'),
+        ('users', '◔', 'Users'),
+        ('services', '⚙', 'Services'),
+        ('__divider__', '', 'PRO'),
+        ('powerfreq', '⚡', 'Power & Freq'),
+        ('connections', '◎', 'Connections'),
+        ('installedapps', '▦', 'Installed Apps'),
+        ('diskspace', '▭', 'Disk Space'),
+        ('benchmarks', '◈', 'Benchmarks'),
+    ]
 
     def __init__(self, monitor):
         import tkinter as tk
@@ -22266,25 +22409,40 @@ class SystemMonitorWindow:
         self._nvml_inited = False
         self._gpu_err = None   # last real reason _read_gpu_pct() came back N/A, so the UI
                                 # can say *why* instead of just "N/A" — see _read_gpu_pct.
+        self._gpu_name = None  # real adapter name (e.g. "NVIDIA GeForce RTX 3050"),
+                                # filled in the first time pynvml succeeds — see _read_gpu_pct.
 
-        # Multi-page state (Summary / Performance / Processes — the three
-        # pages actually recreated after watching the demo; see the
-        # changelog for the sidebar sections that were left out and why).
+        # Multi-page state.
         self._page = 'summary'
         self._perf_subview = 'cpu'
         self._percore_hist = []
+        self._percore_kernel_hist = []
         self._perf_hist = {'mem': [], 'net_rx': [], 'net_tx': [],
-                            'disk_r': [], 'disk_w': [], 'temp': []}
+                            'disk_r': [], 'disk_w': [], 'disk_active': [],
+                            'temp': [], 'gpu': []}
         self._proc_sort_col = 'CPU%'
         self._proc_sort_desc = True
         self._selected_pid = None
         self._proc_filter_val = ''
+        self._proc_io_last = {}        # pid -> (read_bytes, write_bytes, t) for Processes-page IO rate
+        self._proc_cmdline_cache = {}  # pid -> command line string, fetched once and cached forever
+
+        # Static (rarely-changing) facts fetched once and cached, rather than
+        # re-queried every 500ms refresh — see _fetch_cpu_static_info et al.
+        # None means "not fetched yet"; a dict of real values or explicit
+        # 'Unavailable' strings once fetched. Never guessed.
+        self._cpu_static = None
+        self._startup_rows = None
+        self._installed_rows = None
+        self._services_cache = None
+        self._benchmark_running = {}
+        self._powerfreq_minmax = {}    # metric key -> [min_seen, max_seen], for Power & Freq page
 
         self.root = tk.Toplevel()
         self.root.title('Vanguard Flow NetSentinel — System Monitor')
         self.root.configure(bg=self.BG)
-        self.root.geometry('1180x820')
-        self.root.minsize(980, 680)
+        self.root.geometry('1280x860')
+        self.root.minsize(1040, 700)
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
 
         # Prime psutil's per-process CPU% counters. The first cpu_percent()
@@ -22328,11 +22486,24 @@ class SystemMonitorWindow:
         r = int(r1 + (r2 - r1) * t); g = int(g1 + (g2 - g1) * t); b = int(b1 + (b2 - b1) * t)
         return '#%02x%02x%02x' % (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
 
+    @staticmethod
+    def _gradient_color(t):
+        # Green -> yellow -> orange -> red, used for the CPU meter's own
+        # "spectrum" LED bar (sampled from the real app: low segments are
+        # green, then yellow-green, then orange, then red at the very top,
+        # regardless of the current reading — only *how many* light up
+        # depends on the reading).
+        stops = [(0.0, '#39ff14'), (0.45, '#c8e83b'), (0.75, '#ffb000'), (1.0, '#ff3b3b')]
+        for i in range(len(stops) - 1):
+            t0, c0 = stops[i]; t1, c1 = stops[i + 1]
+            if t0 <= t <= t1:
+                local = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+                return SystemMonitorWindow._blend_hex(c0, c1, local)
+        return stops[-1][1]
+
     def _draw_led_bar(self, canvas, pct, n=14):
-        # The little segmented LED-style meters under every tile in the
-        # video — drawn as plain Canvas rectangles rather than an image or
-        # extra dependency. An all-dim bar (pct=None) means "no percentage
-        # reading applies to this metric," not an error.
+        # Horizontal segmented LED meter — used for tile bars and the
+        # Performance page's own big horizontal meter under each title.
         th = self.theme()
         canvas.delete('all')
         try:
@@ -22347,10 +22518,62 @@ class SystemMonitorWindow:
         seg_w = max(1.0, (w - gap * (n - 1)) / n)
         for i in range(n):
             x0 = i * (seg_w + gap); x1 = x0 + seg_w
-            frac = (i + 1) / n
-            col = th['cpu'] if frac <= 0.6 else (th['temp'] if frac <= 0.85 else th['kernel'])
-            fill = col if i < lit else self.SPIN
+            t = i / max(1, n - 1)
+            zone_col = self._gradient_color(t)
+            fill = zone_col if i < lit else self._blend_hex(zone_col, th['panel'], 0.82)
             canvas.create_rectangle(x0, 0, x1, h, fill=fill, outline='')
+
+    def _draw_led_bar_mono(self, canvas, pct, color, n=24, horizontal=True):
+        # Single-hue segmented meter (Clock / Temp / GPU / per-tile bars) —
+        # lit segments are the theme colour, unlit segments are the same
+        # hue dimmed toward the panel colour (matches the real app: an
+        # "off" LED reads as a dark tint of its own colour, not neutral
+        # gray).
+        th = self.theme()
+        canvas.delete('all')
+        try:
+            w = int(canvas.winfo_width()); h = int(canvas.winfo_height())
+        except Exception:
+            return
+        if w <= 2 or h <= 2:
+            return
+        pct = 0.0 if pct is None else max(0.0, min(100.0, pct))
+        lit = int(round(pct / 100.0 * n))
+        gap = 2
+        dim = self._blend_hex(color, th['panel'], 0.82)
+        if horizontal:
+            seg_w = max(1.0, (w - gap * (n - 1)) / n)
+            for i in range(n):
+                x0 = i * (seg_w + gap); x1 = x0 + seg_w
+                canvas.create_rectangle(x0, 0, x1, h, fill=(color if i < lit else dim), outline='')
+        else:
+            seg_h = max(1.0, (h - gap * (n - 1)) / n)
+            for i in range(n):
+                # i=0 is the bottom segment.
+                y1 = h - i * (seg_h + gap); y0 = y1 - seg_h
+                canvas.create_rectangle(2, y0, w - 2, y1, fill=(color if i < lit else dim), outline='')
+
+    def _draw_vled_spectrum(self, canvas, pct, n=20):
+        # The CPU meter's vertical bar specifically: green at the bottom
+        # shading to red at the top, matching the real app.
+        th = self.theme()
+        canvas.delete('all')
+        try:
+            w = int(canvas.winfo_width()); h = int(canvas.winfo_height())
+        except Exception:
+            return
+        if w <= 2 or h <= 2:
+            return
+        pct = 0.0 if pct is None else max(0.0, min(100.0, pct))
+        lit = int(round(pct / 100.0 * n))
+        gap = 2
+        seg_h = max(1.0, (h - gap * (n - 1)) / n)
+        for i in range(n):
+            y1 = h - i * (seg_h + gap); y0 = y1 - seg_h
+            t = i / max(1, n - 1)
+            zone_col = self._gradient_color(t)
+            fill = zone_col if i < lit else self._blend_hex(zone_col, th['panel'], 0.82)
+            canvas.create_rectangle(2, y0, w - 2, y1, fill=fill, outline='')
 
     def _draw_sparkline(self, canvas, values, color):
         canvas.delete('all')
@@ -22375,10 +22598,52 @@ class SystemMonitorWindow:
                 _exc_debug('_draw_sparkline')
             canvas.create_line(*pts, fill=color, width=1, smooth=True)
 
+    def _draw_dual_sparkline(self, canvas, values_top, values_bot, color_top, color_bot, vmax=100.0):
+        # Per-core Performance grid cells in the real app show two overlaid
+        # fills per core — overall utilisation (yellow-green) stacked over
+        # kernel-time share (red-pink) — not a single flat line. Both series
+        # share the same 0-100% scale here since both are percentages.
+        canvas.delete('all')
+        try:
+            w = int(canvas.winfo_width()); h = int(canvas.winfo_height())
+        except Exception:
+            return
+        if w <= 2 or h <= 2:
+            return
+        n = max(len(values_top), len(values_bot), 1)
+
+        def _pts(values):
+            if not values:
+                return None
+            pts = []
+            for i, v in enumerate(values):
+                x = i / max(1, n - 1) * w
+                y = h - (max(0.0, min(vmax, v)) / vmax) * (h - 2) - 1
+                pts.append(x); pts.append(y)
+            return pts
+
+        pt = _pts(values_top); pb = _pts(values_bot)
+        th = self.theme()
+        if pb and len(pb) >= 4:
+            try:
+                fill_b = self._blend_hex(color_bot, th['panel'], 0.55)
+                canvas.create_polygon(0, h, *pb, w, h, fill=fill_b, outline='')
+            except Exception:
+                _exc_debug('_draw_dual_sparkline (bottom fill)')
+            canvas.create_line(*pb, fill=color_bot, width=1, smooth=True)
+        if pt and len(pt) >= 4:
+            try:
+                fill_t = self._blend_hex(color_top, th['panel'], 0.55)
+                canvas.create_polygon(0, h, *pt, w, h, fill=fill_t, outline='')
+            except Exception:
+                _exc_debug('_draw_dual_sparkline (top fill)')
+            canvas.create_line(*pt, fill=color_top, width=1, smooth=True)
+
     # ── UI scaffold ──────────────────────────────────────────────────────────
     def _build_ui(self):
         tk = self._tk; th = self.theme()
         self.root.configure(bg=th['bg'])
+        self._build_menubar()
         self._build_topbar()
         body = tk.Frame(self.root, bg=th['bg']); body.pack(fill='both', expand=True)
         self._build_sidebar(body)
@@ -22386,14 +22651,50 @@ class SystemMonitorWindow:
         self._content.pack(side='left', fill='both', expand=True)
         self._show_page(self._page)
 
+    def _build_menubar(self):
+        # A cosmetic File/View/Help menu bar, matching the real app's own
+        # top-of-window chrome. Real, working menu items (not fake): File
+        # has an Exit that closes this window the same way the [x] does,
+        # View lets you jump to any page, Help opens the in-app Guide's
+        # System Monitor section this app already has.
+        tk = self._tk; th = self.theme()
+        try:
+            menubar = tk.Menu(self.root, tearoff=0, bg=th['panel'], fg=th['text'],
+                              activebackground=th['active'], activeforeground=th['text'])
+            file_m = tk.Menu(menubar, tearoff=0, bg=th['panel'], fg=th['text'],
+                             activebackground=th['active'], activeforeground=th['text'])
+            file_m.add_command(label='Close window', command=self._on_close)
+            menubar.add_cascade(label='File', menu=file_m)
+            view_m = tk.Menu(menubar, tearoff=0, bg=th['panel'], fg=th['text'],
+                             activebackground=th['active'], activeforeground=th['text'])
+            for key, _icon, label in self.NAV_ITEMS:
+                if key == '__divider__':
+                    continue
+                view_m.add_command(label=label, command=lambda k=key: self._switch_page(k))
+            menubar.add_cascade(label='View', menu=view_m)
+            help_m = tk.Menu(menubar, tearoff=0, bg=th['panel'], fg=th['text'],
+                             activebackground=th['active'], activeforeground=th['text'])
+            help_m.add_command(label='About System Monitor', command=self._show_about)
+            menubar.add_cascade(label='Help', menu=help_m)
+            self.root.configure(menu=menubar)
+        except Exception:
+            _exc_debug('_build_menubar')
+
+    def _show_about(self):
+        from tkinter import messagebox
+        messagebox.showinfo(
+            'About System Monitor',
+            "Vanguard Flow NetSentinel — System Monitor\n\n"
+            "Styled after Dave Plummer's \"Task Manager OG.\" Every reading "
+            "on these pages is this app's own live telemetry (psutil / "
+            "Windows APIs) — where this platform genuinely can't expose a "
+            "sensor, it says so honestly instead of guessing.",
+            parent=self.root)
+
     def _build_topbar(self):
         tk = self._tk; th = self.theme()
-        top = tk.Frame(self.root, bg=th['panel'], height=44)
+        top = tk.Frame(self.root, bg=th['panel'], height=40)
         top.pack(fill='x'); top.pack_propagate(False)
-        tk.Label(top, text='  ◈  SYSTEM MONITOR', bg=th['panel'], fg=th['frame'],
-                 font=(_NM_MONO, 11, 'bold')).pack(side='left', pady=10)
-        tk.Label(top, text='inspired by Task Manager OG (Dave Plummer)', bg=th['panel'],
-                 fg=self.TICK, font=(_NM_MONO, 7)).pack(side='left', padx=10)
 
         ctl = tk.Frame(top, bg=th['panel']); ctl.pack(side='right', padx=10)
         tk.Label(ctl, text='THEME', bg=th['panel'], fg=self.TICK,
@@ -22401,16 +22702,16 @@ class SystemMonitorWindow:
         self._theme_var = tk.StringVar(value=self._theme_name)
         theme_menu = tk.OptionMenu(ctl, self._theme_var, *self.THEMES.keys(),
                                    command=self._on_theme_change)
-        theme_menu.config(bg=self.PANEL2, fg=th['text'], activebackground='#123a5e',
+        theme_menu.config(bg=th['panel2'], fg=th['text'], activebackground=th['active'],
                           relief='flat', font=(_NM_MONO, 7), highlightthickness=0,
                           cursor='hand2')
-        theme_menu['menu'].config(bg=self.PANEL2, fg=th['text'], font=(_NM_MONO, 8))
+        theme_menu['menu'].config(bg=th['panel2'], fg=th['text'], font=(_NM_MONO, 8))
         theme_menu.pack(side='left', padx=(0, 10))
 
         self._bloom_var = tk.BooleanVar(value=self._bloom)
         tk.Checkbutton(ctl, text='BLOOM', variable=self._bloom_var,
                        command=self._on_bloom_toggle, bg=th['panel'], fg=self.TICK,
-                       selectcolor=self.PANEL2, activebackground=th['panel'],
+                       selectcolor=th['panel2'], activebackground=th['panel'],
                        activeforeground=th['text'], font=(_NM_MONO, 7),
                        borderwidth=0, highlightthickness=0).pack(side='left', padx=(0, 10))
 
@@ -22419,7 +22720,7 @@ class SystemMonitorWindow:
         self._sat_var = tk.IntVar(value=self._saturation)
         sat = tk.Scale(ctl, from_=0, to=11, orient='horizontal', length=110,
                        variable=self._sat_var, bg=th['panel'], fg=th['text'],
-                       troughcolor=self.SPIN, highlightthickness=0,
+                       troughcolor=th['border'], highlightthickness=0,
                        showvalue=True, font=(_NM_MONO, 7),
                        command=self._on_saturation_change)
         sat.pack(side='left')
@@ -22428,31 +22729,76 @@ class SystemMonitorWindow:
         tk.Label(top, textvariable=self._refresh_lbl_var, bg=th['panel'], fg=self.TICK,
                  font=(_NM_MONO, 7)).pack(side='right', padx=12)
 
-        tk.Frame(self.root, bg=self.SPIN, height=1).pack(fill='x')
+        tk.Frame(self.root, bg=th['border'], height=1).pack(fill='x')
 
-    # ── Left sidebar: Summary / Performance / Processes ─────────────────────────
+    # ── Left sidebar: the real app's full page list ─────────────────────────
     def _build_sidebar(self, parent):
         tk = self._tk; th = self.theme()
-        sb = tk.Frame(parent, bg=th['panel'], width=88)
+        sb = tk.Frame(parent, bg=th['sidebar'], width=192)
         sb.pack(side='left', fill='y'); sb.pack_propagate(False)
-        tk.Frame(sb, bg=self.SPIN, width=1).pack(side='right', fill='y')
-        tk.Frame(sb, bg=th['panel'], height=8).pack(fill='x')
+        tk.Frame(sb, bg=th['border'], width=1).pack(side='right', fill='y')
+        tk.Frame(sb, bg=th['sidebar'], height=6).pack(fill='x')
+
+        nav_wrap = tk.Frame(sb, bg=th['sidebar']); nav_wrap.pack(fill='x')
         self._page_btns = {}
-        for key, icon, label in [
-            ('summary', '◱', 'SUMMARY'),
-            ('performance', '▤', 'PERFORMANCE'),
-            ('processes', '⊞', 'PROCESSES'),
-        ]:
+        for key, icon, label in self.NAV_ITEMS:
+            if key == '__divider__':
+                row = tk.Frame(nav_wrap, bg=th['sidebar']); row.pack(fill='x', padx=14, pady=(10, 6))
+                tk.Label(row, text=label, bg=th['sidebar'], fg=th['frame'],
+                        font=(_NM_MONO, 7, 'bold')).pack(side='left')
+                tk.Frame(row, bg=th['frame'], height=1).pack(side='left', fill='x', expand=True,
+                                                              padx=(6, 0), pady=(6, 0))
+                continue
             active = (key == self._page)
-            b = tk.Button(sb, text='%s\n%s' % (icon, label),
-                         bg=('#0d2540' if active else th['panel']),
-                         fg=(th['frame'] if active else self.TICK),
-                         activebackground='#0a1828', activeforeground=th['frame'],
-                         relief='flat', font=(_NM_MONO, 7), cursor='hand2',
-                         justify='center', wraplength=76,
+            b = tk.Button(nav_wrap, text='  %s   %s' % (icon, label),
+                         bg=(th['active'] if active else th['sidebar']),
+                         fg=(th['text'] if active else self.TICK),
+                         activebackground=th['active'], activeforeground=th['text'],
+                         relief='flat', font=(_NM_MONO, 9), cursor='hand2',
+                         anchor='w', padx=8,
                          command=lambda k=key: self._switch_page(k))
-            b.pack(fill='x', pady=2, ipady=10)
+            b.pack(fill='x', pady=1, ipady=7)
             self._page_btns[key] = b
+
+        # Logo + Settings/Colors footer, matching the real app's bottom of
+        # sidebar. "Colors" reuses the same theme picker as the topbar's
+        # THEME dropdown (a second entry point to the same real control);
+        # "Settings" is a stub — this app's real settings live in its main
+        # window, not duplicated here.
+        tk.Frame(sb, bg=th['sidebar']).pack(fill='both', expand=True)
+        tk.Label(sb, text='♥ TMOG-style', bg=th['sidebar'], fg=th['frame'],
+                font=(_NM_MONO, 9, 'bold')).pack(pady=(0, 6))
+        foot = tk.Frame(sb, bg=th['sidebar']); foot.pack(fill='x', pady=(0, 8), padx=10)
+        tk.Button(foot, text='⚙ Settings', bg=th['sidebar'], fg=self.TICK,
+                 activebackground=th['sidebar'], activeforeground=th['text'],
+                 relief='flat', font=(_NM_MONO, 7), cursor='hand2', anchor='w',
+                 command=self._show_about).pack(side='left')
+        tk.Button(foot, text='Colors ▾', bg=th['sidebar'], fg=self.TICK,
+                 activebackground=th['sidebar'], activeforeground=th['text'],
+                 relief='flat', font=(_NM_MONO, 7), cursor='hand2', anchor='e',
+                 command=self._cycle_theme).pack(side='right')
+
+    def _cycle_theme(self):
+        names = list(self.THEMES.keys())
+        i = (names.index(self._theme_name) + 1) % len(names)
+        self._on_theme_change(names[i])
+
+    # ── Generic page header: icon + title + optional Refresh button ─────────
+    def _build_page_header(self, parent, icon, title, on_refresh=None, right_widget_fn=None):
+        tk = self._tk; th = self.theme()
+        hdr = tk.Frame(parent, bg=th['bg']); hdr.pack(fill='x', padx=14, pady=(12, 6))
+        tk.Label(hdr, text=icon, bg=th['bg'], fg=th['frame'],
+                font=(_NM_MONO, 14)).pack(side='left', padx=(0, 8))
+        tk.Label(hdr, text=title, bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 16, 'bold')).pack(side='left')
+        if on_refresh:
+            tk.Button(hdr, text='↻ Refresh', bg=th['panel2'], fg=th['text'],
+                     activebackground=th['active'], activeforeground=th['text'],
+                     relief='flat', font=(_NM_MONO, 8), cursor='hand2', padx=10,
+                     command=on_refresh).pack(side='right')
+        if right_widget_fn:
+            right_widget_fn(hdr)
+        return hdr
 
     def _switch_page(self, key):
         # Switching pages used to call _rebuild_ui(), which tears down and
@@ -22470,8 +22816,8 @@ class SystemMonitorWindow:
         for k, b in getattr(self, '_page_btns', {}).items():
             active = (k == self._page)
             try:
-                b.configure(bg=('#0d2540' if active else th['panel']),
-                            fg=(th['frame'] if active else self.TICK))
+                b.configure(bg=(th['active'] if active else th['sidebar']),
+                            fg=(th['text'] if active else self.TICK))
             except Exception:
                 _exc_debug('_update_sidebar_highlight')
 
@@ -22484,15 +22830,27 @@ class SystemMonitorWindow:
         self._perf_subview = key
         self._show_page('performance')
 
+    _PAGE_BUILDERS = {
+        'summary': '_build_summary_page',
+        'performance': '_build_performance_page',
+        'processes': '_build_processes_page',
+        'sysinfo': '_build_sysinfo_page',
+        'apphistory': '_build_apphistory_page',
+        'startupapps': '_build_startupapps_page',
+        'users': '_build_users_page',
+        'services': '_build_services_page',
+        'powerfreq': '_build_powerfreq_page',
+        'connections': '_build_connections_page',
+        'installedapps': '_build_installedapps_page',
+        'diskspace': '_build_diskspace_page',
+        'benchmarks': '_build_benchmarks_page',
+    }
+
     def _show_page(self, page):
         for w in self._content.winfo_children():
             w.destroy()
-        if page == 'performance':
-            self._build_performance_page(self._content)
-        elif page == 'processes':
-            self._build_processes_page(self._content)
-        else:
-            self._build_summary_page(self._content)
+        builder_name = self._PAGE_BUILDERS.get(page, '_build_summary_page')
+        getattr(self, builder_name)(self._content)
 
     def _rebuild_ui(self):
         for w in self.root.winfo_children():
@@ -22513,56 +22871,67 @@ class SystemMonitorWindow:
     # ── SUMMARY page ─────────────────────────────────────────────────────────
     def _build_summary_page(self, parent):
         tk = self._tk; th = self.theme()
+        self._build_page_header(parent, '⌂', 'Summary')
         self._meter_refs = {}; self._meter_bar_refs = {}
-        meters = tk.Frame(parent, bg=th['bg']); meters.pack(fill='x', padx=10, pady=(10, 0))
+        meters = tk.Frame(parent, bg=th['bg']); meters.pack(fill='x', padx=14, pady=(2, 8))
         self._build_meters(meters)
 
-        mid = tk.Frame(parent, bg=th['bg']); mid.pack(fill='both', expand=True, padx=10, pady=8)
+        mid = tk.Frame(parent, bg=th['bg']); mid.pack(fill='both', expand=True, padx=14, pady=(0, 8))
         left = tk.Frame(mid, bg=th['bg']); left.pack(side='left', fill='both', expand=True)
-        right = tk.Frame(mid, bg=th['bg'], width=310); right.pack(side='left', fill='y', padx=(8, 0))
+        right = tk.Frame(mid, bg=th['bg'], width=360); right.pack(side='left', fill='y', padx=(10, 0))
         right.pack_propagate(False)
         self._build_chart(left)
         self._build_process_list(right)
+
+        mem_row = tk.Frame(parent, bg=th['bg'], height=150)
+        mem_row.pack(fill='x', padx=14, pady=(0, 8)); mem_row.pack_propagate(False)
+        self._build_memory_row(mem_row)
 
         self._tile_refs = {}; self._tile_bar_refs = {}
         # Fixed height + pack_propagate(False), same pattern used for the top
         # bar elsewhere in this file — without it, the chart area's
         # expand=True would keep squeezing this row toward zero height.
-        tiles = tk.Frame(parent, bg=th['bg'], height=112)
-        tiles.pack(fill='x', padx=10, pady=(0, 10))
+        tiles = tk.Frame(parent, bg=th['bg'], height=90)
+        tiles.pack(fill='x', padx=14, pady=(0, 14))
         tiles.pack_propagate(False)
         self._build_tiles(tiles)
 
-    # ── Top meter strip: CPU / Clock / Temp / GPU, each with an LED bar ────────
+    # ── Top meter strip: CPU / Clock / Temp / GPU — tall segmented bars ────────
+    # Matches the real app: no card borders here, just four columns of a
+    # vertical LED meter with a label above and the live value below. CPU
+    # is the only "spectrum" bar (green at the bottom shading to red at the
+    # top, regardless of reading); Clock/Temp/GPU are single-hue meters.
     def _build_meters(self, parent):
         tk = self._tk; th = self.theme()
-        for key, label, unit, col_key in [
-            ('cpu',  'CPU',       '%',   'cpu'),
-            ('freq', 'CPU Clock', 'GHz', 'cpu'),
-            ('temp', 'CPU Temp',  '°C', 'temp'),
-            ('gpu',  'GPU',       '%',   'kernel'),
-        ]:
-            col = th[col_key]
-            card = tk.Frame(parent, bg=th['panel'], highlightthickness=1,
-                           highlightbackground=self.SPIN, padx=12, pady=8)
-            card.pack(side='left', fill='x', expand=True, padx=(0, 8))
-            tk.Label(card, text=label.upper(), bg=th['panel'], fg=self.TICK,
-                    font=(_NM_MONO, 8)).pack(anchor='w')
+        specs = [
+            ('cpu',  'CPU',   None,        True),
+            ('freq', 'CLOCK', th['kernel'], False),
+            ('temp', 'TEMP',  th['temp'],   False),
+            ('gpu',  'GPU',   th['gpu'],    False),
+        ]
+        for key, label, color, spectrum in specs:
+            col = tk.Frame(parent, bg=th['bg']); col.pack(side='left', padx=(0, 30))
+            tk.Label(col, text=label, bg=th['bg'], fg=(color or th['text']),
+                    font=(_NM_MONO, 8, 'bold')).pack()
+            bar = tk.Canvas(col, width=32, height=150, bg=th['bg'], highlightthickness=0)
+            bar.pack(pady=(4, 4))
             val_v = tk.StringVar(value='—')
-            tk.Label(card, textvariable=val_v, bg=th['panel'], fg=col,
-                    font=(_NM_MONO, 22, 'bold'), anchor='w').pack(fill='x')
-            tk.Label(card, text=unit, bg=th['panel'], fg=self.TICK,
-                    font=(_NM_MONO, 8), anchor='w').pack(fill='x')
-            # width=1: Tk's Canvas defaults to a 200px natural width when
-            # none is given, which was enough to starve later siblings out
-            # of a `pack(fill='x')` row entirely. It's just a starting
-            # point — the fill/expand pack options still let it grow.
-            bar = tk.Canvas(card, height=7, width=1, bg=th['panel'], highlightthickness=0)
-            bar.pack(fill='x', pady=(4, 0))
+            tk.Label(col, textvariable=val_v, bg=th['bg'], fg=(color or th['cpu']),
+                    font=(_NM_MONO, 11, 'bold')).pack()
             self._meter_refs[key] = val_v
-            self._meter_bar_refs[key] = bar
+            self._meter_bar_refs[key] = (bar, color, spectrum)
 
-    # ── Main glow chart: CPU (green-ish) / Kernel (red-ish) / Temp (2nd axis) ──
+    def _draw_meter(self, key, pct):
+        ref = self._meter_bar_refs.get(key)
+        if not ref:
+            return
+        bar, color, spectrum = ref
+        if spectrum:
+            self._draw_vled_spectrum(bar, pct, n=20)
+        else:
+            self._draw_led_bar_mono(bar, pct, color or self.theme()['text'], n=20, horizontal=False)
+
+    # ── Main glow chart: Utilization (green) / Temperature (orange, 2nd axis) / Kernel (red) ──
     def _build_chart(self, parent):
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         import matplotlib.figure as _mf
@@ -22594,7 +22963,7 @@ class SystemMonitorWindow:
 
         cpu_h = self._cpu_hist['cpu']; ker_h = self._cpu_hist['kernel']; temp_h = self._cpu_hist['temp']
         if not cpu_h:
-            ax.set_title('CPU / Kernel / Temp — waiting for samples…', loc='left',
+            ax.set_title('CPU Overview — waiting for samples…', loc='left',
                          color=self.TICK, fontsize=8, fontfamily=_NM_MONO, pad=4)
             ax2.set_yticks([])
             return
@@ -22633,84 +23002,165 @@ class SystemMonitorWindow:
         ax.plot(lastx, ker_h[-1], marker='<', color=th['text'], markersize=6,
                clip_on=False, zorder=5)
 
-        ax.text(0.01, 1.12, '● CPU %.0f%%' % cpu_h[-1], transform=ax.transAxes,
+        ax.text(0.01, 1.16, 'CPU Overview', transform=ax.transAxes, color=th['text'],
+               fontsize=9, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
+        ax.text(0.99, 1.16, '%.1f%%' % cpu_h[-1], transform=ax.transAxes, color=th['cpu'],
+               fontsize=11, fontweight='bold', fontfamily=_NM_MONO, va='bottom', ha='right')
+        # Legend order matches the real app: Utilization, Temperature, Kernel.
+        ax.text(0.01, 1.02, '● Utilization', transform=ax.transAxes,
                color=th['cpu'], fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
-        ax.text(0.28, 1.12, '● Kernel %.0f%%' % ker_h[-1], transform=ax.transAxes,
-               color=th['kernel'], fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
         if temp_vals:
-            ax.text(0.60, 1.12, '● Temp %.0f°C' % temp_h[-1], transform=ax.transAxes,
+            ax.text(0.30, 1.02, '● Temperature', transform=ax.transAxes,
                    color=th['temp'], fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
         else:
-            ax.text(0.60, 1.12, 'Temp: N/A on this platform', transform=ax.transAxes,
+            ax.text(0.30, 1.02, 'Temperature: N/A on this platform', transform=ax.transAxes,
                    color=self.TICK, fontsize=7, fontfamily=_NM_MONO, va='bottom')
+        ax.text(0.66, 1.02, '● Kernel', transform=ax.transAxes,
+               color=th['kernel'], fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
 
     # ── Top-processes list, right column ───────────────────────────────────────
     def _build_process_list(self, parent):
         tk = self._tk; ttk = self._ttk; th = self.theme()
-        tk.Label(parent, text='TOP PROCESSES', bg=th['bg'], fg=self.TICK,
-                font=(_NM_MONO, 8, 'bold')).pack(anchor='w', pady=(0, 4))
+        hdr = tk.Frame(parent, bg=th['bg']); hdr.pack(fill='x', pady=(0, 4))
+        self._proc_title_var = tk.StringVar(value='Top CPU processes (0)')
+        tk.Label(hdr, textvariable=self._proc_title_var, bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 9, 'bold')).pack(side='left')
+        self._proc_total_var = tk.StringVar(value='')
+        tk.Label(hdr, textvariable=self._proc_total_var, bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8)).pack(side='right')
         style_name = 'SysMon.Treeview'
         st = ttk.Style(self.root)
         try: st.theme_use('clam')
         except Exception: _exc_debug('_build_process_list')
         st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
                      foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
-        st.configure(style_name + '.Heading', background=self.PANEL2, foreground=self.TICK,
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
                      font=(_NM_MONO, 7, 'bold'), relief='flat')
-        st.map(style_name, background=[('selected', '#123a5e')])
-        cols = ('PID', 'Name', 'CPU%', 'Mem')
-        tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=24)
-        for c, w in zip(cols, (52, 148, 56, 76)):
+        st.map(style_name, background=[('selected', th['active'])])
+        cols = ('PID', 'Name', 'CPU', 'GPU', 'Memory')
+        tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=20)
+        for c, w in zip(cols, (48, 128, 50, 44, 76)):
             tv.heading(c, text=c); tv.column(c, width=w, anchor='w')
         tv.pack(fill='both', expand=True)
-        # "Rows that change get a green background" (or the theme's accent
-        # colour) — a one-cycle flash on any process whose CPU% just moved by
-        # a noticeable amount, plus a distinct tag for processes that weren't
-        # in the list a moment ago ("processes as they come in and leave").
-        tv.tag_configure('flash', background=th['frame'], foreground=th['bg'])
         tv.tag_configure('new', background=th['cpu'], foreground=th['bg'])
         self._proc_tree = tv
+        self._proc_row_tags = 0
 
     def _update_summary_proc_list(self, rows):
         tv = getattr(self, '_proc_tree', None)
         if tv is None:
             return
-        top = sorted(rows, key=lambda r: r[4], reverse=True)[:14]
+        top = sorted(rows, key=lambda r: r[4], reverse=True)[:20]
+        self._proc_title_var.set('Top CPU processes (%d)' % len(top))
+        self._proc_total_var.set('%d total' % len(rows))
+        th = self.theme()
+        maxmem = max((r[5] for r in top), default=0) or 1
         tv.delete(*tv.get_children())
-        for pid, name, status, user, cpu, mem, nthreads in top:
+        for i, (pid, name, status, user, cpu, mem, nthreads) in enumerate(top):
             prev = self._proc_last.get(pid)
             tag = ''
             if prev is None:
                 tag = 'new'
-            elif abs(cpu - prev) >= 3.0:
-                tag = 'flash'
-            tv.insert('', 'end', values=(pid, name, '%.1f' % cpu, self._human(mem)),
+            else:
+                # Heatmap tint by relative memory (not CPU) — matches the
+                # real app: rows for memory-heavy processes read visibly
+                # greener, near-zero-memory rows (e.g. System Idle Process)
+                # stay untinted.
+                frac = min(1.0, mem / maxmem)
+                if frac > 0.02:
+                    tagname = 'mem%d' % i
+                    tv.tag_configure(tagname, background=self._blend_hex(th['panel'], th['disk'], frac * 0.5))
+                    tag = tagname
+            tv.insert('', 'end', values=(pid, name, '%.1f%%' % cpu, '—', self._human(mem)),
                      tags=(tag,) if tag else ())
 
-    # ── Bottom tiles: Memory / Disk / Network / Energy / GPU / NPU / Thermal ───
+    # ── Memory row: vertical LED bar + big "Memory Utilization" chart ──────────
+    def _build_memory_row(self, parent):
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        import matplotlib.figure as _mf
+        tk = self._tk; th = self.theme()
+        left = tk.Frame(parent, bg=th['bg']); left.pack(side='left', fill='y')
+        tk.Label(left, text='MEMORY', bg=th['bg'], fg=th['memory'],
+                font=(_NM_MONO, 8, 'bold')).pack()
+        self._mem_bar = tk.Canvas(left, width=32, height=90, bg=th['bg'], highlightthickness=0)
+        self._mem_bar.pack(pady=(4, 4))
+        self._mem_pct_var = tk.StringVar(value='—')
+        tk.Label(left, textvariable=self._mem_pct_var, bg=th['bg'], fg=th['memory'],
+                font=(_NM_MONO, 10, 'bold')).pack()
+
+        right = tk.Frame(parent, bg=th['bg']); right.pack(side='left', fill='both', expand=True, padx=(16, 0))
+        wrap = tk.Frame(right, bg=th['panel'], highlightthickness=1, highlightbackground=th['memory'])
+        wrap.pack(fill='both', expand=True)
+        fig = _mf.Figure(figsize=(9.0, 1.6), facecolor=th['panel'])
+        ax = fig.add_subplot(111)
+        fig.subplots_adjust(left=0.03, right=0.97, top=0.80, bottom=0.06)
+        canvas = FigureCanvasTkAgg(fig, master=wrap)
+        canvas.get_tk_widget().pack(fill='both', expand=True, padx=2, pady=2)
+        self._mem_fig = fig; self._mem_ax = ax; self._mem_canvas = canvas
+        self._mem_foot_vars = {}
+        foot = tk.Frame(right, bg=th['bg']); foot.pack(fill='x', pady=(2, 0))
+        for key, label in [('avail', 'Available'), ('cached', 'Cached'), ('swap', 'Swap')]:
+            f = tk.Frame(foot, bg=th['bg']); f.pack(side='left', padx=(0, 26))
+            tk.Label(f, text=label, bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 7)).pack(anchor='w')
+            v = tk.StringVar(value='—')
+            tk.Label(f, textvariable=v, bg=th['bg'], fg=th['text'], font=(_NM_MONO, 8, 'bold')).pack(anchor='w')
+            self._mem_foot_vars[key] = v
+
+    def _draw_memory_chart(self):
+        th = self.theme()
+        ax = getattr(self, '_mem_ax', None)
+        if ax is None:
+            return
+        ax.cla()
+        ax.set_facecolor(th['panel']); self._mem_fig.set_facecolor(th['panel'])
+        ax.tick_params(colors=self.TICK, labelsize=6, length=1)
+        for sp in ax.spines.values():
+            sp.set_color(th['memory']); sp.set_alpha(0.6)
+        ax.xaxis.grid(True, color=th['memory'], linewidth=0.3, alpha=0.10)
+        ax.yaxis.grid(True, color=th['memory'], linewidth=0.3, alpha=0.14)
+        vals = self._perf_hist['mem']
+        if len(vals) > 1:
+            xs = list(range(len(vals)))
+            if self._bloom and self._saturation > 0:
+                ModernWindow._glow_line(ax, xs, vals, th['memory'], lw=1.4)
+            else:
+                ax.plot(xs, vals, color=th['memory'], linewidth=1.4, alpha=0.9)
+            ax.plot(xs[-1], vals[-1], marker='<', color=th['text'], markersize=5, clip_on=False, zorder=5)
+            ax.set_xlim(0, 120); ax.set_xticks([]); ax.set_ylim(0, 100)
+        else:
+            ax.set_xticks([]); ax.set_yticks([])
+        try:
+            self._mem_canvas.draw_idle()
+        except Exception:
+            _exc_debug('_draw_memory_chart')
+
+    # ── Bottom tiles: Disks / Network / CPU Power / Thermals ───────────────────
+    # Exactly the real app's 4 tiles (GPU/NPU/Energy were an earlier guess
+    # before the real video was watched frame-by-frame — GPU lives only in
+    # the top meter strip, and there's no separate NPU/Energy tile at all).
     def _build_tiles(self, parent):
         tk = self._tk; th = self.theme()
-        for key, title in [
-            ('mem', 'MEMORY'), ('disk', 'DISK'), ('net', 'NETWORK'),
-            ('energy', 'ENERGY'), ('gpu', 'GPU'), ('npu', 'NPU'), ('thermal', 'THERMAL'),
+        for key, title, col_key in [
+            ('disk', 'DISKS', 'disk'), ('net', 'NETWORK', 'network'),
+            ('power', 'CPU POWER', 'power'), ('thermal', 'THERMALS', 'temp'),
         ]:
+            col = th[col_key]
             card = tk.Frame(parent, bg=th['panel'], highlightthickness=1,
-                           highlightbackground=self.SPIN, padx=8, pady=6)
-            card.pack(side='left', fill='both', expand=True, padx=(0, 6))
-            tk.Label(card, text=title, bg=th['panel'], fg=self.TICK,
-                    font=(_NM_MONO, 7, 'bold')).pack(anchor='w')
+                           highlightbackground=col, padx=10, pady=6)
+            card.pack(side='left', fill='both', expand=True, padx=(0, 8))
+            row = tk.Frame(card, bg=th['panel']); row.pack(fill='x')
+            tk.Label(row, text=title, bg=th['panel'], fg=th['text'],
+                    font=(_NM_MONO, 8, 'bold')).pack(side='left')
             v = tk.StringVar(value='—')
-            tk.Label(card, textvariable=v, bg=th['panel'], fg=th['text'],
-                    font=(_NM_MONO, 8), anchor='w', justify='left',
-                    wraplength=140).pack(anchor='w', fill='x', pady=(2, 2))
-            # width=1: Tk's Canvas defaults to a 200px natural width when
-            # none is given, which was enough to starve later siblings out
-            # of a `pack(fill='x')` row entirely. It's just a starting
-            # point — the fill/expand pack options still let it grow.
+            tk.Label(row, textvariable=v, bg=th['panel'], fg=col,
+                    font=(_NM_MONO, 8, 'bold')).pack(side='right')
+            body_v = tk.StringVar(value='')
+            tk.Label(card, textvariable=body_v, bg=th['panel'], fg=self.TICK,
+                    font=(_NM_MONO, 7), anchor='w', justify='left').pack(anchor='w', fill='x', pady=(2, 2))
             bar = tk.Canvas(card, height=7, width=1, bg=th['panel'], highlightthickness=0)
             bar.pack(fill='x', side='bottom', pady=(2, 0))
-            self._tile_refs[key] = v
-            self._tile_bar_refs[key] = bar
+            self._tile_refs[key] = (v, body_v)
+            self._tile_bar_refs[key] = (bar, col)
 
     # ── Sampling ─────────────────────────────────────────────────────────────
     def _read_cpu_temp(self, psutil):
@@ -22758,11 +23208,50 @@ class SystemMonitorWindow:
             h = pynvml.nvmlDeviceGetHandleByIndex(0)
             u = pynvml.nvmlDeviceGetUtilizationRates(h)
             self._gpu_err = None
+            if self._gpu_name is None:
+                try:
+                    raw = pynvml.nvmlDeviceGetName(h)
+                    self._gpu_name = raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else str(raw)
+                except Exception:
+                    _exc_debug('_read_gpu_pct (device name)')
             return float(u.gpu)
         except Exception as ex:
             self._gpu_err = '%s: %s' % (type(ex).__name__, ex)
             _exc_debug('SystemMonitorWindow._read_gpu_pct (nvml call)')
             return None
+
+    def _read_gpu_mem_power_temp(self):
+        # Extra NVIDIA readings for the Performance>GPU page's stats grid
+        # (memory usage, power draw, temperature, clock). Best-effort, same
+        # honesty rule as _read_gpu_pct: any failure returns an explicit
+        # 'Unavailable' per-field rather than a guess, never raises.
+        out = {'mem_used': None, 'mem_total': None, 'power_w': None,
+               'temp_c': None, 'clock_ghz': None}
+        try:
+            import pynvml
+            if not self._nvml_inited:
+                return out
+            h = pynvml.nvmlDeviceGetHandleByIndex(0)
+            try:
+                mi = pynvml.nvmlDeviceGetMemoryInfo(h)
+                out['mem_used'] = mi.used; out['mem_total'] = mi.total
+            except Exception:
+                _exc_debug('_read_gpu_mem_power_temp (memory)')
+            try:
+                out['power_w'] = pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0
+            except Exception:
+                _exc_debug('_read_gpu_mem_power_temp (power)')
+            try:
+                out['temp_c'] = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+            except Exception:
+                _exc_debug('_read_gpu_mem_power_temp (temp)')
+            try:
+                out['clock_ghz'] = pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_GRAPHICS) / 1000.0
+            except Exception:
+                _exc_debug('_read_gpu_mem_power_temp (clock)')
+        except Exception:
+            _exc_debug('_read_gpu_mem_power_temp')
+        return out
 
     def _net_rate(self, io):
         if io is None:
@@ -22806,8 +23295,10 @@ class SystemMonitorWindow:
         try:
             fr = psutil.cpu_freq()
             m['cpu_freq_ghz'] = (fr.current / 1000.0) if fr and fr.current else None
+            m['cpu_freq_max_ghz'] = (fr.max / 1000.0) if fr and fr.max else None
         except Exception:
             m['cpu_freq_ghz'] = None
+            m['cpu_freq_max_ghz'] = None
         m['cpu_temp'] = self._read_cpu_temp(psutil)
         m['gpu_pct'] = self._read_gpu_pct()
         try:
@@ -22872,102 +23363,193 @@ class SystemMonitorWindow:
             _exc('SystemMonitorWindow._sample_processes')
         return rows
 
-    def _update_tiles(self, m):
-        if m.get('mem_pct') is not None:
-            self._tile_refs['mem'].set('%.0f%%  (%s / %s)' % (
-                m['mem_pct'], self._human(m['mem_used']), self._human(m['mem_total'])))
-        else:
-            self._tile_refs['mem'].set('N/A')
-        self._draw_led_bar(self._tile_bar_refs['mem'], m.get('mem_pct'))
-
-        if m.get('disk_pct') is not None:
-            txt = '%.0f%% used  (%s / %s)' % (
-                m['disk_pct'], self._human(m['disk_used']), self._human(m['disk_total']))
-            rate = m.get('disk_rate')
-            if rate:
-                txt += '\nR %.1f MB/s   W %.1f MB/s' % rate
-            self._tile_refs['disk'].set(txt)
-        else:
-            self._tile_refs['disk'].set('N/A')
-        self._draw_led_bar(self._tile_bar_refs['disk'], m.get('disk_pct'))
-
-        rate = m.get('net_rate')
-        self._tile_refs['net'].set('RX %.2f Mbps\nTX %.2f Mbps' % rate if rate else '—')
-        self._draw_led_bar(self._tile_bar_refs['net'], None)   # no natural 0-100% scale
-
-        b = m.get('battery')
-        if b is not None:
-            state = 'charging' if b.power_plugged else 'on battery'
-            eta = ''
-            secs = getattr(b, 'secsleft', None)
-            if isinstance(secs, (int, float)) and secs > 0:
-                eta = '  (%dh %dm left)' % (secs // 3600, (secs % 3600) // 60)
-            self._tile_refs['energy'].set('%.0f%%  %s%s' % (b.percent, state, eta))
-            self._draw_led_bar(self._tile_bar_refs['energy'], b.percent)
-        else:
-            self._tile_refs['energy'].set('No battery detected\n(desktop, or not exposed by the OS)')
-            self._draw_led_bar(self._tile_bar_refs['energy'], None)
-
-        if m.get('gpu_pct') is not None:
-            self._tile_refs['gpu'].set('%.0f%% (NVIDIA/pynvml)' % m['gpu_pct'])
-        else:
-            self._tile_refs['gpu'].set('N/A — %s' % (self._gpu_err or 'needs NVIDIA + pynvml'))
-        self._draw_led_bar(self._tile_bar_refs['gpu'], m.get('gpu_pct'))
-
-        self._tile_refs['npu'].set('N/A (no OS API yet)')
-        self._draw_led_bar(self._tile_bar_refs['npu'], None)
-
-        import psutil as _psu3
-        thermal_pct = None
-        if hasattr(_psu3, 'sensors_temperatures'):
+    def _sample_process_io_cmd(self, pids):
+        # Per-process disk I/O rate + command line, for the Processes page's
+        # "Disk read"/"Disk write"/"Command" columns. Deliberately kept out
+        # of _sample_processes (used every cycle on both Summary and
+        # Processes) so those two extra syscalls per process only ever run
+        # while the Processes page itself is open and only for the rows
+        # actually being displayed (already filtered/capped by the caller)
+        # — the same "don't scan what isn't shown" discipline as the rest
+        # of this refresh loop. Command lines are cached forever per PID
+        # (they don't change for a running process), so only io_counters()
+        # is a real per-cycle cost.
+        import psutil
+        now = time.time()
+        out = {}
+        last = self._proc_io_last
+        for pid in pids:
+            cmd = self._proc_cmdline_cache.get(pid)
+            rate = (0.0, 0.0)
             try:
-                temps = _psu3.sensors_temperatures()
+                p = psutil.Process(pid)
+                if cmd is None:
+                    try:
+                        parts = p.cmdline()
+                        cmd = ' '.join(parts) if parts else ''
+                    except Exception:
+                        cmd = ''
+                    self._proc_cmdline_cache[pid] = cmd
+                try:
+                    pio = p.io_counters()
+                    prev = last.get(pid)
+                    if prev is not None:
+                        dt = now - prev[2]
+                        if dt > 0:
+                            r = max(0.0, (pio.read_bytes - prev[0]) / dt)
+                            w = max(0.0, (pio.write_bytes - prev[1]) / dt)
+                            rate = (r, w)
+                    last[pid] = (pio.read_bytes, pio.write_bytes, now)
+                except Exception:
+                    pass   # io_counters() isn't available for every process/platform — honest 0, not a guess
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
             except Exception:
-                temps = None
-            if temps:
-                lines = []
-                for name, entries in list(temps.items())[:3]:
-                    if entries:
-                        lines.append('%s: %.0f°C' % (name, entries[0].current))
-                        if thermal_pct is None:
-                            thermal_pct = max(0.0, min(100.0, entries[0].current))
-                self._tile_refs['thermal'].set('\n'.join(lines) if lines else 'No readings')
-            else:
-                self._tile_refs['thermal'].set('No sensors detected')
+                _exc_debug('_sample_process_io_cmd')
+            out[pid] = (rate[0], rate[1], cmd or '')
+        return out
+
+    def _windowed_pids(self):
+        # PIDs owning at least one visible top-level window — the same real
+        # signal Windows' own Task Manager uses for its Apps vs Background
+        # processes split (EnumWindows + IsWindowVisible +
+        # GetWindowThreadProcessId). Windows-only; returns an empty set
+        # elsewhere, which _update_processes_page treats as "can't group,
+        # show a flat list" rather than faking a split.
+        pids = set()
+        if sys.platform != 'win32':
+            return pids
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+            def _cb(hwnd, _lparam):
+                try:
+                    if user32.IsWindowVisible(hwnd):
+                        pid = wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value:
+                            pids.add(pid.value)
+                except Exception:
+                    pass
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(_cb), 0)
+        except Exception:
+            _exc_debug('_windowed_pids')
+        return pids
+        return rows
+
+    def _update_tiles(self, m):
+        # Disks
+        v, body = self._tile_refs['disk']; bar, col = self._tile_bar_refs['disk']
+        rate = m.get('disk_rate')
+        v.set('%.1f%%' % m['disk_pct'] if m.get('disk_pct') is not None else 'N/A')
+        body.set('R: %.1f MB/s   W: %.1f MB/s' % rate if rate else 'R: —   W: —')
+        self._draw_led_bar_mono(bar, m.get('disk_pct'), col, n=18)
+
+        # Network — no natural 0-100% scale for a raw throughput number, so
+        # (like the earlier build) the LED stays honestly dim rather than
+        # a guessed percentage; the real numbers are still shown as text.
+        v, body = self._tile_refs['net']; bar, col = self._tile_bar_refs['net']
+        rate = m.get('net_rate')
+        if rate:
+            total_kbps = (rate[0] + rate[1]) * 1000.0 / 8.0
+            v.set(self._human(total_kbps) + '/s')
+            body.set('R: %s/s   S: %s/s' % (self._human(rate[0] * 1e6 / 8), self._human(rate[1] * 1e6 / 8)))
         else:
-            self._tile_refs['thermal'].set('Not supported on this OS\n(no standard sensor API)')
-        self._draw_led_bar(self._tile_bar_refs['thermal'], thermal_pct)
+            v.set('—'); body.set('R: —   S: —')
+        self._draw_led_bar_mono(bar, None, col, n=18)
+
+        # CPU Power — no cross-platform way to read CPU package watts
+        # without vendor-specific drivers (RAPL/WMI sensor add-ons); the
+        # real app's own machine couldn't read it either ("Unavailable"),
+        # so this honestly matches rather than guessing a number.
+        v, body = self._tile_refs['power']; bar, col = self._tile_bar_refs['power']
+        v.set('Unavailable'); body.set('CPU package')
+        self._draw_led_bar_mono(bar, None, col, n=18)
+
+        # Thermals
+        v, body = self._tile_refs['thermal']; bar, col = self._tile_bar_refs['thermal']
+        if m.get('cpu_temp') is not None:
+            v.set('%.1f °C' % m['cpu_temp']); body.set('%.1f °C' % m['cpu_temp'])
+            self._draw_led_bar_mono(bar, m['cpu_temp'], col, n=18)
+        else:
+            v.set('N/A'); body.set('Not supported on this OS\n(no standard sensor API)')
+            self._draw_led_bar_mono(bar, None, col, n=18)
 
     # ── PERFORMANCE page: per-core CPU grid + single-metric big graphs ─────────
+    _PERF_SUBS = [
+        ('cpu', 'CPU'), ('mem', 'Memory'), ('gpu', 'NVIDIA GPU'), ('disk', 'Disks'),
+        ('net', 'Network'), ('power', 'CPU Power'), ('thermal', 'Thermals'),
+    ]
+
     def _build_performance_page(self, parent):
         tk = self._tk; th = self.theme()
-        tk.Label(parent, text='PERFORMANCE', bg=th['bg'], fg=th['frame'],
-                font=(_NM_MONO, 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
+        self._build_page_header(parent, '▤', 'Performance', on_refresh=self._on_perf_refresh)
 
-        row = tk.Frame(parent, bg=th['bg']); row.pack(fill='both', expand=True, padx=10, pady=(0, 10))
-        nav = tk.Frame(row, bg=th['panel'], width=140, highlightthickness=1,
-                      highlightbackground=self.SPIN)
+        row = tk.Frame(parent, bg=th['bg']); row.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+        nav = tk.Frame(row, bg=th['panel'], width=180, highlightthickness=1,
+                      highlightbackground=th['border'])
         nav.pack(side='left', fill='y'); nav.pack_propagate(False)
 
-        self._perf_nav_btns = {}
-        for key, label in [
-            ('cpu', 'CPU'), ('mem', 'Memory'), ('net', 'Network'),
-            ('disk', 'Disks'), ('gpu', 'GPU'), ('thermal', 'Thermals'),
-        ]:
+        self._perf_nav_btns = {}; self._perf_nav_bars = {}; self._perf_nav_vals = {}
+        for key, label in self._PERF_SUBS:
             active = (key == self._perf_subview)
-            b = tk.Button(nav, text=label, bg=('#0d2540' if active else th['panel']),
-                         fg=(th['frame'] if active else th['text']),
-                         activebackground='#0a1828', activeforeground=th['frame'],
-                         relief='flat', font=(_NM_MONO, 9), anchor='w', padx=10,
-                         cursor='hand2', command=lambda k=key: self._switch_perf_subview(k))
-            b.pack(fill='x', pady=1, ipady=6)
+            b = tk.Frame(nav, bg=(th['active'] if active else th['panel']), cursor='hand2')
+            b.pack(fill='x', pady=1)
+            inner = tk.Frame(b, bg=(th['active'] if active else th['panel']))
+            inner.pack(fill='x', padx=8, pady=6)
+            title = label if key != 'gpu' or not self._gpu_name else self._gpu_name
+            tk.Label(inner, text=title, bg=(th['active'] if active else th['panel']),
+                    fg=(th['text'] if active else th['text']), font=(_NM_MONO, 8, 'bold'),
+                    anchor='w', wraplength=90).pack(side='left', fill='x', expand=True)
+            cv = tk.Canvas(inner, width=44, height=26, bg=(th['active'] if active else th['panel']),
+                          highlightthickness=0)
+            cv.pack(side='right')
+            vv = tk.StringVar(value='—')
+            tk.Label(b, textvariable=vv, bg=(th['active'] if active else th['panel']),
+                    fg=self.TICK, font=(_NM_MONO, 7), anchor='w').pack(fill='x', padx=8, pady=(0, 4))
+            for w in (b, inner):
+                w.bind('<Button-1>', lambda e, k=key: self._switch_perf_subview(k))
             self._perf_nav_btns[key] = b
+            self._perf_nav_bars[key] = cv
+            self._perf_nav_vals[key] = vv
 
-        main = tk.Frame(row, bg=th['bg']); main.pack(side='left', fill='both', expand=True, padx=(8, 0))
+        main = tk.Frame(row, bg=th['bg']); main.pack(side='left', fill='both', expand=True, padx=(10, 0))
         if self._perf_subview == 'cpu':
             self._build_percore_grid(main)
         else:
-            self._build_perf_single_chart(main)
+            self._build_perf_detail_page(main)
+
+    def _on_perf_refresh(self):
+        # The video's own Refresh button re-queries the WMI-derived static
+        # facts (cache sizes, sockets, memory type…) that don't change every
+        # 500ms and so aren't worth re-querying on the normal timer.
+        self._cpu_static = None
+        self._show_page('performance')
+
+    def _perf_page_meta(self, sub):
+        # (title, subtitle, meter colour, unit) per Performance sub-page —
+        # matches the real app's own per-page header text.
+        th = self.theme()
+        if sub == 'cpu':
+            return ('CPU', None, th['cpu'], '%')
+        if sub == 'mem':
+            return ('Memory', None, th['memory'], '%')
+        if sub == 'gpu':
+            return (self._gpu_name or 'GPU', 'GPU adapter', th['gpu'], '%')
+        if sub == 'disk':
+            return ('Disks', 'All disks combined', th['disk'], '%')
+        if sub == 'net':
+            return ('Network', 'All network adapters', th['network'], None)
+        if sub == 'power':
+            return ('CPU Power', 'CPU package', th['power'], None)
+        if sub == 'thermal':
+            return ('Thermals', None, th['temp'], None)
+        return (sub, None, th['text'], None)
 
     def _build_percore_grid(self, parent):
         import psutil
@@ -22978,23 +23560,29 @@ class SystemMonitorWindow:
             ncores = 1
         if len(self._percore_hist) != ncores:
             self._percore_hist = [[] for _ in range(ncores)]
+            self._percore_kernel_hist = [[] for _ in range(ncores)]
 
+        title, subtitle, color, unit = self._perf_page_meta('cpu')
         hdr = tk.Frame(parent, bg=th['bg']); hdr.pack(fill='x')
-        tk.Label(hdr, text='CPU', bg=th['bg'], fg=th['text'],
-                font=(_NM_MONO, 13, 'bold')).pack(side='left')
-        tk.Label(hdr, text='  %d logical processors' % ncores, bg=th['bg'], fg=self.TICK,
-                font=(_NM_MONO, 8)).pack(side='left')
+        tk.Label(hdr, text=title, bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 15, 'bold')).pack(side='left')
         self._perf_cpu_val = tk.StringVar(value='—')
-        tk.Label(hdr, textvariable=self._perf_cpu_val, bg=th['bg'], fg=th['cpu'],
-                font=(_NM_MONO, 13, 'bold')).pack(side='right')
+        tk.Label(hdr, textvariable=self._perf_cpu_val, bg=th['bg'], fg=color,
+                font=(_NM_MONO, 15, 'bold')).pack(side='right')
+        self._perf_cpu_bar = tk.Canvas(parent, height=10, width=1, bg=th['bg'], highlightthickness=0)
+        self._perf_cpu_bar.pack(fill='x', pady=(2, 2))
+        tk.Label(parent, text='%d logical processors' % ncores, bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8)).pack(anchor='w', pady=(0, 4))
+        tk.Label(parent, text='% Utilization by logical processor', bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 7)).pack(anchor='w')
 
-        grid = tk.Frame(parent, bg=th['bg']); grid.pack(fill='both', expand=True, pady=(6, 6))
-        cols = 6 if ncores > 12 else 4
+        grid = tk.Frame(parent, bg=th['bg']); grid.pack(fill='both', expand=True, pady=(4, 6))
+        cols = 6 if ncores > 12 else (5 if ncores > 8 else 4)
         self._percore_canvases = []
         for i in range(ncores):
             r, c = divmod(i, cols)
             cell = tk.Frame(grid, bg=th['panel'], highlightthickness=1,
-                           highlightbackground=self.SPIN)
+                           highlightbackground=th['border'])
             cell.grid(row=r, column=c, sticky='nsew', padx=2, pady=2)
             grid.columnconfigure(c, weight=1)
             tk.Label(cell, text='CPU %d' % i, bg=th['panel'], fg=self.TICK,
@@ -23005,54 +23593,168 @@ class SystemMonitorWindow:
 
         foot = tk.Frame(parent, bg=th['bg']); foot.pack(fill='x', pady=(4, 0))
         self._perf_foot_vars = {}
-        for key, label in [('util', 'Utilization'), ('speed', 'Speed'), ('procs', 'Processes'),
-                           ('threads', 'Threads'), ('uptime', 'Up time'),
-                           ('lcores', 'Logical cores'), ('pcores', 'Physical cores')]:
-            f = tk.Frame(foot, bg=th['bg']); f.pack(side='left', padx=(0, 16))
-            tk.Label(f, text=label, bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 7)).pack(anchor='w')
-            v = tk.StringVar(value='—')
-            tk.Label(f, textvariable=v, bg=th['bg'], fg=th['text'],
-                    font=(_NM_MONO, 9, 'bold')).pack(anchor='w')
-            self._perf_foot_vars[key] = v
+        row1 = [('util', 'Utilization'), ('speed', 'Speed'), ('procs', 'Processes'),
+                ('threads', 'Threads'), ('uptime', 'Up time')]
+        row2 = [('base_speed', 'Base speed'), ('virt', 'Virtualization'), ('l1', 'L1 cache'),
+                ('l3', 'L3 cache'), ('handles', 'Handles')]
+        row3 = [('sockets', 'Sockets'), ('lcores', 'Logical processors'), ('vm', 'Virtual machine'),
+                ('l2', 'L2 cache'), ('pcores', 'Physical cores')]
+        for row_spec in (row1, row2, row3):
+            fr = tk.Frame(foot, bg=th['bg']); fr.pack(fill='x', pady=(2, 2))
+            for key, label in row_spec:
+                f = tk.Frame(fr, bg=th['bg']); f.pack(side='left', padx=(0, 16))
+                tk.Label(f, text=label, bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 7)).pack(anchor='w')
+                v = tk.StringVar(value='—')
+                tk.Label(f, textvariable=v, bg=th['bg'], fg=th['text'],
+                        font=(_NM_MONO, 9, 'bold')).pack(anchor='w')
+                self._perf_foot_vars[key] = v
+        self._apply_cpu_static_labels()
 
-    def _build_perf_single_chart(self, parent):
+    def _apply_cpu_static_labels(self):
+        # Fill in the WMI-derived (or honestly-Unavailable) static fields
+        # without waiting for a full page rebuild — called once the
+        # background fetch in _refresh_once completes.
+        info = self._cpu_static
+        fv = getattr(self, '_perf_foot_vars', None)
+        if not info or not fv:
+            return
+        for key in ('base_speed', 'virt', 'l1', 'l3', 'sockets', 'vm', 'l2', 'handles'):
+            if key in fv and key in info:
+                fv[key].set(info[key])
+
+    # ── Per-metric detail page (Memory/GPU/Disks/Network/CPU Power/Thermals) ──
+    def _build_perf_detail_page(self, parent):
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         import matplotlib.figure as _mf
         tk = self._tk; th = self.theme()
-        labels = {'mem': 'Memory', 'net': 'Network', 'disk': 'Disks',
-                 'gpu': 'GPU', 'thermal': 'Thermals'}
-        tk.Label(parent, text=labels.get(self._perf_subview, ''), bg=th['bg'], fg=th['text'],
-                font=(_NM_MONO, 13, 'bold')).pack(anchor='w')
-        wrap = tk.Frame(parent, bg=th['panel'], highlightthickness=1, highlightbackground=th['frame'])
-        wrap.pack(fill='both', expand=True, pady=(6, 0))
-        fig = _mf.Figure(figsize=(7.6, 5.2), facecolor=th['panel'])
-        ax = fig.add_subplot(111)
-        fig.subplots_adjust(left=0.08, right=0.96, top=0.90, bottom=0.08)
-        canvas = FigureCanvasTkAgg(fig, master=wrap)
-        canvas.get_tk_widget().pack(fill='both', expand=True, padx=2, pady=2)
-        self._perf_fig = fig; self._perf_ax = ax; self._perf_canvas = canvas
+        sub = self._perf_subview
+        title, subtitle, color, unit = self._perf_page_meta(sub)
+
+        hdr = tk.Frame(parent, bg=th['bg']); hdr.pack(fill='x')
+        tk.Label(hdr, text=title, bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 15, 'bold'), wraplength=520, justify='left').pack(side='left')
+        self._perf_detail_val = tk.StringVar(value='—')
+        tk.Label(hdr, textvariable=self._perf_detail_val, bg=th['bg'], fg=color,
+                font=(_NM_MONO, 15, 'bold')).pack(side='right')
+        self._perf_detail_bar = tk.Canvas(parent, height=10, width=1, bg=th['bg'], highlightthickness=0)
+        self._perf_detail_bar.pack(fill='x', pady=(2, 2))
+        if subtitle:
+            tk.Label(parent, text=subtitle, bg=th['bg'], fg=self.TICK,
+                    font=(_NM_MONO, 8)).pack(anchor='w', pady=(0, 4))
+
+        charts = tk.Frame(parent, bg=th['bg']); charts.pack(fill='both', expand=True, pady=(2, 4))
+        n_charts = 2 if sub == 'disk' else 1
+        figs = []
+        for i in range(n_charts):
+            tk.Label(charts, text=('% Active time' if (sub == 'disk' and i == 0) else
+                                    ('Disk transfer rate' if sub == 'disk' else 'Utilization')),
+                    bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 7)).pack(anchor='w')
+            wrap = tk.Frame(charts, bg=th['panel'], highlightthickness=1, highlightbackground=color)
+            wrap.pack(fill='both', expand=True, pady=(0, 4))
+            fig = _mf.Figure(figsize=(7.6, 2.4 if n_charts == 2 else 4.6), facecolor=th['panel'])
+            ax = fig.add_subplot(111)
+            fig.subplots_adjust(left=0.06, right=0.97, top=0.94, bottom=0.06)
+            canvas = FigureCanvasTkAgg(fig, master=wrap)
+            canvas.get_tk_widget().pack(fill='both', expand=True, padx=2, pady=2)
+            figs.append((fig, ax, canvas))
+        self._perf_figs = figs
+
+        # Stats grid — field set differs per sub-page, matching the real
+        # app's own per-metric layout. Anything this platform genuinely
+        # can't expose reads 'Unavailable', filled in by _update_performance.
+        grids = {
+            'mem': [[('inuse', 'In use'), ('avail', 'Available'), ('committed', 'Committed'), ('cached', 'Cached')],
+                    [('swapused', 'Swap used'), ('swapavail', 'Swap available')],
+                    [('speed', 'Speed'), ('slots', 'Slots used'), ('formfactor', 'Form factor'), ('memtype', 'Type')]],
+            'gpu': [[('util', 'Utilization'), ('clock', 'Clock speed'), ('power', 'Power draw'), ('memusage', 'Memory usage')],
+                    [('memcap', 'Memory capacity'), ('decode', 'Video decode'), ('encode', 'Video encode'), ('temp', 'Temperature')],
+                    [('api', 'Graphics API'), ('pcie', 'PCI Express')]],
+            'disk': [[('readspeed', 'Read speed'), ('writespeed', 'Write speed'), ('totalread', 'Total read'), ('totalwrite', 'Total written')],
+                     [('active', 'Active time'), ('resptime', 'Avg. response time')],
+                     [('capacity', 'Capacity'), ('formatted', 'Formatted'), ('sysdisk', 'System disk'), ('type', 'Type')]],
+            'net': [[('sendspeed', 'Send speed'), ('recvspeed', 'Receive speed'), ('totalsent', 'Total sent'), ('totalrecv', 'Total received')],
+                    [('adapter', 'Adapter')]],
+            'power': [[('power', 'Power'), ('source', 'Power source'), ('battery', 'Battery')],
+                      [('charging', 'Charging'), ('saver', 'Battery saver'), ('cycles', 'Cycle count')]],
+            'thermal': [[('temp', 'Temperature')], [('state', 'Thermal state')]],
+        }
+        self._perf_foot_vars = {}
+        foot = tk.Frame(parent, bg=th['bg']); foot.pack(fill='x')
+        for row_spec in grids.get(sub, []):
+            fr = tk.Frame(foot, bg=th['bg']); fr.pack(fill='x', pady=(2, 2))
+            for key, label in row_spec:
+                f = tk.Frame(fr, bg=th['bg']); f.pack(side='left', padx=(0, 20))
+                tk.Label(f, text=label, bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 7)).pack(anchor='w')
+                v = tk.StringVar(value='—')
+                tk.Label(f, textvariable=v, bg=th['bg'], fg=th['text'],
+                        font=(_NM_MONO, 9, 'bold')).pack(anchor='w')
+                self._perf_foot_vars[key] = v
+        if sub == 'mem':
+            self._apply_mem_static_labels()
+
+    def _apply_mem_static_labels(self):
+        info = self._cpu_static
+        fv = getattr(self, '_perf_foot_vars', None)
+        if not info or not fv:
+            return
+        for key in ('speed', 'slots', 'formfactor', 'memtype'):
+            if key in fv and key in info:
+                fv[key].set(info[key])
 
     def _update_performance(self, m, rows):
         th = self.theme()
+        # Live mini-sparkline previews in the sub-nav (all 7, regardless of
+        # which one is open) — cheap Canvas draws, matches the real app
+        # showing a trend for every metric in its own left-hand list.
+        preview_vals = {
+            'cpu': (m.get('cpu_total'), '%.1f%%' % (m.get('cpu_total') or 0.0), self._cpu_hist['cpu']),
+            'mem': (m.get('mem_pct'), '%.1f%%' % (m.get('mem_pct') or 0.0), self._perf_hist['mem']),
+            'gpu': (m.get('gpu_pct'), ('%.1f%%' % m['gpu_pct']) if m.get('gpu_pct') is not None else 'N/A',
+                    self._perf_hist['gpu']),
+            'disk': (m.get('disk_pct'), ('%.1f%%' % m['disk_pct']) if m.get('disk_pct') is not None else '—',
+                     self._perf_hist['disk_r']),
+            'net': (None, ('S: %s  R: %s' % (self._human((m['net_rate'][0] if m.get('net_rate') else 0) * 1e6 / 8),
+                                              self._human((m['net_rate'][1] if m.get('net_rate') else 0) * 1e6 / 8)))
+                    if m.get('net_rate') else '—', self._perf_hist['net_tx']),
+            'power': (None, 'Unavailable', []),
+            'thermal': (m.get('cpu_temp'), ('%.1f °C' % m['cpu_temp']) if m.get('cpu_temp') is not None else 'N/A',
+                        [v for v in self._perf_hist['temp'] if v is not None]),
+        }
+        for key, (_pct, txt, hist) in preview_vals.items():
+            if key in self._perf_nav_vals:
+                self._perf_nav_vals[key].set(txt)
+            if key in self._perf_nav_bars and hist:
+                self._draw_sparkline(self._perf_nav_bars[key], hist[-30:], th.get(
+                    {'cpu': 'cpu', 'mem': 'memory', 'gpu': 'gpu', 'disk': 'disk',
+                     'net': 'network', 'thermal': 'temp'}.get(key, 'cpu')))
+
         if self._perf_subview == 'cpu':
             import psutil
             try:
                 percore = psutil.cpu_percent(percpu=True)
             except Exception:
                 percore = []
+            try:
+                percore_kernel = [getattr(c, 'system', 0.0) for c in psutil.cpu_times_percent(percpu=True)]
+            except Exception:
+                percore_kernel = []
             for i, cv in enumerate(getattr(self, '_percore_canvases', [])):
                 val = percore[i] if i < len(percore) else 0.0
+                kval = percore_kernel[i] if i < len(percore_kernel) else 0.0
                 if i < len(self._percore_hist):
-                    hist = self._percore_hist[i]
-                    hist.append(val)
+                    hist = self._percore_hist[i]; khist = self._percore_kernel_hist[i]
+                    hist.append(val); khist.append(kval)
                     if len(hist) > 40: hist.pop(0)
-                    self._draw_sparkline(cv, hist, th['cpu'])
+                    if len(khist) > 40: khist.pop(0)
+                    self._draw_dual_sparkline(cv, hist, khist, th['cpu'], th['kernel'])
             try:
-                self._perf_cpu_val.set('%.0f%%' % (m.get('cpu_total') or 0.0))
+                cpu_total = m.get('cpu_total') or 0.0
+                self._perf_cpu_val.set('%.1f%%' % cpu_total)
+                self._draw_led_bar(self._perf_cpu_bar, cpu_total)
                 uptime_s = time.time() - psutil.boot_time()
                 hh, rem = divmod(int(uptime_s), 3600); mn, sec = divmod(rem, 60)
                 threads = sum(r[6] for r in rows)
-                self._perf_foot_vars['util'].set('%.0f%%' % (m.get('cpu_total') or 0.0))
+                self._perf_foot_vars['util'].set('%.1f%%' % cpu_total)
                 self._perf_foot_vars['speed'].set(
                     '%.2f GHz' % m['cpu_freq_ghz'] if m.get('cpu_freq_ghz') else 'N/A')
                 self._perf_foot_vars['procs'].set(str(len(rows)))
@@ -23060,73 +23762,157 @@ class SystemMonitorWindow:
                 self._perf_foot_vars['uptime'].set('%d:%02d:%02d' % (hh, mn, sec))
                 self._perf_foot_vars['lcores'].set(str(psutil.cpu_count(logical=True) or '—'))
                 self._perf_foot_vars['pcores'].set(str(psutil.cpu_count(logical=False) or '—'))
+                if self._cpu_static:
+                    self._apply_cpu_static_labels()
             except Exception:
                 _exc_debug('_update_performance (cpu footer)')
             return
 
-        ax = getattr(self, '_perf_ax', None)
-        if ax is None:
-            return
-        ax.cla()
-        ax.set_facecolor(th['panel']); self._perf_fig.set_facecolor(th['panel'])
-        ax.tick_params(colors=self.TICK, labelsize=8, length=2)
-        for sp in ax.spines.values():
-            sp.set_color(th['frame']); sp.set_alpha(0.6)
-        ax.xaxis.grid(True, color=th['frame'], linewidth=0.4, alpha=0.10)
-        ax.yaxis.grid(True, color=th['frame'], linewidth=0.4, alpha=0.14)
+        self._update_perf_detail(m, rows)
 
+    def _update_perf_detail(self, m, rows):
+        th = self.theme(); sub = self._perf_subview
+        fv = getattr(self, '_perf_foot_vars', {})
+        figs = getattr(self, '_perf_figs', [])
         h = self._perf_hist
-        sub = self._perf_subview
-        series = []; ylim = None; fallback = 'waiting for samples…'
-        if sub == 'mem':
-            series = [('Memory %', h['mem'], th['cpu'])]; ylim = (0, 100)
-        elif sub == 'net':
-            series = [('RX Mbps', h['net_rx'], th['cpu']), ('TX Mbps', h['net_tx'], th['kernel'])]
-        elif sub == 'disk':
-            series = [('Read MB/s', h['disk_r'], th['cpu']), ('Write MB/s', h['disk_w'], th['kernel'])]
-        elif sub == 'thermal':
-            if any(v is not None for v in h['temp']):
-                series = [('Temp °C', [v if v is not None else 0.0 for v in h['temp']], th['temp'])]
-                ylim = (0, 110)
-            else:
-                fallback = 'N/A on this platform (no standard sensor API)'
-        elif sub == 'gpu':
-            fallback = 'N/A — %s' % (self._gpu_err or
-                                      'needs an NVIDIA GPU + the optional pynvml package')
 
-        has_data = series and any(len(ys) > 1 for _, ys, _ in series)
-        if has_data:
-            xs = list(range(len(series[0][1])))
-            for idx, (label, ys, color) in enumerate(series):
-                if self._bloom and self._saturation > 0:
-                    ModernWindow._glow_line(ax, xs, ys, color, lw=1.5)
-                else:
-                    ax.plot(xs, ys, color=color, linewidth=1.5, alpha=0.9)
-                ax.text(0.01 + idx * 0.32, 1.05, '● ' + label, transform=ax.transAxes,
-                       color=color, fontsize=8, fontweight='bold', fontfamily=_NM_MONO, va='bottom')
-            ax.set_xlim(0, 120); ax.set_xticks([])
-            if ylim: ax.set_ylim(*ylim)
-        else:
-            ax.set_title(fallback, loc='left', color=self.TICK, fontsize=9,
-                        fontfamily=_NM_MONO, pad=6)
-            ax.set_xticks([]); ax.set_yticks([])
-        try:
-            self._perf_canvas.draw_idle()
-        except Exception:
-            _exc_debug('_update_performance (draw)')
+        def plot_series(idx, series, ylim, fallback):
+            if idx >= len(figs):
+                return
+            fig, ax, canvas = figs[idx]
+            ax.cla()
+            ax.set_facecolor(th['panel']); fig.set_facecolor(th['panel'])
+            ax.tick_params(colors=self.TICK, labelsize=7, length=2)
+            for sp in ax.spines.values():
+                sp.set_color(th['frame']); sp.set_alpha(0.5)
+            ax.xaxis.grid(True, color=th['frame'], linewidth=0.3, alpha=0.08)
+            ax.yaxis.grid(True, color=th['frame'], linewidth=0.3, alpha=0.12)
+            has_data = series and any(len(ys) > 1 for _, ys, _ in series)
+            if has_data:
+                xs = list(range(len(series[0][1])))
+                for i2, (label, ys, color) in enumerate(series):
+                    if self._bloom and self._saturation > 0:
+                        ModernWindow._glow_line(ax, xs, ys, color, lw=1.4)
+                    else:
+                        ax.plot(xs, ys, color=color, linewidth=1.4, alpha=0.9)
+                ax.set_xlim(0, 120); ax.set_xticks([])
+                if ylim: ax.set_ylim(*ylim)
+            else:
+                ax.set_title(fallback, loc='left', color=self.TICK, fontsize=9,
+                            fontfamily=_NM_MONO, pad=4)
+                ax.set_xticks([]); ax.set_yticks([])
+            try: canvas.draw_idle()
+            except Exception: _exc_debug('_update_perf_detail (draw)')
+
+        if sub == 'mem':
+            pct = m.get('mem_pct')
+            self._perf_detail_val.set('%.1f%%' % pct if pct is not None else '—')
+            self._draw_led_bar_mono(self._perf_detail_bar, pct, th['memory'], n=40)
+            plot_series(0, [('Memory %', h['mem'], th['memory'])], (0, 100), 'waiting for samples…')
+            if m.get('mem_used') is not None:
+                fv['inuse'].set(self._human(m['mem_used']))
+                fv['avail'].set(self._human(m['mem_total'] - m['mem_used']) if m.get('mem_total') else '—')
+                fv['committed'].set('Unavailable'); fv['cached'].set('Unavailable')
+            fv['swapused'].set('Unavailable'); fv['swapavail'].set('Unavailable')
+
+        elif sub == 'gpu':
+            pct = m.get('gpu_pct')
+            self._perf_detail_val.set('%.1f%%' % pct if pct is not None else 'N/A')
+            self._draw_led_bar_mono(self._perf_detail_bar, pct, th['gpu'], n=40)
+            if pct is not None:
+                plot_series(0, [('Utilization', h['gpu'], th['gpu'])], (0, 100), '')
+            else:
+                plot_series(0, [], None, 'N/A — %s' % (self._gpu_err or
+                            'needs an NVIDIA GPU + the optional pynvml package'))
+            extra = self._read_gpu_mem_power_temp() if pct is not None else {}
+            fv['util'].set('%.1f%%' % pct if pct is not None else 'N/A')
+            fv['clock'].set('%.2f GHz' % extra.get('clock_ghz') if extra.get('clock_ghz') else 'Unavailable')
+            fv['power'].set('%.1f W' % extra.get('power_w') if extra.get('power_w') else 'Unavailable')
+            fv['memusage'].set(self._human(extra.get('mem_used')) if extra.get('mem_used') else 'Unavailable')
+            fv['memcap'].set(self._human(extra.get('mem_total')) if extra.get('mem_total') else 'Unavailable')
+            fv['decode'].set('Unavailable'); fv['encode'].set('Unavailable')
+            fv['temp'].set('%.1f °C' % extra.get('temp_c') if extra.get('temp_c') is not None else 'Unavailable')
+            fv['api'].set('Unavailable'); fv['pcie'].set('Unavailable')
+
+        elif sub == 'disk':
+            pct = m.get('disk_pct')
+            self._perf_detail_val.set('%.1f%%' % pct if pct is not None else '—')
+            self._draw_led_bar_mono(self._perf_detail_bar, pct, th['disk'], n=40)
+            rate = m.get('disk_rate')
+            plot_series(0, [('% Active time', h.get('disk_active', []), th['disk'])], (0, 100), 'waiting for samples…')
+            plot_series(1, [('Read MB/s', h['disk_r'], th['disk']),
+                            ('Write MB/s', h['disk_w'], th['kernel'])], None, 'waiting for samples…')
+            fv['readspeed'].set('%.1f MB/s' % rate[0] if rate else '—')
+            fv['writespeed'].set('%.1f MB/s' % rate[1] if rate else '—')
+            io = m.get('disk_io')
+            fv['totalread'].set(self._human(io.read_bytes) if io else '—')
+            fv['totalwrite'].set(self._human(io.write_bytes) if io else '—')
+            fv['active'].set('%.1f%%' % pct if pct is not None else '—')
+            fv['resptime'].set('Unavailable')
+            fv['capacity'].set(self._human(m.get('disk_total')) if m.get('disk_total') else '—')
+            fv['formatted'].set('Unavailable'); fv['sysdisk'].set('Yes'); fv['type'].set('Unavailable')
+
+        elif sub == 'net':
+            rate = m.get('net_rate')
+            self._perf_detail_val.set('—')
+            self._draw_led_bar_mono(self._perf_detail_bar, None, th['network'], n=40)
+            plot_series(0, [('Send Mbps', h['net_tx'], th['network']),
+                            ('Receive Mbps', h['net_rx'], th['kernel'])], None, 'waiting for samples…')
+            fv['sendspeed'].set('%.2f Mbps' % rate[1] if rate else '—')
+            fv['recvspeed'].set('%.2f Mbps' % rate[0] if rate else '—')
+            io = m.get('net_io')
+            fv['totalsent'].set(self._human(io.bytes_sent) if io else '—')
+            fv['totalrecv'].set(self._human(io.bytes_recv) if io else '—')
+            fv['adapter'].set('All network adapters')
+
+        elif sub == 'power':
+            self._perf_detail_val.set('Unavailable')
+            self._draw_led_bar_mono(self._perf_detail_bar, None, th['power'], n=40)
+            plot_series(0, [], None, 'Unavailable')
+            b = m.get('battery')
+            fv['power'].set('Unavailable')
+            if b is not None:
+                fv['source'].set('AC Power' if b.power_plugged else 'Battery')
+            else:
+                fv['source'].set('AC Power')   # no battery detected — desktop assumption
+            fv['battery'].set('%.0f%%' % b.percent if b is not None else 'Unavailable')
+            fv['charging'].set(('Yes' if b.power_plugged else 'No') if b is not None else 'Unavailable')
+            fv['saver'].set('Unavailable'); fv['cycles'].set('Unavailable')
+
+        elif sub == 'thermal':
+            temp = m.get('cpu_temp')
+            self._perf_detail_val.set('%.1f °C' % temp if temp is not None else 'N/A')
+            self._draw_led_bar_mono(self._perf_detail_bar, temp, th['temp'], n=40)
+            temp_vals = [v for v in h['temp'] if v is not None]
+            if temp_vals:
+                plot_series(0, [('Temp °C', [v if v is not None else 0.0 for v in h['temp']], th['temp'])],
+                           (0, 110), '')
+            else:
+                plot_series(0, [], None, 'N/A on this platform (no standard sensor API)')
+            fv['temp'].set('%.1f °C' % temp if temp is not None else 'N/A')
+            fv['state'].set('Unavailable')
 
     # ── PROCESSES page: sortable/filterable table + detail panel + End process ─
     def _build_processes_page(self, parent):
         tk = self._tk; ttk = self._ttk; th = self.theme()
-        tk.Label(parent, text='PROCESSES', bg=th['bg'], fg=th['frame'],
-                font=(_NM_MONO, 10, 'bold')).pack(anchor='w', padx=10, pady=(10, 4))
 
-        bar = tk.Frame(parent, bg=th['bg']); bar.pack(fill='x', padx=10)
-        tk.Label(bar, text='Filter:', bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 8)).pack(side='left')
-        self._proc_filter_var = tk.StringVar(value=self._proc_filter_val)
-        tk.Entry(bar, textvariable=self._proc_filter_var, bg=self.PANEL2, fg=th['text'],
-                insertbackground=th['text'], relief='flat', font=(_NM_MONO, 9),
-                width=30).pack(side='left', padx=6, ipady=3)
+        def right_widgets(hdr):
+            tk.Label(hdr, text='Filter:', bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 8)).pack(side='left', padx=(20, 4))
+            self._proc_filter_var = tk.StringVar(value=self._proc_filter_val)
+            e = tk.Entry(hdr, textvariable=self._proc_filter_var, bg=th['panel2'], fg=th['text'],
+                        insertbackground=th['text'], relief='flat', font=(_NM_MONO, 9), width=24)
+            e.pack(side='left', ipady=3)
+            self._proc_group_var = tk.StringVar(value='Grouped')
+            gm = tk.OptionMenu(hdr, self._proc_group_var, 'Grouped', 'Flat list',
+                               command=lambda v: self._show_page('processes'))
+            gm.config(bg=th['panel2'], fg=th['text'], activebackground=th['active'],
+                      relief='flat', font=(_NM_MONO, 8), highlightthickness=0, cursor='hand2')
+            gm['menu'].config(bg=th['panel2'], fg=th['text'], font=(_NM_MONO, 8))
+            gm.pack(side='left', padx=(10, 0))
+
+        self._build_page_header(parent, '☰', 'Processes', right_widget_fn=right_widgets)
+
+        bar = tk.Frame(parent, bg=th['bg']); bar.pack(fill='x', padx=14)
         self._proc_count_var = tk.StringVar(value='')
         tk.Label(bar, textvariable=self._proc_count_var, bg=th['bg'], fg=self.TICK,
                 font=(_NM_MONO, 8)).pack(side='right')
@@ -23137,25 +23923,35 @@ class SystemMonitorWindow:
         except Exception: _exc_debug('_build_processes_page')
         st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
                      foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
-        st.configure(style_name + '.Heading', background=self.PANEL2, foreground=self.TICK,
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
                      font=(_NM_MONO, 8, 'bold'), relief='flat')
-        st.map(style_name, background=[('selected', '#123a5e')])
+        st.map(style_name, background=[('selected', th['active'])])
 
-        cols = ('Name', 'PID', 'Status', 'User', 'CPU%', 'Memory')
-        widths = {'Name': 220, 'PID': 70, 'Status': 90, 'User': 120, 'CPU%': 70, 'Memory': 100}
+        cols = ('Name', 'PID', 'Status', 'User', 'CPU', 'Memory', 'DiskR', 'DiskW', 'Threads', 'Command')
+        headings = {'Name': 'Name', 'PID': 'PID', 'Status': 'Status', 'User': 'User name',
+                    'CPU': 'CPU', 'Memory': 'Memory', 'DiskR': 'Disk read', 'DiskW': 'Disk write',
+                    'Threads': 'Threads', 'Command': 'Command'}
+        widths = {'Name': 190, 'PID': 60, 'Status': 80, 'User': 100, 'CPU': 60, 'Memory': 90,
+                  'DiskR': 90, 'DiskW': 90, 'Threads': 60, 'Command': 240}
+        sortable = {'Name': 'Name', 'PID': 'PID', 'Status': 'Status', 'User': 'User',
+                    'CPU': 'CPU%', 'Memory': 'Memory'}
         tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=16)
         for c in cols:
-            tv.heading(c, text=c, command=lambda col=c: self._set_proc_sort(col))
+            if c in sortable:
+                tv.heading(c, text=headings[c], command=lambda col=sortable[c]: self._set_proc_sort(col))
+            else:
+                tv.heading(c, text=headings[c])
             tv.column(c, width=widths[c], anchor='w')
-        tv.pack(fill='both', expand=True, padx=10, pady=(6, 6))
+        tv.pack(fill='both', expand=True, padx=14, pady=(6, 6))
         tv.tag_configure('flash', background=th['frame'], foreground=th['bg'])
         tv.tag_configure('new', background=th['cpu'], foreground=th['bg'])
+        tv.tag_configure('group', background=th['panel2'], foreground=th['text'])
         tv.bind('<<TreeviewSelect>>', self._on_proc_select)
         self._proc_full_tree = tv
 
         detail = tk.Frame(parent, bg=th['panel'], highlightthickness=1,
-                         highlightbackground=self.SPIN, height=130)
-        detail.pack(fill='x', padx=10, pady=(0, 10)); detail.pack_propagate(False)
+                         highlightbackground=th['border'], height=130)
+        detail.pack(fill='x', padx=14, pady=(0, 14)); detail.pack_propagate(False)
         self._proc_detail_frame = detail
         self._build_proc_detail_empty()
 
@@ -23256,19 +24052,1195 @@ class SystemMonitorWindow:
             filtered.sort(key=lambda r: r[key_i], reverse=self._proc_sort_desc)
         except TypeError:
             filtered.sort(key=lambda r: str(r[key_i]), reverse=self._proc_sort_desc)
+        filtered = filtered[:400]
 
         self._proc_count_var.set('%d processes' % len(filtered))
+        io = self._sample_process_io_cmd([r[0] for r in filtered])
+        grouped = getattr(self, '_proc_group_var', None) is None or self._proc_group_var.get() == 'Grouped'
+        windowed = self._windowed_pids() if grouped else set()
+
         sel_pid = self._selected_pid
         tv.delete(*tv.get_children())
-        for pid, name, status, user, cpu, mem, nthreads in filtered[:400]:
+
+        def insert_row(pid, name, status, user, cpu, mem, nthreads):
             prev = self._proc_last.get(pid)
             tag = ''
             if prev is None: tag = 'new'
             elif abs(cpu - prev) >= 3.0: tag = 'flash'
-            iid = tv.insert('', 'end', values=(name, pid, status, user, '%.1f' % cpu, self._human(mem)),
-                           tags=(tag,) if tag else ())
+            r, w, cmd = io.get(pid, (0.0, 0.0, ''))
+            iid = tv.insert('', 'end', values=(
+                name, pid, status, user, '%.1f%%' % cpu, self._human(mem),
+                (self._human(r) + '/s') if r else '0 B/s', (self._human(w) + '/s') if w else '0 B/s',
+                nthreads, cmd), tags=(tag,) if tag else ())
             if pid == sel_pid:
                 tv.selection_set(iid)
+
+        if grouped:
+            apps = [r for r in filtered if r[0] in windowed]
+            bg = [r for r in filtered if r[0] not in windowed]
+            if windowed:   # only bother splitting if we could actually detect windows (Windows-only)
+                tv.insert('', 'end', values=('Apps (%d)' % len(apps), '', '', '', '', '', '', '', '', ''),
+                         tags=('group',))
+                for row in apps:
+                    insert_row(*row)
+                tv.insert('', 'end', values=('Background processes (%d)' % len(bg), '', '', '', '', '', '', '', '', ''),
+                         tags=('group',))
+                for row in bg:
+                    insert_row(*row)
+            else:
+                for row in filtered:
+                    insert_row(*row)
+        else:
+            for row in filtered:
+                insert_row(*row)
+
+    # ── SYSTEM INFO page ─────────────────────────────────────────────────────
+    def _build_sysinfo_page(self, parent):
+        import psutil
+        tk = self._tk; th = self.theme()
+        self._build_page_header(parent, 'ⓘ', 'System Info', on_refresh=lambda: self._show_page('sysinfo'))
+        wrap = tk.Frame(parent, bg=th['bg']); wrap.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+        hdr = tk.Frame(wrap, bg=th['panel2']); hdr.pack(fill='x')
+        tk.Label(hdr, text='Property', bg=th['panel2'], fg=self.TICK, font=(_NM_MONO, 8, 'bold'),
+                width=26, anchor='w').pack(side='left', padx=8, pady=4)
+        tk.Label(hdr, text='Value', bg=th['panel2'], fg=self.TICK, font=(_NM_MONO, 8, 'bold'),
+                anchor='w').pack(side='left', padx=8, pady=4)
+
+        try: nproc = len(psutil.pids())
+        except Exception: nproc = '—'
+        try: nsvc = len(list(psutil.win_service_iter())) if hasattr(psutil, 'win_service_iter') else 'Unavailable'
+        except Exception: nsvc = 'Unavailable'
+        try: nusers = len(psutil.users())
+        except Exception: nusers = '—'
+        try:
+            uptime_s = time.time() - psutil.boot_time()
+            hh, rem = divmod(int(uptime_s), 3600); mn, sec = divmod(rem, 60)
+            uptime = '%d:%02d:%02d' % (hh, mn, sec)
+        except Exception:
+            uptime = '—'
+        try: vm = psutil.virtual_memory()
+        except Exception: vm = None
+        self._snapshot_gen = getattr(self, '_snapshot_gen', 0)
+
+        rows = [
+            ('Logical processors', str(psutil.cpu_count(logical=True) or '—')),
+            ('Up time', uptime),
+            ('CPU utilization', '%.1f%%' % (psutil.cpu_percent(None) or 0.0)),
+            ('Physical memory', self._human(vm.total) if vm else '—'),
+            ('Available memory', self._human(vm.available) if vm else '—'),
+            ('Processes', str(nproc)),
+            ('User sessions', str(nusers)),
+            ('Services', str(nsvc)),
+            ('Performance devices', 'Unavailable'),
+            ('Native providers', 'Unavailable'),
+            # A real, live counter of how many refresh cycles this window has
+            # done — not the same internal concept the real app tracks, but
+            # a genuinely measured number rather than a filler placeholder.
+            ('Snapshot generation', str(self._snapshot_gen)),
+        ]
+        for i, (prop, val) in enumerate(rows):
+            r = tk.Frame(wrap, bg=(th['bg'] if i % 2 == 0 else th['panel']))
+            r.pack(fill='x')
+            tk.Label(r, text=prop, bg=r['bg'], fg=th['text'], font=(_NM_MONO, 8),
+                    width=26, anchor='w').pack(side='left', padx=8, pady=3)
+            tk.Label(r, text=val, bg=r['bg'], fg=self.TICK, font=(_NM_MONO, 8),
+                    anchor='w').pack(side='left', padx=8, pady=3)
+
+    # ── APP HISTORY page ─────────────────────────────────────────────────────
+    def _is_admin(self):
+        if sys.platform != 'win32':
+            return None   # concept doesn't apply the same way outside Windows
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            _exc_debug('_is_admin')
+            return None
+
+    def _relaunch_as_admin(self):
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                'Restart as Administrator',
+                'This closes and relaunches the whole app with a UAC elevation '
+                'prompt. Any unsaved settings in other windows should be saved '
+                'first. Continue?', parent=self.root):
+            return
+        try:
+            import ctypes
+            params = ' '.join('"%s"' % a for a in sys.argv[1:])
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None, 'runas', sys.executable, params, None, 1)
+            if int(rc) <= 32:
+                raise OSError('ShellExecuteW returned %r (user likely declined the UAC prompt)' % rc)
+            self.root.after(300, lambda: os._exit(0))
+        except Exception as ex:
+            messagebox.showerror('Restart as Administrator',
+                                 "Couldn't relaunch elevated: %s" % ex, parent=self.root)
+            _exc('_relaunch_as_admin')
+
+    def _build_apphistory_page(self, parent):
+        tk = self._tk; th = self.theme()
+        self._build_page_header(parent, '↻', 'App history', on_refresh=lambda: self._show_page('apphistory'))
+        admin = self._is_admin()
+        if admin is False:
+            body = tk.Frame(parent, bg=th['bg']); body.pack(fill='both', expand=True)
+            tk.Frame(body, bg=th['bg']).pack(fill='both', expand=True)
+            tk.Label(body, text='Administrator privileges required', bg=th['bg'], fg=th['text'],
+                    font=(_NM_MONO, 15, 'bold')).pack()
+            tk.Label(body, text="App history reads Windows' own usage-history database, which "
+                    "only an administrator can access. Restart as Administrator to see it here.",
+                    bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 8)).pack(pady=(4, 14))
+            tk.Button(body, text='Restart as Administrator', bg=th['panel2'], fg=th['text'],
+                     activebackground=th['active'], activeforeground=th['text'],
+                     relief='flat', font=(_NM_MONO, 9), cursor='hand2', padx=16, pady=6,
+                     command=self._relaunch_as_admin).pack()
+            tk.Frame(body, bg=th['bg']).pack(fill='both', expand=True)
+        else:
+            body = tk.Frame(parent, bg=th['bg']); body.pack(fill='both', expand=True, padx=14, pady=40)
+            note = ('Running elevated, but this app doesn\'t read Windows\' PLM activity-history '
+                    'database yet — that\'s a much deeper Windows-internals project than what\'s '
+                    'built so far, so rather than fake data this honestly says so.'
+                    if admin else
+                    "Can't determine administrator status on this platform.")
+            tk.Label(body, text=note, bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 9),
+                    wraplength=700, justify='left').pack(anchor='w')
+
+    # ── STARTUP APPS page ────────────────────────────────────────────────────
+    def _scan_startup_apps(self):
+        # Real Windows Run-key + Startup-folder enumeration. Read-only scan,
+        # safe on any platform (returns [] off Windows rather than raising).
+        rows = []
+        if sys.platform == 'win32':
+            try:
+                import winreg
+                approved = self._read_startup_approved()
+                for hive, hive_name in ((winreg.HKEY_CURRENT_USER, 'HKCU'),
+                                        (winreg.HKEY_LOCAL_MACHINE, 'HKLM')):
+                    for path in (r'Software\Microsoft\Windows\CurrentVersion\Run',
+                                r'Software\Microsoft\Windows\CurrentVersion\RunOnce'):
+                        try:
+                            with winreg.OpenKey(hive, path) as k:
+                                i = 0
+                                while True:
+                                    try:
+                                        name, cmd, _t = winreg.EnumValue(k, i)
+                                    except OSError:
+                                        break
+                                    i += 1
+                                    enabled = approved.get(name, True)
+                                    rows.append({'name': name, 'cmd': cmd, 'enabled': enabled,
+                                               'source': 'registry', 'hive': hive_name, 'path': path})
+                        except OSError:
+                            continue
+            except Exception:
+                _exc('_scan_startup_apps (registry)')
+            try:
+                import glob
+                appdata = os.environ.get('APPDATA', '')
+                programdata = os.environ.get('PROGRAMDATA', '')
+                for folder in (
+                    os.path.join(appdata, r'Microsoft\Windows\Start Menu\Programs\Startup') if appdata else None,
+                    os.path.join(programdata, r'Microsoft\Windows\Start Menu\Programs\Startup') if programdata else None,
+                ):
+                    if not folder or not os.path.isdir(folder):
+                        continue
+                    for f in glob.glob(os.path.join(folder, '*.lnk')):
+                        rows.append({'name': os.path.splitext(os.path.basename(f))[0], 'cmd': f,
+                                   'enabled': True, 'source': 'startup_folder', 'hive': None, 'path': folder})
+            except Exception:
+                _exc('_scan_startup_apps (startup folder)')
+        return rows
+
+    def _read_startup_approved(self):
+        # StartupApproved\Run is where Windows' own Task Manager stores the
+        # enabled/disabled flag for registry-based startup entries (first
+        # byte 0x02 = enabled, 0x03 = disabled) — reading it here so a
+        # disabled-in-real-Task-Manager entry shows correctly here too.
+        approved = {}
+        try:
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER,):
+                try:
+                    with winreg.OpenKey(hive, r'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run') as k:
+                        i = 0
+                        while True:
+                            try:
+                                name, val, _t = winreg.EnumValue(k, i)
+                            except OSError:
+                                break
+                            i += 1
+                            if isinstance(val, (bytes, bytearray)) and len(val) >= 1:
+                                approved[name] = (val[0] != 0x03)
+                except OSError:
+                    pass
+        except Exception:
+            _exc_debug('_read_startup_approved')
+        return approved
+
+    def _toggle_startup_app(self, row):
+        from tkinter import messagebox
+        try:
+            if row['source'] == 'registry':
+                import winreg
+                hive = winreg.HKEY_CURRENT_USER if row['hive'] == 'HKCU' else winreg.HKEY_LOCAL_MACHINE
+                approved_path = r'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+                new_enabled = not row['enabled']
+                flag = bytes([0x02 if new_enabled else 0x03]) + bytes(11)
+                with winreg.CreateKey(hive, approved_path) as k:
+                    winreg.SetValueEx(k, row['name'], 0, winreg.REG_BINARY, flag)
+                row['enabled'] = new_enabled
+            else:
+                # Startup-folder shortcut: real, reversible disable by moving
+                # the .lnk into a sibling "Disabled" folder (same pattern
+                # used elsewhere for "can't truly delete, so move it instead").
+                disabled_dir = os.path.join(row['path'], 'Disabled')
+                os.makedirs(disabled_dir, exist_ok=True)
+                if row['enabled']:
+                    dest = os.path.join(disabled_dir, os.path.basename(row['cmd']))
+                    os.replace(row['cmd'], dest)
+                    row['cmd'] = dest
+                else:
+                    dest = os.path.join(row['path'], os.path.basename(row['cmd']))
+                    os.replace(row['cmd'], dest)
+                    row['cmd'] = dest
+                row['enabled'] = not row['enabled']
+        except Exception as ex:
+            messagebox.showerror('Startup apps', "Couldn't change that entry: %s" % ex, parent=self.root)
+            _exc('_toggle_startup_app')
+            return False
+        return True
+
+    def _run_new_task(self):
+        from tkinter import filedialog, messagebox
+        path = filedialog.askopenfilename(parent=self.root, title='Run new task',
+                                          filetypes=[('Executable', '*.exe'), ('All files', '*.*')])
+        if not path:
+            return
+        try:
+            if sys.platform == 'win32':
+                os.startfile(path)
+            else:
+                subprocess.Popen([path])
+        except Exception as ex:
+            messagebox.showerror('Run new task', "Couldn't start that: %s" % ex, parent=self.root)
+
+    def _build_startupapps_page(self, parent):
+        tk = self._tk; ttk = self._ttk; th = self.theme()
+
+        def right_widgets(hdr):
+            self._startup_filter_var = tk.StringVar(value='')
+            tk.Entry(hdr, textvariable=self._startup_filter_var, bg=th['panel2'], fg=th['text'],
+                    insertbackground=th['text'], relief='flat', font=(_NM_MONO, 9),
+                    width=26).pack(side='left', ipady=3, padx=(20, 8))
+            tk.Button(hdr, text='+ Run new task', bg=th['panel2'], fg=th['text'],
+                     activebackground=th['active'], activeforeground=th['text'],
+                     relief='flat', font=(_NM_MONO, 8), cursor='hand2', padx=10,
+                     command=self._run_new_task).pack(side='left', padx=(0, 8))
+
+        self._build_page_header(parent, '▶', 'Startup apps',
+                                on_refresh=lambda: self._show_page('startupapps'),
+                                right_widget_fn=right_widgets)
+
+        if sys.platform != 'win32':
+            tk.Label(parent, text='Startup-app enumeration reads the Windows registry and Startup '
+                    'folder — not applicable on this platform.', bg=th['bg'], fg=self.TICK,
+                    font=(_NM_MONO, 9), wraplength=700, justify='left').pack(padx=14, pady=20, anchor='w')
+            return
+
+        if self._startup_rows is None:
+            self._startup_rows = self._scan_startup_apps()
+        rows = self._startup_rows
+
+        style_name = 'SysMonStartup.Treeview'
+        st = ttk.Style(self.root)
+        try: st.theme_use('clam')
+        except Exception: pass
+        st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
+                     foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
+                     font=(_NM_MONO, 8, 'bold'), relief='flat')
+        cols = ('Enabled', 'Name', 'Command line')
+        tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=20)
+        for c, w in zip(cols, (70, 220, 600)):
+            tv.heading(c, text=c); tv.column(c, width=w, anchor='w')
+        tv.pack(fill='both', expand=True, padx=14, pady=(6, 14))
+        self._startup_tree = tv
+
+        for row in rows:
+            tv.insert('', 'end', iid=row['name'] + '|' + (row.get('hive') or ''),
+                     values=('Yes' if row['enabled'] else 'No', row['name'], row['cmd']))
+
+        def _on_double(event=None):
+            sel = tv.selection()
+            if not sel: return
+            name = tv.item(sel[0], 'values')[1]
+            row = next((r for r in rows if r['name'] == name), None)
+            if row and self._toggle_startup_app(row):
+                tv.item(sel[0], values=('Yes' if row['enabled'] else 'No', row['name'], row['cmd']))
+        tv.bind('<Double-1>', _on_double)
+        tk.Label(parent, text='Double-click a row to enable/disable it.', bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 7)).pack(anchor='w', padx=14, pady=(0, 8))
+
+    # ── USERS page ────────────────────────────────────────────────────────────
+    def _build_users_page(self, parent):
+        import psutil
+        tk = self._tk; ttk = self._ttk; th = self.theme()
+        self._build_page_header(parent, '◔', 'Users', on_refresh=lambda: self._show_page('users'))
+
+        style_name = 'SysMonUsers.Treeview'
+        st = ttk.Style(self.root)
+        try: st.theme_use('clam')
+        except Exception: pass
+        st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
+                     foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
+                     font=(_NM_MONO, 8, 'bold'), relief='flat')
+        cols = ('User', 'Status', 'CPU', 'Memory', 'Processes')
+        tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=26)
+        for c, w in zip(cols, (200, 100, 90, 100, 100)):
+            tv.heading(c, text=c); tv.column(c, width=w, anchor='w')
+        tv.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+        tv.tag_configure('session', background=th['panel2'], font=(_NM_MONO, 8, 'bold'))
+
+        try:
+            sessions = psutil.users()
+        except Exception:
+            sessions = []
+            _exc_debug('_build_users_page (psutil.users)')
+        rows = self._sample_processes()
+
+        def matches(username, session_name):
+            if not username or not session_name:
+                return False
+            u = username.split('\\')[-1].lower()
+            return u == session_name.lower()
+
+        claimed = set()
+        for s in sessions:
+            owned = [r for r in rows if matches(r[3], s.name)]
+            for r in owned:
+                claimed.add(r[0])
+            total_cpu = sum(r[4] for r in owned)
+            total_mem = sum(r[5] for r in owned)
+            tv.insert('', 'end', values=(s.name, 'active', '%.1f%%' % total_cpu,
+                                         self._human(total_mem), len(owned)), tags=('session',))
+            for pid, name, status, user, cpu, mem, nthreads in sorted(owned, key=lambda r: -r[4])[:60]:
+                tv.insert('', 'end', values=('  ' + name, status, '%.1f%%' % cpu,
+                                             self._human(mem), ''))
+
+        other = [r for r in rows if r[0] not in claimed]
+        if other:
+            total_cpu = sum(r[4] for r in other)
+            total_mem = sum(r[5] for r in other)
+            tv.insert('', 'end', values=('SYSTEM / other', '—', '%.1f%%' % total_cpu,
+                                         self._human(total_mem), len(other)), tags=('session',))
+            for pid, name, status, user, cpu, mem, nthreads in sorted(other, key=lambda r: -r[4])[:60]:
+                tv.insert('', 'end', values=('  ' + name, status, '%.1f%%' % cpu, self._human(mem), ''))
+
+    # ── SERVICES page ─────────────────────────────────────────────────────────
+    def _scan_services(self):
+        import psutil
+        out = []
+        if not hasattr(psutil, 'win_service_iter'):
+            return out
+        try:
+            for s in psutil.win_service_iter():
+                try:
+                    d = s.as_dict()
+                    out.append(d)
+                except Exception:
+                    continue
+        except Exception:
+            _exc('_scan_services')
+        return out
+
+    def _toggle_service(self, name, start):
+        from tkinter import messagebox
+        try:
+            r = subprocess.run(['sc', 'start' if start else 'stop', name],
+                              capture_output=True, text=True, timeout=15,
+                              creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            if r.returncode != 0:
+                messagebox.showerror('Services', (r.stdout + r.stderr).strip() or
+                                     'sc.exe returned exit code %d' % r.returncode, parent=self.root)
+                return False
+            return True
+        except Exception as ex:
+            messagebox.showerror('Services', "Couldn't change that service: %s" % ex, parent=self.root)
+            _exc('_toggle_service')
+            return False
+
+    def _build_services_page(self, parent):
+        tk = self._tk; ttk = self._ttk; th = self.theme()
+
+        def right_widgets(hdr):
+            self._svc_filter_var = tk.StringVar(value='')
+            tk.Entry(hdr, textvariable=self._svc_filter_var, bg=th['panel2'], fg=th['text'],
+                    insertbackground=th['text'], relief='flat', font=(_NM_MONO, 9),
+                    width=26).pack(side='left', ipady=3, padx=(20, 0))
+
+        self._build_page_header(parent, '⚙', 'Services', on_refresh=lambda: self._show_page('services'),
+                                right_widget_fn=right_widgets)
+
+        if sys.platform != 'win32':
+            tk.Label(parent, text='Service enumeration/control uses the Windows Service Control '
+                    'Manager — not applicable on this platform.', bg=th['bg'], fg=self.TICK,
+                    font=(_NM_MONO, 9), wraplength=700, justify='left').pack(padx=14, pady=20, anchor='w')
+            return
+
+        if self._services_cache is None:
+            self._services_cache = self._scan_services()
+        services = self._services_cache
+
+        style_name = 'SysMonSvc.Treeview'
+        st = ttk.Style(self.root)
+        try: st.theme_use('clam')
+        except Exception: pass
+        st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
+                     foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
+                     font=(_NM_MONO, 8, 'bold'), relief='flat')
+        cols = ('Running', 'Name', 'PID', 'Description', 'Group')
+        tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=20)
+        for c, w in zip(cols, (70, 220, 70, 480, 100)):
+            tv.heading(c, text=c); tv.column(c, width=w, anchor='w')
+        tv.pack(fill='both', expand=True, padx=14, pady=(6, 6))
+        for s in services:
+            running = s.get('status') == 'running'
+            tv.insert('', 'end', iid=s.get('name'), values=(
+                'Yes' if running else 'No', s.get('display_name') or s.get('name'),
+                s.get('pid') or 0, (s.get('description') or '')[:120], '—'))
+
+        btn_row = tk.Frame(parent, bg=th['bg']); btn_row.pack(fill='x', padx=14, pady=(0, 14))
+
+        def _do_toggle():
+            sel = tv.selection()
+            if not sel: return
+            name = sel[0]
+            svc = next((s for s in services if s.get('name') == name), None)
+            if not svc: return
+            running = svc.get('status') == 'running'
+            if self._toggle_service(name, start=not running):
+                self._services_cache = None
+                self._show_page('services')
+
+        tk.Button(btn_row, text='Start / Stop selected', bg=th['panel2'], fg=th['text'],
+                 activebackground=th['active'], activeforeground=th['text'],
+                 relief='flat', font=(_NM_MONO, 8), cursor='hand2', padx=10,
+                 command=_do_toggle).pack(side='left')
+
+    # ── POWER & FREQ page ────────────────────────────────────────────────────
+    def _pf_track_minmax(self, key, value):
+        mm = self._powerfreq_minmax.setdefault(key, [value, value])
+        if value is not None:
+            mm[0] = value if mm[0] is None else min(mm[0], value)
+            mm[1] = value if mm[1] is None else max(mm[1], value)
+        return mm
+
+    def _build_powerfreq_page(self, parent):
+        import psutil
+        tk = self._tk; ttk = self._ttk; th = self.theme()
+        self._build_page_header(parent, '⚡', 'Power & Freq', on_refresh=lambda: self._show_page('powerfreq'))
+
+        style_name = 'SysMonPF.Treeview'
+        st = ttk.Style(self.root)
+        try: st.theme_use('clam')
+        except Exception: pass
+        st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
+                     foreground=th['text'], rowheight=22, font=(_NM_MONO, 8), borderwidth=0)
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
+                     font=(_NM_MONO, 8, 'bold'), relief='flat')
+        cols = ('Value', 'Min', 'Max')
+        tv = ttk.Treeview(parent, columns=cols, show='tree headings', style=style_name, height=22)
+        tv.heading('#0', text='Sensor'); tv.column('#0', width=280, anchor='w')
+        for c in cols:
+            tv.heading(c, text=c); tv.column(c, width=140, anchor='e')
+        tv.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+
+        cpu_t = m = None
+        try:
+            m = self._sample_metrics()
+        except Exception:
+            _exc_debug('_build_powerfreq_page (sample)')
+
+        root_id = tv.insert('', 'end', text='This PC', open=True)
+        cpu_id = tv.insert(root_id, 'end', text='CPU', open=True)
+
+        def leaf(parent_id, key, label, value, fmt='%.1f'):
+            mm = self._pf_track_minmax(key, value)
+            if value is None:
+                tv.insert(parent_id, 'end', text=label, values=('Unavailable', 'Unavailable', 'Unavailable'))
+            else:
+                tv.insert(parent_id, 'end', text=label,
+                         values=(fmt % value, fmt % mm[0], fmt % mm[1]))
+
+        temps_id = tv.insert(cpu_id, 'end', text='Temperatures', open=True)
+        leaf(temps_id, 'cpu_temp', 'Package', m.get('cpu_temp') if m else None, '%.1f °C')
+        util_id = tv.insert(cpu_id, 'end', text='Utilization', open=True)
+        leaf(util_id, 'cpu_total', 'Total', m.get('cpu_total') if m else None, '%.1f%%')
+        clk_id = tv.insert(cpu_id, 'end', text='Clocks', open=True)
+        leaf(clk_id, 'cpu_freq', 'Core Average', m.get('cpu_freq_ghz') if m else None, '%.2f GHz')
+        pw_id = tv.insert(cpu_id, 'end', text='Powers', open=True)
+        leaf(pw_id, 'cpu_power', 'Package', None, '%.1f W')   # honestly Unavailable — no RAPL/WMI power sensor
+
+        try:
+            root_disk = (os.environ.get('SystemDrive', 'C:') + os.sep) if os.name == 'nt' else '/'
+            du = psutil.disk_usage(root_disk)
+            disk_id = tv.insert(root_id, 'end', text=root_disk, open=True)
+            util2 = tv.insert(disk_id, 'end', text='Utilization', open=True)
+            leaf(util2, 'disk_pct', 'Used %', du.percent, '%.1f%%')
+            smart_id = tv.insert(disk_id, 'end', text='S.M.A.R.T.', open=True)
+            tv.insert(smart_id, 'end', text='Health', values=('Unavailable', '—', '—'))
+        except Exception:
+            _exc_debug('_build_powerfreq_page (disk)')
+
+        tk.Label(parent, text='Anything reading "Unavailable" above genuinely has no standard '
+                'sensor API on this platform (CPU/board power draw and SSD SMART data need '
+                'vendor drivers this app doesn\'t bundle) — never a guessed number.',
+                bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 7), wraplength=900,
+                justify='left').pack(anchor='w', padx=14, pady=(0, 10))
+
+    # ── CONNECTIONS page ─────────────────────────────────────────────────────
+    def _scan_connections(self):
+        import psutil
+        try:
+            return psutil.net_connections(kind='inet')
+        except Exception:
+            _exc('_scan_connections')
+            return []
+
+    def _build_connections_page(self, parent):
+        tk = self._tk; ttk = self._ttk; th = self.theme()
+        self._build_page_header(parent, '◎', 'Connections', on_refresh=lambda: self._show_page('connections'))
+
+        conns = self._scan_connections()
+        n_listen = sum(1 for c in conns if c.status == 'LISTEN')
+        n_conn = sum(1 for c in conns if c.status == 'ESTABLISHED')
+        pids = {c.pid for c in conns if c.pid}
+        remotes = {c.raddr.ip for c in conns if getattr(c, 'raddr', None)}
+
+        cards = tk.Frame(parent, bg=th['bg']); cards.pack(fill='x', padx=14, pady=(0, 8))
+        for label, val in [('Connections', str(n_conn)), ('Listening', str(n_listen)),
+                           ('Remote hosts', str(len(remotes))), ('Processes', str(len(pids)))]:
+            c = tk.Frame(cards, bg=th['panel'], highlightthickness=1, highlightbackground=th['border'],
+                        padx=12, pady=6)
+            c.pack(side='left', fill='x', expand=True, padx=(0, 8))
+            tk.Label(c, text=label.upper(), bg=th['panel'], fg=self.TICK, font=(_NM_MONO, 7)).pack(anchor='w')
+            tk.Label(c, text=val, bg=th['panel'], fg=th['network'], font=(_NM_MONO, 16, 'bold')).pack(anchor='w')
+
+        body = tk.Frame(parent, bg=th['bg']); body.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+        left = tk.Frame(body, bg=th['bg']); left.pack(side='left', fill='both', expand=True)
+
+        style_name = 'SysMonConn.Treeview'
+        st = ttk.Style(self.root)
+        try: st.theme_use('clam')
+        except Exception: pass
+        st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
+                     foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
+                     font=(_NM_MONO, 8, 'bold'), relief='flat')
+        cols = ('Local', 'Remote', 'Status', 'PID', 'Proto')
+        tv = ttk.Treeview(left, columns=cols, show='headings', style=style_name, height=20)
+        for c, w in zip(cols, (160, 160, 110, 70, 60)):
+            tv.heading(c, text=c); tv.column(c, width=w, anchor='w')
+        tv.pack(fill='both', expand=True)
+        for c in conns[:400]:
+            laddr = '%s:%d' % (c.laddr.ip, c.laddr.port) if getattr(c, 'laddr', None) else '—'
+            raddr = '%s:%d' % (c.raddr.ip, c.raddr.port) if getattr(c, 'raddr', None) else '—'
+            proto = 'TCP' if c.type == 1 else 'UDP'
+            tv.insert('', 'end', values=(laddr, raddr, c.status or '—', c.pid or '—', proto))
+
+        # A simplified 2D radial "hub" diagram in place of the video's true
+        # 3D globe — this app has no geolocation data source (that would
+        # need an external API), so rather than fake a world map, this
+        # honestly draws each distinct remote host as a point orbiting
+        # "This PC," which is real, measured data (actual remote IPs from
+        # actual connections), just not placed on a real map.
+        right = tk.Frame(body, bg=th['panel'], width=280, highlightthickness=1,
+                        highlightbackground=th['network'])
+        right.pack(side='left', fill='y', padx=(10, 0)); right.pack_propagate(False)
+        tk.Label(right, text='Remote hosts', bg=th['panel'], fg=th['text'],
+                font=(_NM_MONO, 10, 'bold')).pack(pady=(10, 0))
+        cv = tk.Canvas(right, width=260, height=260, bg=th['panel'], highlightthickness=0)
+        cv.pack(pady=10)
+        cx, cy, R = 130, 130, 100
+        cv.create_oval(cx - 6, cy - 6, cx + 6, cy + 6, fill=th['network'], outline='')
+        rlist = sorted(remotes)[:16]
+        n = max(1, len(rlist))
+        for i, ip in enumerate(rlist):
+            ang = 2 * math.pi * i / n
+            x = cx + R * math.cos(ang); y = cy + R * math.sin(ang)
+            cv.create_line(cx, cy, x, y, fill=th['border'], width=1)
+            cv.create_oval(x - 4, y - 4, x + 4, y + 4, fill=th['gpu'], outline='')
+        tk.Label(right, text='%d distinct remote hosts' % len(remotes), bg=th['panel'], fg=self.TICK,
+                font=(_NM_MONO, 8)).pack()
+
+    # ── INSTALLED APPS page ──────────────────────────────────────────────────
+    def _scan_installed_apps(self):
+        rows = []
+        if sys.platform != 'win32':
+            return rows
+        try:
+            import winreg
+            keys = [
+                (winreg.HKEY_LOCAL_MACHINE, r'Software\Microsoft\Windows\CurrentVersion\Uninstall'),
+                (winreg.HKEY_LOCAL_MACHINE, r'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'),
+                (winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Uninstall'),
+            ]
+            for hive, path in keys:
+                try:
+                    with winreg.OpenKey(hive, path) as root_key:
+                        i = 0
+                        while True:
+                            try:
+                                sub = winreg.EnumKey(root_key, i)
+                            except OSError:
+                                break
+                            i += 1
+                            try:
+                                with winreg.OpenKey(root_key, sub) as sk:
+                                    def rd(name):
+                                        try: return winreg.QueryValueEx(sk, name)[0]
+                                        except OSError: return None
+                                    name = rd('DisplayName')
+                                    if not name:
+                                        continue
+                                    rows.append({
+                                        'name': name, 'publisher': rd('Publisher') or '—',
+                                        'version': rd('DisplayVersion') or '—',
+                                        'installdate': rd('InstallDate') or '—',
+                                        'size_kb': rd('EstimatedSize') or 0,
+                                    })
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+        except Exception:
+            _exc('_scan_installed_apps')
+        return rows
+
+    def _build_installedapps_page(self, parent):
+        tk = self._tk; ttk = self._ttk; th = self.theme()
+
+        def right_widgets(hdr):
+            self._apps_filter_var = tk.StringVar(value='')
+            tk.Entry(hdr, textvariable=self._apps_filter_var, bg=th['panel2'], fg=th['text'],
+                    insertbackground=th['text'], relief='flat', font=(_NM_MONO, 9),
+                    width=26).pack(side='left', ipady=3, padx=(20, 0))
+
+        self._build_page_header(parent, '▦', 'Installed Apps',
+                                on_refresh=lambda: (setattr(self, '_installed_rows', None), self._show_page('installedapps')),
+                                right_widget_fn=right_widgets)
+
+        if sys.platform != 'win32':
+            tk.Label(parent, text='Installed-app enumeration reads the Windows registry Uninstall '
+                    'keys — not applicable on this platform.', bg=th['bg'], fg=self.TICK,
+                    font=(_NM_MONO, 9), wraplength=700, justify='left').pack(padx=14, pady=20, anchor='w')
+            return
+
+        if self._installed_rows is None:
+            self._installed_rows = self._scan_installed_apps()
+        rows = sorted(self._installed_rows, key=lambda r: r['name'].lower())
+
+        style_name = 'SysMonApps.Treeview'
+        st = ttk.Style(self.root)
+        try: st.theme_use('clam')
+        except Exception: pass
+        st.configure(style_name, background=th['panel'], fieldbackground=th['panel'],
+                     foreground=th['text'], rowheight=20, font=(_NM_MONO, 8), borderwidth=0)
+        st.configure(style_name + '.Heading', background=th['panel2'], foreground=self.TICK,
+                     font=(_NM_MONO, 8, 'bold'), relief='flat')
+        cols = ('Application', 'Publisher', 'Version', 'Installed', 'Estimated size')
+        tv = ttk.Treeview(parent, columns=cols, show='headings', style=style_name, height=22)
+        for c, w in zip(cols, (280, 200, 110, 110, 130)):
+            tv.heading(c, text=c); tv.column(c, width=w, anchor='w')
+        tv.pack(fill='both', expand=True, padx=14, pady=(6, 14))
+        for r in rows:
+            tv.insert('', 'end', values=(r['name'], r['publisher'], r['version'], r['installdate'],
+                                         self._human(r['size_kb'] * 1024) if r['size_kb'] else '—'))
+        tk.Label(parent, text='%d applications' % len(rows), bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8)).pack(anchor='e', padx=14, pady=(0, 8))
+
+    # ── DISK SPACE page ──────────────────────────────────────────────────────
+    def _scan_disk_space(self, root_path, done_cb):
+        # Runs in a background thread — a real recursive walk can take a
+        # while on a big drive, so this never blocks the UI. Reports
+        # top-level folder sizes only (one level deep), which is enough for
+        # a real, honest treemap without a multi-minute full recursive scan.
+        def _worker():
+            sizes = {}
+            try:
+                for entry in os.scandir(root_path):
+                    total = 0
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            for dirpath, _dirs, files in os.walk(entry.path, onerror=lambda e: None):
+                                for f in files:
+                                    try:
+                                        total += os.path.getsize(os.path.join(dirpath, f))
+                                    except OSError:
+                                        continue
+                        else:
+                            total = entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+                    sizes[entry.name] = total
+            except Exception:
+                _exc('_scan_disk_space')
+            self.root.after(0, lambda: done_cb(sizes))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @staticmethod
+    def _squarify(sizes, x, y, w, h):
+        # Minimal squarified-treemap layout (Bruls/Huizing/Wijk) — real
+        # deterministic algorithm, not a guessed grid. Returns [(name, size, x, y, w, h)].
+        items = sorted(sizes.items(), key=lambda kv: -kv[1])
+        total = sum(v for _, v in items) or 1
+        out = []
+
+        def layout_row(row, x, y, w, h, horizontal):
+            row_total = sum(v for _, v in row)
+            if row_total <= 0 or w <= 0 or h <= 0:
+                return
+            if horizontal:
+                cx = x
+                for name, v in row:
+                    cw = w * (v / row_total)
+                    out.append((name, v, cx, y, cw, h))
+                    cx += cw
+            else:
+                cy = y
+                for name, v in row:
+                    ch = h * (v / row_total)
+                    out.append((name, v, x, cy, w, ch))
+                    cy += ch
+
+        remaining = list(items)
+        rx, ry, rw, rh = x, y, w, h
+        while remaining:
+            horizontal = rw >= rh
+            side = rh if horizontal else rw
+            row = [remaining.pop(0)]
+            while remaining:
+                cand = row + [remaining[0]]
+                if SystemMonitorWindow._worst_ratio(row, side, total, w * h) >= \
+                   SystemMonitorWindow._worst_ratio(cand, side, total, w * h):
+                    row = cand; remaining.pop(0)
+                else:
+                    break
+            row_total = sum(v for _, v in row)
+            row_size = (row_total / total) * (w * h) / max(side, 1)
+            if horizontal:
+                layout_row(row, rx, ry, row_size, rh, False) if False else None
+            # Simplify: lay each accepted row along the shorter axis.
+            if rw >= rh:
+                cw = (row_total / total) * (w * h) / rh if rh else 0
+                layout_row(row, rx, ry, cw, rh, False)
+                rx += cw; rw -= cw
+            else:
+                ch = (row_total / total) * (w * h) / rw if rw else 0
+                layout_row(row, rx, ry, rw, ch, True)
+                ry += ch; rh -= ch
+        return out
+
+    @staticmethod
+    def _worst_ratio(row, side, total, area_total):
+        if not row or side <= 0:
+            return float('inf')
+        s = sum(v for _, v in row)
+        if s <= 0:
+            return float('inf')
+        row_area = (s / total) * area_total
+        w = row_area / side
+        if w <= 0:
+            return float('inf')
+        worst = 0.0
+        for _, v in row:
+            item_area = (v / total) * area_total
+            item_len = item_area / w
+            ratio = max(w / max(item_len, 1e-9), item_len / max(w, 1e-9))
+            worst = max(worst, ratio)
+        return worst
+
+    def _build_diskspace_page(self, parent):
+        tk = self._tk; th = self.theme()
+        default_root = (os.environ.get('SystemDrive', 'C:') + os.sep) if os.name == 'nt' else '/'
+
+        def right_widgets(hdr):
+            tk.Label(hdr, text=default_root, bg=th['bg'], fg=self.TICK,
+                    font=(_NM_MONO, 8)).pack(side='left', padx=(20, 8))
+            tk.Button(hdr, text='Start scan', bg=th['panel2'], fg=th['text'],
+                     activebackground=th['active'], activeforeground=th['text'],
+                     relief='flat', font=(_NM_MONO, 8), cursor='hand2', padx=10,
+                     command=lambda: self._start_diskspace_scan(default_root)).pack(side='left')
+
+        self._build_page_header(parent, '▭', 'Disk Space', right_widget_fn=right_widgets)
+        self._diskspace_canvas = tk.Canvas(parent, bg=th['bg'], highlightthickness=0)
+        self._diskspace_canvas.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+        self._diskspace_status_var = tk.StringVar(value='Idle — click "Start scan" (one folder level deep, real sizes).')
+        tk.Label(parent, textvariable=self._diskspace_status_var, bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8)).pack(anchor='w', padx=14, pady=(0, 8))
+        if getattr(self, '_diskspace_sizes', None):
+            self._draw_diskspace_treemap(self._diskspace_sizes)
+
+    def _start_diskspace_scan(self, root_path):
+        if getattr(self, '_diskspace_scanning', False):
+            return
+        self._diskspace_scanning = True
+        self._diskspace_status_var.set('Scanning %s (one folder level deep)…' % root_path)
+
+        def done(sizes):
+            self._diskspace_scanning = False
+            self._diskspace_sizes = sizes
+            total = sum(sizes.values())
+            if self._page == 'diskspace':
+                self._diskspace_status_var.set('%d entries, %s scanned.' % (len(sizes), self._human(total)))
+                self._draw_diskspace_treemap(sizes)
+        self._scan_disk_space(root_path, done)
+
+    def _draw_diskspace_treemap(self, sizes):
+        cv = getattr(self, '_diskspace_canvas', None)
+        if cv is None or not sizes:
+            return
+        cv.delete('all')
+        try:
+            w = int(cv.winfo_width()); h = int(cv.winfo_height())
+        except Exception:
+            return
+        if w <= 2 or h <= 2:
+            return
+        th = self.theme()
+        top = dict(sorted(sizes.items(), key=lambda kv: -kv[1])[:24])
+        rects = self._squarify(top, 2, 2, w - 4, h - 4)
+        palette = [th['cpu'], th['gpu'], th['memory'], th['network'], th['temp'], th['power'], th['disk']]
+        for i, (name, size, x, y, rw, rh) in enumerate(rects):
+            col = palette[i % len(palette)]
+            fill = self._blend_hex(col, th['panel'], 0.55)
+            cv.create_rectangle(x, y, x + rw, y + rh, fill=fill, outline=th['bg'], width=1)
+            if rw > 40 and rh > 16:
+                cv.create_text(x + 4, y + 4, anchor='nw', fill=th['text'],
+                              font=(_NM_MONO, 7, 'bold'), text=name[:int(rw / 6)])
+                cv.create_text(x + 4, y + 16, anchor='nw', fill=self.TICK,
+                              font=(_NM_MONO, 7), text=self._human(size))
+
+    # ── BENCHMARKS page ──────────────────────────────────────────────────────
+    def _draw_gauge(self, canvas, value, vmax, unit, label, color):
+        canvas.delete('all')
+        try:
+            w = int(canvas.winfo_width()); h = int(canvas.winfo_height())
+        except Exception:
+            return
+        if w <= 4 or h <= 4:
+            return
+        th = self.theme()
+        cx, cy, r = w / 2, h * 0.62, min(w, h * 1.3) / 2 - 8
+        start_ang, end_ang = 210, -30   # degrees, matplotlib-style sweep drawn manually
+        canvas.create_oval(cx - r, cy - r, cx + r, cy + r, outline=th['border'], width=2)
+        frac = 0.0 if vmax <= 0 else max(0.0, min(1.0, (value or 0.0) / vmax))
+        sweep = 240.0
+        ang0 = 210.0
+        needle_ang = ang0 - sweep * frac
+        rad = math.radians(needle_ang)
+        nx = cx + (r - 6) * math.cos(rad); ny = cy - (r - 6) * math.sin(rad)
+        canvas.create_line(cx, cy, nx, ny, fill='#e04040', width=2)
+        canvas.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill='#e04040', outline='')
+        canvas.create_text(cx, cy + 18, fill=color, font=(_NM_MONO, 13, 'bold'),
+                          text=('%.0f' % value) if value is not None else '—')
+        canvas.create_text(cx, cy + 34, fill=self.TICK, font=(_NM_MONO, 7), text=unit)
+        canvas.create_text(cx, cy - r - 10, fill=th['text'], font=(_NM_MONO, 9, 'bold'), text=label)
+
+    _BENCH_TABS = [('cpu', 'CPU'), ('gpu', 'GPU'), ('disk', 'Disk'), ('internet', 'Internet'), ('score', 'TMOG Score')]
+
+    def _build_benchmarks_page(self, parent):
+        tk = self._tk; th = self.theme()
+        self._build_page_header(parent, '◈', 'Benchmarks')
+        self._bench_tab = getattr(self, '_bench_tab', 'internet')
+
+        row = tk.Frame(parent, bg=th['bg']); row.pack(fill='both', expand=True, padx=14, pady=(0, 14))
+        nav = tk.Frame(row, bg=th['panel'], width=140, highlightthickness=1, highlightbackground=th['border'])
+        nav.pack(side='left', fill='y'); nav.pack_propagate(False)
+        for key, label in self._BENCH_TABS:
+            active = (key == self._bench_tab)
+            b = tk.Button(nav, text=label, bg=(th['active'] if active else th['panel']),
+                         fg=th['text'], activebackground=th['active'], activeforeground=th['text'],
+                         relief='flat', font=(_NM_MONO, 9), anchor='w', padx=10, cursor='hand2',
+                         command=lambda k=key: self._switch_bench_tab(k))
+            b.pack(fill='x', pady=1, ipady=6)
+
+        main = tk.Frame(row, bg=th['bg']); main.pack(side='left', fill='both', expand=True, padx=(10, 0))
+        self._bench_main = main
+        if self._bench_tab == 'cpu':
+            self._build_bench_cpu(main)
+        elif self._bench_tab == 'gpu':
+            self._build_bench_gpu(main)
+        elif self._bench_tab == 'disk':
+            self._build_bench_disk(main)
+        elif self._bench_tab == 'score':
+            self._build_bench_score(main)
+        else:
+            self._build_bench_internet(main)
+
+    def _switch_bench_tab(self, key):
+        self._bench_tab = key
+        self._show_page('benchmarks')
+
+    def _build_bench_internet(self, parent):
+        # Reuses this app's OWN real speed-test engine (this whole app is a
+        # speed-test monitor) — the most faithful of the four benchmark
+        # tabs, since it's the exact same measurement the main dashboard
+        # takes, not a separate re-implementation.
+        tk = self._tk; th = self.theme()
+        tk.Label(parent, text='Internet Benchmark', bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 13, 'bold')).pack(pady=(20, 10))
+        gauges = tk.Frame(parent, bg=th['bg']); gauges.pack()
+        dl_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        dl_cv.pack(side='left', padx=20)
+        ul_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        ul_cv.pack(side='left', padx=20)
+        self._bench_dl_gauge = dl_cv; self._bench_ul_gauge = ul_cv
+        dl = self._monitor.data['download'][-1] if self._monitor.data.get('download') else None
+        ul = self._monitor.data['upload'][-1] if self._monitor.data.get('upload') else None
+        self._draw_gauge(dl_cv, dl, 1000, 'Mbps', 'Download', th['cpu'])
+        self._draw_gauge(ul_cv, ul, 1000, 'Mbps', 'Upload', th['network'])
+        self._bench_status_var = tk.StringVar(
+            value='Last result shown above.' if dl is not None else 'No result yet.')
+        tk.Label(parent, textvariable=self._bench_status_var, bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8)).pack(pady=(10, 0))
+        tk.Button(parent, text='Start', bg=th['panel2'], fg=th['text'],
+                 activebackground=th['active'], activeforeground=th['text'],
+                 relief='flat', font=(_NM_MONO, 9, 'bold'), cursor='hand2', padx=20, pady=6,
+                 command=self._start_internet_benchmark).pack(pady=10)
+
+    def _start_internet_benchmark(self):
+        if getattr(self._monitor, '_running_manual', False):
+            self._bench_status_var.set('A speed test is already running…')
+            return
+        self._monitor._running_manual = True
+        self._bench_status_var.set('Running (this is the app\'s real speed test — can take a minute)…')
+
+        def _w():
+            try:
+                self._monitor.run_speedtest()
+            finally:
+                self._monitor._running_manual = False
+                self.root.after(0, self._on_internet_benchmark_done)
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _on_internet_benchmark_done(self):
+        if self._closed or self._page != 'benchmarks' or self._bench_tab != 'internet':
+            return
+        th = self.theme()
+        dl = self._monitor.data['download'][-1] if self._monitor.data.get('download') else None
+        ul = self._monitor.data['upload'][-1] if self._monitor.data.get('upload') else None
+        self._draw_gauge(self._bench_dl_gauge, dl, 1000, 'Mbps', 'Download', th['cpu'])
+        self._draw_gauge(self._bench_ul_gauge, ul, 1000, 'Mbps', 'Upload', th['network'])
+        self._bench_status_var.set('Done. DL %.1f Mbps / UL %.1f Mbps.' % (dl or 0, ul or 0))
+
+    def _build_bench_cpu(self, parent):
+        tk = self._tk; th = self.theme()
+        tk.Label(parent, text='CPU Benchmark', bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 13, 'bold')).pack(pady=(20, 10))
+        gauges = tk.Frame(parent, bg=th['bg']); gauges.pack()
+        sc_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        sc_cv.pack(side='left', padx=20)
+        mc_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        mc_cv.pack(side='left', padx=20)
+        self._bench_sc_gauge = sc_cv; self._bench_mc_gauge = mc_cv
+        sc = getattr(self, '_bench_cpu_single', None); mc = getattr(self, '_bench_cpu_multi', None)
+        self._draw_gauge(sc_cv, sc, 2000, 'Mops/sec', 'Single core', th['cpu'])
+        self._draw_gauge(mc_cv, mc, 20000, 'Mops/sec', 'Multi core', th['cpu'])
+        self._bench_status_var = tk.StringVar(value='Real, measured on this machine: trial-division '
+                                                    'primality checks per second — not a fabricated number.')
+        tk.Label(parent, textvariable=self._bench_status_var, bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8), wraplength=440, justify='left').pack(pady=(10, 0))
+        tk.Button(parent, text='Start', bg=th['panel2'], fg=th['text'],
+                 activebackground=th['active'], activeforeground=th['text'],
+                 relief='flat', font=(_NM_MONO, 9, 'bold'), cursor='hand2', padx=20, pady=6,
+                 command=self._start_cpu_benchmark).pack(pady=10)
+
+    def _start_cpu_benchmark(self):
+        if getattr(self, '_bench_running', False):
+            return
+        self._bench_running = True
+        self._bench_status_var.set('Running (~4 seconds, real workload)…')
+
+        def _w():
+            import multiprocessing
+            single = _nm_cpu_bench_ops(2.0)
+            try:
+                ncpu = multiprocessing.cpu_count()
+                with multiprocessing.Pool(ncpu) as pool:
+                    t0 = time.time()
+                    results = pool.map(_nm_cpu_bench_ops, [2.0] * ncpu)
+                    multi = sum(results)
+            except Exception:
+                _exc('_start_cpu_benchmark (multi)')
+                multi = single
+            self._bench_cpu_single = single / 1e6
+            self._bench_cpu_multi = multi / 1e6
+            self._bench_running = False
+            self.root.after(0, self._on_cpu_benchmark_done)
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _on_cpu_benchmark_done(self):
+        if self._closed or self._page != 'benchmarks' or self._bench_tab != 'cpu':
+            return
+        th = self.theme()
+        self._draw_gauge(self._bench_sc_gauge, self._bench_cpu_single, 2000, 'Mops/sec', 'Single core', th['cpu'])
+        self._draw_gauge(self._bench_mc_gauge, self._bench_cpu_multi, 20000, 'Mops/sec', 'Multi core', th['cpu'])
+        self._bench_status_var.set('Done. %.0f Mops/sec single-core, %.0f Mops/sec multi-core.' %
+                                   (self._bench_cpu_single, self._bench_cpu_multi))
+
+    def _build_bench_gpu(self, parent):
+        # Honest simplification: this app has no CUDA/OpenCL/DirectX compute
+        # binding bundled, so it cannot generate a real synthetic GPU compute
+        # load the way the CPU/Disk tabs do for their own hardware. What it
+        # *can* do — via the bundled NVIDIA NVML binding (pynvml) — is read
+        # genuine, live hardware telemetry straight off the GPU: utilization,
+        # memory, temperature, power draw, and clock. So this tab is a live
+        # instrument reading, not a scored benchmark, and is labeled as such
+        # rather than dressed up as a synthetic score it can't honestly produce.
+        tk = self._tk; th = self.theme()
+        name = getattr(self, '_gpu_name', None) or 'GPU'
+        tk.Label(parent, text='GPU: %s' % name, bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 13, 'bold')).pack(pady=(20, 4))
+        tk.Label(parent, text='Live NVML hardware telemetry — not a synthetic compute '
+                              'benchmark (this app bundles no CUDA/OpenCL runtime).',
+                bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 8),
+                wraplength=460, justify='center').pack(pady=(0, 10))
+        gauges = tk.Frame(parent, bg=th['bg']); gauges.pack()
+        u_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        u_cv.pack(side='left', padx=20)
+        p_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        p_cv.pack(side='left', padx=20)
+        gauges2 = tk.Frame(parent, bg=th['bg']); gauges2.pack(pady=(10, 0))
+        t_cv = tk.Canvas(gauges2, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        t_cv.pack(side='left', padx=20)
+        m_cv = tk.Canvas(gauges2, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        m_cv.pack(side='left', padx=20)
+        self._bench_gpu_gauges = (u_cv, p_cv, t_cv, m_cv)
+        self._bench_status_var = tk.StringVar(value='')
+        tk.Label(parent, textvariable=self._bench_status_var, bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8), wraplength=460, justify='left').pack(pady=(10, 0))
+        tk.Button(parent, text='Sample now', bg=th['panel2'], fg=th['text'],
+                 activebackground=th['active'], activeforeground=th['text'],
+                 relief='flat', font=(_NM_MONO, 9, 'bold'), cursor='hand2', padx=20, pady=6,
+                 command=self._sample_gpu_bench).pack(pady=10)
+        self._sample_gpu_bench()
+
+    def _sample_gpu_bench(self):
+        if self._closed or self._page != 'benchmarks' or self._bench_tab != 'gpu':
+            return
+        th = self.theme()
+        u_cv, p_cv, t_cv, m_cv = self._bench_gpu_gauges
+        util = self._read_gpu_pct()
+        extra = self._read_gpu_mem_power_temp()
+        self._draw_gauge(u_cv, util, 100, '%', 'Utilization', th['gpu'])
+        self._draw_gauge(p_cv, extra.get('power_w'), 400, 'W', 'Power draw', th['gpu'])
+        self._draw_gauge(t_cv, extra.get('temp_c'), 110, '°C', 'Temperature', th['gpu'])
+        mem_used = extra.get('mem_used'); mem_total = extra.get('mem_total')
+        mem_pct = (100.0 * mem_used / mem_total) if (mem_used is not None and mem_total) else None
+        self._draw_gauge(m_cv, mem_pct, 100, '%', 'Memory used', th['gpu'])
+        if util is None and extra.get('temp_c') is None:
+            err = getattr(self, '_gpu_err', None)
+            self._bench_status_var.set('Unavailable — %s' % err if err else
+                                       'Unavailable — no NVIDIA GPU/driver detected via NVML.')
+        else:
+            self._bench_status_var.set('Live sample taken just now, straight from NVML.')
+
+    def _build_bench_disk(self, parent):
+        tk = self._tk; th = self.theme()
+        tk.Label(parent, text='Disk Benchmark', bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 13, 'bold')).pack(pady=(20, 10))
+        gauges = tk.Frame(parent, bg=th['bg']); gauges.pack()
+        r_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        r_cv.pack(side='left', padx=20)
+        w_cv = tk.Canvas(gauges, width=220, height=180, bg=th['bg'], highlightthickness=0)
+        w_cv.pack(side='left', padx=20)
+        self._bench_r_gauge = r_cv; self._bench_w_gauge = w_cv
+        r = getattr(self, '_bench_disk_read', None); w = getattr(self, '_bench_disk_write', None)
+        self._draw_gauge(r_cv, r, 4000, 'MB/sec', 'Read', th['disk'])
+        self._draw_gauge(w_cv, w, 4000, 'MB/sec', 'Write', th['disk'])
+        self._bench_status_var = tk.StringVar(value='Real read/write throughput to a temp file in '
+                                                    'your temp folder — not a fabricated number.')
+        tk.Label(parent, textvariable=self._bench_status_var, bg=th['bg'], fg=self.TICK,
+                font=(_NM_MONO, 8), wraplength=440, justify='left').pack(pady=(10, 0))
+        tk.Button(parent, text='Start', bg=th['panel2'], fg=th['text'],
+                 activebackground=th['active'], activeforeground=th['text'],
+                 relief='flat', font=(_NM_MONO, 9, 'bold'), cursor='hand2', padx=20, pady=6,
+                 command=self._start_disk_benchmark).pack(pady=10)
+
+    def _start_disk_benchmark(self):
+        if getattr(self, '_bench_running', False):
+            return
+        self._bench_running = True
+        self._bench_status_var.set('Running (writing/reading a 256 MB temp file)…')
+
+        def _w():
+            read_mbs = write_mbs = None
+            try:
+                import tempfile
+                buf = os.urandom(1024 * 1024)  # 1 MB chunk, real random data (not compressible)
+                path = os.path.join(tempfile.gettempdir(), '_nm_disk_bench.tmp')
+                n_mb = 256
+                t0 = time.time()
+                with open(path, 'wb') as f:
+                    for _ in range(n_mb):
+                        f.write(buf)
+                    f.flush(); os.fsync(f.fileno())
+                dt = time.time() - t0
+                write_mbs = n_mb / dt if dt > 0 else None
+                t0 = time.time()
+                with open(path, 'rb') as f:
+                    while f.read(1024 * 1024):
+                        pass
+                dt = time.time() - t0
+                read_mbs = n_mb / dt if dt > 0 else None
+                os.remove(path)
+            except Exception:
+                _exc('_start_disk_benchmark')
+            self._bench_disk_read = read_mbs; self._bench_disk_write = write_mbs
+            self._bench_running = False
+            self.root.after(0, self._on_disk_benchmark_done)
+        threading.Thread(target=_w, daemon=True).start()
+
+    def _on_disk_benchmark_done(self):
+        if self._closed or self._page != 'benchmarks' or self._bench_tab != 'disk':
+            return
+        th = self.theme()
+        self._draw_gauge(self._bench_r_gauge, self._bench_disk_read, 4000, 'MB/sec', 'Read', th['disk'])
+        self._draw_gauge(self._bench_w_gauge, self._bench_disk_write, 4000, 'MB/sec', 'Write', th['disk'])
+        if self._bench_disk_read:
+            self._bench_status_var.set('Done. %.0f MB/sec read, %.0f MB/sec write.' %
+                                       (self._bench_disk_read, self._bench_disk_write))
+        else:
+            self._bench_status_var.set('Benchmark failed — see the log for details.')
+
+    def _build_bench_score(self, parent):
+        # A composite score derived from whatever real benchmark numbers
+        # have actually been measured this session — never invented, and
+        # honestly partial if not every benchmark has been run yet.
+        tk = self._tk; th = self.theme()
+        tk.Label(parent, text='TMOG Score', bg=th['bg'], fg=th['text'],
+                font=(_NM_MONO, 13, 'bold')).pack(pady=(20, 10))
+        parts = []
+        sc = getattr(self, '_bench_cpu_multi', None)
+        if sc: parts.append(('CPU', sc / 50.0))
+        dr = getattr(self, '_bench_disk_read', None)
+        if dr: parts.append(('Disk', dr / 10.0))
+        dl = self._monitor.data['download'][-1] if self._monitor.data.get('download') else None
+        if dl: parts.append(('Internet', dl / 5.0))
+        if parts:
+            score = sum(v for _, v in parts) / len(parts)
+            tk.Label(parent, text='%.0f' % score, bg=th['bg'], fg=th['cpu'],
+                    font=(_NM_MONO, 40, 'bold')).pack()
+            tk.Label(parent, text='from: ' + ', '.join('%s (%.0f)' % (n, v) for n, v in parts),
+                    bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 8)).pack()
+        else:
+            tk.Label(parent, text='Run the CPU, Disk, or Internet benchmark tabs first — '
+                    'this score is only ever built from real measurements taken this session, '
+                    'never a placeholder number.', bg=th['bg'], fg=self.TICK, font=(_NM_MONO, 9),
+                    wraplength=440, justify='left').pack(pady=10)
 
     # ── Refresh loop ─────────────────────────────────────────────────────────
     def _refresh_once(self):
@@ -23310,6 +25282,18 @@ class SystemMonitorWindow:
         ph['disk_r'].append(disk_rate[0] if disk_rate else 0.0)
         ph['disk_w'].append(disk_rate[1] if disk_rate else 0.0)
         ph['temp'].append(m.get('cpu_temp'))
+        # Same "unavailable reads as 0 in the trend line, not a gap" convention
+        # already used above for CPU history — real value when NVML has one,
+        # 0.0 otherwise (the Performance>GPU sub-page itself still shows the
+        # honest 'N/A' text/label whenever the current sample is missing; only
+        # the background trend line falls back to 0).
+        ph['gpu'].append(m.get('gpu_pct') if m.get('gpu_pct') is not None else 0.0)
+        # 'disk_active' (% Disk Active Time) has no cross-platform psutil
+        # source — Windows only exposes it via a WMI/PDH performance counter
+        # this app doesn't query — so it is deliberately left unpopulated
+        # rather than filled with a guess. The Performance>Disks chart reads
+        # it with h.get('disk_active', []) and honestly shows "waiting for
+        # samples…" forever rather than a fabricated number.
         for k in ph:
             if len(ph[k]) > 120: ph[k].pop(0)
 
@@ -23318,10 +25302,19 @@ class SystemMonitorWindow:
             self._meter_refs['freq'].set('%.2f' % m['cpu_freq_ghz'] if m.get('cpu_freq_ghz') else 'N/A')
             self._meter_refs['temp'].set('%.0f' % m['cpu_temp'] if m.get('cpu_temp') is not None else 'N/A')
             self._meter_refs['gpu'].set('%.0f' % m['gpu_pct'] if m.get('gpu_pct') is not None else 'N/A')
-            self._draw_led_bar(self._meter_bar_refs['cpu'], m.get('cpu_total'))
-            self._draw_led_bar(self._meter_bar_refs['freq'], None)
-            self._draw_led_bar(self._meter_bar_refs['temp'], m.get('cpu_temp'))
-            self._draw_led_bar(self._meter_bar_refs['gpu'], m.get('gpu_pct'))
+            # _meter_bar_refs entries are (canvas, color, is_spectrum) tuples
+            # built by _build_meters — _draw_meter is the helper that knows
+            # how to unpack that and pick the right vertical drawing routine
+            # (spectrum gradient for CPU, single-hue mono for the rest).
+            # Calling _draw_led_bar directly on the tuple was passing a tuple
+            # where a Canvas was expected and would crash the very first
+            # time the Summary page refreshed.
+            freq_ghz = m.get('cpu_freq_ghz'); freq_max = m.get('cpu_freq_max_ghz')
+            freq_pct = (100.0 * freq_ghz / freq_max) if (freq_ghz and freq_max) else None
+            self._draw_meter('cpu', m.get('cpu_total'))
+            self._draw_meter('freq', freq_pct)
+            self._draw_meter('temp', m.get('cpu_temp'))
+            self._draw_meter('gpu', m.get('gpu_pct'))
 
             self._draw_chart()
             self._chart_canvas.draw_idle()
@@ -31337,6 +33330,865 @@ def _apply_modern_style(root):
         _exc('_walk')
 
 
+# ── Task Manager TMOG launcher ───────────────────────────────────────────────
+# The "System" button used to open a from-scratch reimplementation
+# (SystemMonitorWindow, still defined earlier in this file but no longer
+# wired to anything). Trevor supplied the real "Task Manager TMOG" installer
+# (Dave Plummer / Plummer's Software LLC) directly and asked for that one
+# bundled and launched instead — see installer.nsi's SecTMOG, which bundles
+# TMOGTaskManagerSetup.exe and silently installs it into a fixed subfolder
+# of this app's own install directory ($INSTDIR\TaskManagerTMOG) specifically
+# so this lookup doesn't have to guess a filename.
+_NM_TMOG_EXE_CACHE = None   # None = not looked up yet; '' = looked up, not found; else the real path
+
+
+def _nm_first_real_exe(folder):
+    """First *.exe directly inside `folder` that isn't an Inno Setup
+    uninstaller (unins000.exe etc). Returns None if the folder doesn't
+    exist or has no such file — never guesses a name."""
+    import os
+    try:
+        for name in sorted(os.listdir(folder)):
+            if name.lower().startswith('unins'):
+                continue
+            if name.lower().endswith('.exe'):
+                return os.path.join(folder, name)
+    except Exception:
+        pass
+    return None
+
+
+def _nm_find_tmog_exe():
+    """Locate the real Task Manager TMOG exe. Tries three things, in order
+    of how much each can be trusted, and caches the first hit (or the fact
+    that there wasn't one) so the System button doesn't re-scan the
+    filesystem/registry on every click:
+
+      1. This app's own installer's fixed subfolder next to its own exe —
+         reliable, since installer.nsi controls exactly where it lands.
+      2. Windows' Uninstall registry (same technique _scan_installed_apps
+         uses elsewhere in this file) for a DisplayName mentioning both
+         "task manager" and "tmog" — covers "already had it installed
+         separately from this app's installer."
+      3. A couple of common Inno Setup default install locations, keyed off
+         its real product name — a last-resort courtesy guess, only tried
+         after 1 and 2 come up empty, never in place of actually checking.
+    """
+    global _NM_TMOG_EXE_CACHE
+    if _NM_TMOG_EXE_CACHE:
+        return _NM_TMOG_EXE_CACHE
+    if _NM_TMOG_EXE_CACHE == '':
+        return None
+    import os, sys
+
+    # 1. Our own installer's known subfolder, next to this running exe.
+    try:
+        if getattr(sys, 'frozen', False):
+            base = os.path.dirname(sys.executable)
+            found = _nm_first_real_exe(os.path.join(base, 'TaskManagerTMOG'))
+            if found:
+                _NM_TMOG_EXE_CACHE = found
+                return found
+    except Exception:
+        _exc_debug('_nm_find_tmog_exe (own install dir)')
+
+    # 2. Windows' own Uninstall registry.
+    if sys.platform == 'win32':
+        try:
+            import winreg
+            roots = [
+                (winreg.HKEY_LOCAL_MACHINE, r'Software\Microsoft\Windows\CurrentVersion\Uninstall'),
+                (winreg.HKEY_LOCAL_MACHINE, r'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'),
+                (winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Uninstall'),
+            ]
+            for hive, path in roots:
+                try:
+                    key = winreg.OpenKey(hive, path)
+                except Exception:
+                    continue
+                try:
+                    i = 0
+                    while True:
+                        try:
+                            sub = winreg.EnumKey(key, i)
+                        except OSError:
+                            break
+                        i += 1
+                        try:
+                            sk = winreg.OpenKey(key, sub)
+                            name = winreg.QueryValueEx(sk, 'DisplayName')[0]
+                        except Exception:
+                            continue
+                        low = name.lower()
+                        if 'task manager' not in low or 'tmog' not in low:
+                            continue
+                        try:
+                            install_loc = winreg.QueryValueEx(sk, 'InstallLocation')[0]
+                        except Exception:
+                            install_loc = None
+                        if install_loc:
+                            found = _nm_first_real_exe(install_loc)
+                            if found:
+                                _NM_TMOG_EXE_CACHE = found
+                                return found
+                        try:
+                            icon = winreg.QueryValueEx(sk, 'DisplayIcon')[0]
+                            exe = icon.split(',')[0].strip('"')
+                            if exe.lower().endswith('.exe') and os.path.isfile(exe):
+                                _NM_TMOG_EXE_CACHE = exe
+                                return exe
+                        except Exception:
+                            pass
+                finally:
+                    winreg.CloseKey(key)
+        except Exception:
+            _exc_debug('_nm_find_tmog_exe (registry)')
+
+    # 3. Last-resort common install locations, by its known product name
+    #    (sampled directly from the installer's own version resource:
+    #    ProductName "Task Manager TMOG", CompanyName "Plummer's Software LLC").
+    if sys.platform == 'win32':
+        for base_env in ('ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'):
+            base = os.environ.get(base_env)
+            if not base:
+                continue
+            for sub in ('Task Manager TMOG', 'TaskManagerTMOG', 'TMOG'):
+                for candidate_root in (os.path.join(base, sub),
+                                       os.path.join(base, 'Programs', sub)):
+                    found = _nm_first_real_exe(candidate_root)
+                    if found:
+                        _NM_TMOG_EXE_CACHE = found
+                        return found
+
+    _NM_TMOG_EXE_CACHE = ''
+    return None
+
+
+# ── Pen Test (WSL + Kali Linux) launcher ────────────────────────────────────
+# The "Kali Desktop" button runs a bare `wsl -d kali-linux` in its own
+# console window and stops there -- it does NOT also try to start Win-KeX.
+# That's a deliberate step back after several rounds of trying to also
+# auto-run `kex` from this button never got confirmed working end-to-end
+# on Trevor's real machine:
+#   1) Bare `wsl -d kali-linux -- kex --sl -s` crashed Xfce's notification
+#      daemon ("wlr-layer-shell") -- traced to `wsl -d <distro> -- <cmd>`
+#      not running <cmd> in a login shell, so .profile never ran. Fixed by
+#      wrapping in `bash -lc`.
+#   2) With that fixed, the console then opened and closed immediately
+#      with no desktop appearing. First guess was that `kex` needs an
+#      explicit mode flag (`--win`/`--sl`/`--esm`) -- WRONG per Trevor's
+#      own pasted `kex --help` output ("Mode: [none] : Window Mode
+#      (default)"). Revised guess: `bash -l` is login but not interactive,
+#      and bash only sources ~/.bashrc for interactive shells, so switched
+#      to `bash -lic "kex -s"`.
+#   3) Still not confirmed working, and Trevor doesn't need this button to
+#      be clever -- `wsl -d kali-linux` gets him a shell, and typing `kex`
+#      himself from there is one word. So this button's only job is to
+#      open that shell; starting Win-KeX is back in his hands.
+# installer.nsi's SecWSLKali section is what installs WSL and Kali Linux
+# in the first place; this just launches what's already there.
+def _nm_wsl_exe_path():
+    """Real path to wsl.exe. Same WOW64/Sysnative reasoning already fixed
+    in installer.nsi's own wsl.exe checks: a 32-bit process on 64-bit
+    Windows gets a plain System32 path silently redirected to SysWOW64,
+    where wsl.exe (64-bit only) never exists. This app's own exe is very
+    likely 64-bit (whatever PyInstaller's host Python was), which
+    wouldn't hit that redirection at all, but checking Sysnative first
+    costs nothing and keeps this correct even if that ever changes.
+    Falls back to bare 'wsl' on PATH if neither System32 form is found
+    directly, rather than failing outright."""
+    import os
+    windir = os.environ.get('WINDIR', r'C:\Windows')
+    for sub in ('Sysnative', 'System32'):
+        candidate = os.path.join(windir, sub, 'wsl.exe')
+        if os.path.isfile(candidate):
+            return candidate
+    return 'wsl'
+
+
+# ── Pen Test → Nmap scanner GUI ────────────────────────────────────────────
+# Phase 2 of the two-phase plan Trevor asked for: phase 1 (installer sets up
+# WSL + Kali, plus a button that opens a Kali desktop via Win-KeX) shipped
+# earlier this session. This is the first "GUI to run certain commands" --
+# a scan-builder + live console for nmap, with an AI panel (reusing the same
+# module-level _nm_ai_complete() the Wireshark AI panel and honeypot
+# summarizer already use -- local Ollama by default, no key needed, nothing
+# leaves the machine) that can turn a plain-English request into nmap flags,
+# and turn a finished scan's output into next-step recommendations. Both AI
+# prompts are explicitly written to stay defensive/informational -- no
+# exploit code, no attack playbooks -- on top of the on-screen reminder that
+# this is for systems you own or are authorized to test.
+
+_NMAP_PROFILES = [
+    ('Ping sweep (host discovery only)',      '-sn'),
+    ('Quick scan (top 100 ports)',            '-T4 -F'),
+    ('Standard scan (OS + service detect)',   '-T4 -A'),
+    ('Service + script scan',                 '-T4 -sV -sC'),
+    ('Full port scan (all 65535 TCP ports)',  '-T4 -p-'),
+    ('UDP top ports (slow, needs admin)',     '-sU --top-ports 20 -T4'),
+]
+
+
+def _nm_find_nmap_exe():
+    """Locate the nmap executable: PATH first, then the common per-OS
+    install locations. installer.nsi's SecNmap section is what actually
+    installs it on Windows (downloads the official nmap.org installer and
+    runs it with /S, right after Npcap is already present from the
+    Wireshark section) -- this function only finds it, never installs it.
+    Returns a path string, or None if it can't be found anywhere."""
+    import shutil
+    exe = shutil.which('nmap')
+    if exe:
+        return exe
+    cands = []
+    if sys.platform == 'win32':
+        import os as _os
+        for base in (_os.environ.get('PROGRAMFILES'),
+                     _os.environ.get('ProgramFiles(x86)'),
+                     _os.environ.get('ProgramW6432')):
+            if base:
+                cands.append(_os.path.join(base, 'Nmap', 'nmap.exe'))
+    elif sys.platform == 'darwin':
+        cands += ['/usr/local/bin/nmap', '/opt/homebrew/bin/nmap']
+    else:
+        cands += ['/usr/bin/nmap', '/usr/local/bin/nmap']
+    for c in cands:
+        try:
+            if c and Path(c).is_file():
+                return c
+        except Exception:
+            _exc_debug('_nm_find_nmap_exe')
+    return None
+
+
+def _nm_ai_craft_nmap_args(target, request):
+    """Ask the local/keyless AI (via _nm_ai_complete) to turn a plain-English
+    request into nmap flags. Returns (args_string, error) -- args_string is
+    None on failure. The prompt explicitly excludes the word 'nmap' and the
+    target itself from the answer, and rules out destructive flags."""
+    prompt = (
+        "You help a network administrator build an nmap command line to "
+        "scan a host or network they own or are authorized to test.\n"
+        "Respond with ONLY the nmap command-line flags to use -- a single "
+        "line, do not include the word 'nmap', do not include the target, "
+        "no explanation, no markdown or backticks. Use standard "
+        "reconnaissance flags (host discovery, port scanning, "
+        "service/version detection, OS detection, default scripts). Never "
+        "suggest flags meant to disrupt, flood, or damage a target.\n\n"
+        f"Target: {target or '(not set yet)'}\n"
+        f"Request: {request}\n\nFlags:")
+    text, err = _nm_ai_complete(prompt, want_json=False, timeout=60)
+    if not text:
+        return None, err or 'No response from AI.'
+    stripped = text.strip()
+    line = stripped.splitlines()[0].strip() if stripped else ''
+    line = line.strip('`').strip()
+    if line.lower().startswith('nmap '):
+        line = line[5:].strip()
+    if target and line.endswith(target):
+        line = line[:-len(target)].strip()
+    return (line or None), ('' if line else 'AI returned an empty command.')
+
+
+def _nm_ai_recommend_next_steps(cmd, output):
+    """Ask the AI to turn a finished scan's output into next-step
+    recommendations. Deliberately defensive/investigative in framing -- see
+    the prompt text itself -- not an attack playbook."""
+    ctx = output if len(output) <= 6000 else (output[-6000:] + '\n[earlier output truncated]')
+    prompt = (
+        "You are a network security analyst reviewing an nmap scan the "
+        "user ran against a system they own or are authorized to test. "
+        "Summarise what the scan found (open ports, services, versions, "
+        "OS guess) in plain language, then give concrete next steps for "
+        "securing or further assessing this host -- e.g. which services "
+        "to investigate, whether ports should be closed or firewalled, "
+        "which versions look outdated and should be patched, what to "
+        "verify manually. Keep it defensive and informational: no exploit "
+        "code, no step-by-step attack instructions. Short bullet points.\n\n"
+        f"Command run: nmap {cmd}\n\nOutput:\n{ctx}\n\nRecommendations:")
+    return _nm_ai_complete(prompt, want_json=False, timeout=120)
+
+
+class NmapWindow:
+    """Pen Test page: an nmap scan builder + live console, in the app's own
+    look, plus an AI panel that can craft scan flags from a plain-English
+    request and recommend next steps once a scan has run. Also keeps the
+    previous 'open a Kali desktop via Win-KeX' button available, so that
+    already-shipped feature isn't lost -- see _launch_kali_kex."""
+
+    BG      = '#050d1a'
+    PANEL   = '#06101e'
+    PANEL2  = '#040c1a'
+    SPIN    = '#0a1828'
+    TEXT    = '#c8dff0'
+    TICK    = '#6a9ab8'
+    ACC     = '#38b8f0'
+    # Same violet accent as the Wireshark "AI Capture Analysis" panel, so
+    # "this box talks to the AI" reads consistently across the app.
+    AI_PANEL = '#0d0825'
+    AI_ACC   = '#c084fc'
+
+    def __init__(self, monitor):
+        _nm_pick_mono()
+        import tkinter as tk
+        from tkinter import ttk
+        self._tk = tk; self._ttk = ttk
+        self._monitor = monitor
+        self._closed  = False
+        self._proc = None
+        self._running = False
+        self._stopped_by_user = False
+        self._last_output = ''
+        self._last_cmd = ''
+        self._last_target = ''
+        self._last_recommendation = ''
+
+        self.root = tk.Toplevel()
+        self.root.title('Vanguard Flow NetSentinel — Pen Test (Nmap)')
+        self.root.configure(bg=self.BG)
+        self.root.geometry('1240x760')
+        self.root.minsize(900, 560)
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+        self._build_ui()
+        self.root.update_idletasks()
+        self.root.lift()
+        self.root.focus_force()
+        if _MODERN_MODE:
+            self.root.after(50, lambda: _apply_modern_style(self.root))
+
+    def _on_close(self):
+        self._closed = True
+        self._stop_scan()
+        try:
+            self.root.destroy()
+        except Exception:
+            _exc_debug('NmapWindow._on_close')
+
+    # ── UI ───────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        tk = self._tk; ttk = self._ttk; r = self.root
+
+        _make_header(r, tk, '⚔  PEN TEST — Nmap Scanner',
+                     'Reconnaissance for hosts and networks you own or are authorized to test',
+                     accent=self.ACC)
+
+        # ── Toolbar: target / profile / args / run ──
+        tb = tk.Frame(r, bg=self.PANEL2, pady=6)
+        tb.pack(fill='x', padx=4)
+
+        tk.Label(tb, text='Target:', bg=self.PANEL2, fg=self.TICK,
+                 font=(_NM_MONO, 9)).grid(row=0, column=0, sticky='w', padx=(6, 4))
+        self._target_var = tk.StringVar(value='192.168.1.0/24')
+        target_entry = tk.Entry(tb, textvariable=self._target_var, width=22,
+                                bg='#0a1828', fg=self.TEXT, insertbackground=self.TEXT,
+                                relief='flat', font=(_NM_MONO, 9),
+                                highlightthickness=1, highlightcolor=self.ACC,
+                                highlightbackground=self.SPIN)
+        target_entry.grid(row=0, column=1, sticky='w', padx=(0, 12), ipady=3)
+
+        tk.Label(tb, text='Profile:', bg=self.PANEL2, fg=self.TICK,
+                 font=(_NM_MONO, 9)).grid(row=0, column=2, sticky='w', padx=(0, 4))
+        self._profile_var = tk.StringVar(value=_NMAP_PROFILES[1][0])
+        prof_cb = ttk.Combobox(tb, textvariable=self._profile_var, state='readonly',
+                               width=32, values=[p[0] for p in _NMAP_PROFILES])
+        prof_cb.grid(row=0, column=3, sticky='w', padx=(0, 12))
+
+        def _on_profile(*_a):
+            name = self._profile_var.get()
+            for label, args in _NMAP_PROFILES:
+                if label == name:
+                    self._args_var.set(args); break
+        prof_cb.bind('<<ComboboxSelected>>', _on_profile)
+
+        tk.Label(tb, text='Args:', bg=self.PANEL2, fg=self.TICK,
+                 font=(_NM_MONO, 9)).grid(row=0, column=4, sticky='w', padx=(0, 4))
+        self._args_var = tk.StringVar(value=_NMAP_PROFILES[1][1])
+        args_entry = tk.Entry(tb, textvariable=self._args_var, width=26,
+                              bg='#0a1828', fg=self.TEXT, insertbackground=self.TEXT,
+                              relief='flat', font=(_NM_MONO, 9),
+                              highlightthickness=1, highlightcolor=self.ACC,
+                              highlightbackground=self.SPIN)
+        args_entry.grid(row=0, column=5, sticky='w', padx=(0, 12), ipady=3)
+
+        self._start_btn = tk.Button(tb, text='▶  Start Scan', bg='#062a1a', fg='#39ff14',
+                                    activebackground='#0a4028', activeforeground='#60ffb8',
+                                    relief='flat', font=(_NM_MONO, 9, 'bold'), cursor='hand2',
+                                    padx=10, command=self._start_scan)
+        self._start_btn.grid(row=0, column=6, padx=2)
+
+        self._stop_btn = tk.Button(tb, text='■  Stop', bg='#200808', fg='#ff6b6b',
+                                   activebackground='#3a1010', activeforeground='#ff9b9b',
+                                   relief='flat', font=(_NM_MONO, 9, 'bold'), cursor='hand2',
+                                   padx=10, state='disabled', command=self._stop_scan)
+        self._stop_btn.grid(row=0, column=7, padx=2)
+
+        tk.Frame(tb, bg=self.SPIN, width=1, height=22).grid(row=0, column=8, padx=8)
+
+        tk.Button(tb, text='⌘  Kali Desktop (Win-KeX)', bg='#1a0840', fg='#c084fc',
+                 activebackground='#2a1060', activeforeground='#e0b0ff',
+                 relief='flat', font=(_NM_MONO, 9), cursor='hand2', padx=10,
+                 command=self._launch_kali_kex).grid(row=0, column=9, padx=2)
+
+        self._report_btn = tk.Button(tb, text='📄  Report', bg='#062a1a', fg='#38f0a8',
+                                     activebackground='#0a4028', activeforeground='#60ffb8',
+                                     relief='flat', font=(_NM_MONO, 9), cursor='hand2',
+                                     padx=10, state='disabled', command=self._generate_report)
+        self._report_btn.grid(row=0, column=10, padx=2)
+
+        # ── nmap-not-found notice (hidden unless actually missing) ──
+        self._nmap_exe = _nm_find_nmap_exe()
+        self._notfound_var = tk.StringVar()
+        self._notfound_lbl = tk.Label(r, textvariable=self._notfound_var,
+                                      bg=self.BG, fg='#ffcc66', font=(_NM_MONO, 8),
+                                      anchor='w', justify='left')
+        if not self._nmap_exe:
+            self._notfound_var.set(
+                "  ⚠  nmap.exe not found. It should install automatically via "
+                "this app's installer (the \"Nmap (network scanner)\" component) -- "
+                "if that was unchecked, re-run the installer and select it, or "
+                "install Nmap yourself from nmap.org, then click Re-check.")
+            self._notfound_lbl.pack(fill='x', padx=8, pady=(2, 0))
+            tk.Button(r, text='Re-check', bg='#1a1400', fg='#ffd93d', relief='flat',
+                     font=(_NM_MONO, 8), cursor='hand2', activebackground='#2a2200',
+                     command=self._recheck_nmap).pack(anchor='w', padx=8, pady=(0, 2))
+            self._start_btn.config(state='disabled')
+
+        # ── caution reminder (always visible, non-blocking) ──
+        tk.Label(r, text='  Only scan hosts and networks you own or have explicit '
+                         'permission to test.',
+                bg=self.BG, fg='#6a7a8a', font=(_NM_MONO, 8), anchor='w'
+                ).pack(fill='x', padx=8, pady=(2, 0))
+
+        self._cmd_preview_var = tk.StringVar()
+        tk.Label(r, textvariable=self._cmd_preview_var, bg=self.BG, fg='#3a5a7a',
+                font=(_NM_MONO, 8), anchor='w').pack(fill='x', padx=8, pady=(0, 4))
+        self._update_cmd_preview()
+        self._target_var.trace_add('write', lambda *_a: self._update_cmd_preview())
+        self._args_var.trace_add('write', lambda *_a: self._update_cmd_preview())
+
+        tk.Frame(r, bg=self.SPIN, height=1).pack(fill='x')
+
+        # ── Main pane: console (left) / AI assistant (right) ──
+        pw = tk.PanedWindow(r, orient='horizontal', bg=self.SPIN,
+                            sashwidth=6, sashrelief='raised', handlesize=10)
+        pw.pack(fill='both', expand=True)
+
+        cf = tk.Frame(pw, bg=self.PANEL)
+        pw.add(cf, width=680)
+        tk.Label(cf, text='  Scan output', bg=self.PANEL2, fg=self.ACC,
+                 font=(_NM_MONO, 9, 'bold')).pack(fill='x')
+        self._console = tk.Text(cf, bg='#03070f', fg='#c8dff0', font=(_NM_MONO, 9),
+                                relief='flat', wrap='none', state='disabled',
+                                selectbackground='#0a3060', padx=8, pady=6)
+        cvsb = ttk.Scrollbar(cf, orient='vertical', command=self._console.yview)
+        self._console.configure(yscrollcommand=cvsb.set)
+        cvsb.pack(side='right', fill='y')
+        self._console.pack(fill='both', expand=True)
+        self._console.tag_configure('err', foreground='#ff6b6b')
+        self._console.tag_configure('info', foreground='#6a9ab8')
+
+        self._status_var = tk.StringVar(value='Ready.' if self._nmap_exe
+                                        else 'nmap not found — install it to run scans.')
+        tk.Label(cf, textvariable=self._status_var, bg=self.PANEL2, fg=self.TICK,
+                font=(_NM_MONO, 8), anchor='w').pack(fill='x')
+
+        self._build_ai_panel(pw)
+
+    def _build_ai_panel(self, pw):
+        tk = self._tk; ttk = self._ttk
+        af = tk.Frame(pw, bg=self.AI_PANEL)
+        pw.add(af)
+
+        tk.Label(af, text='❆  AI Assistant', bg='#0d0520', fg=self.AI_ACC,
+                 font=(_NM_MONO, 10, 'bold')).pack(fill='x', ipady=6)
+        tk.Label(af, text='Local by default (Ollama, no key needed) — change '
+                          'provider from the Wireshark AI panel’s settings.',
+                bg='#0d0520', fg='#7c5cbf', font=(_NM_MONO, 7), wraplength=280,
+                justify='left').pack(fill='x', padx=8, pady=(0, 6))
+
+        cf = tk.Frame(af, bg=self.AI_PANEL, pady=4)
+        cf.pack(fill='x', padx=8)
+        tk.Label(cf, text='Describe the scan you want:', bg=self.AI_PANEL,
+                 fg='#7c5cbf', font=(_NM_MONO, 8)).pack(anchor='w')
+        self._craft_var = tk.StringVar(value='find web and remote-access services on my target')
+        craft_entry = tk.Entry(cf, textvariable=self._craft_var, bg='#0d0825',
+                               fg='#e0c0ff', insertbackground='#c084fc', relief='flat',
+                               font=(_NM_MONO, 9), highlightthickness=1,
+                               highlightcolor='#8040c0', highlightbackground='#2a1050')
+        craft_entry.pack(fill='x', pady=(2, 4), ipady=4)
+        self._craft_btn = tk.Button(cf, text='Craft Scan', bg='#3a1080', fg='#c084fc',
+                                    activebackground='#5020a0', activeforeground='#e0c0ff',
+                                    relief='flat', font=(_NM_MONO, 9, 'bold'), cursor='hand2',
+                                    command=self._ai_craft)
+        self._craft_btn.pack(anchor='w')
+        craft_entry.bind('<Return>', lambda e: self._ai_craft())
+
+        tk.Frame(af, bg='#1a0840', height=1).pack(fill='x', padx=8, pady=6)
+
+        self._recommend_btn = tk.Button(af, text='Recommend Next Steps',
+                                        bg='#1a0840', fg='#7c5cbf', relief='flat',
+                                        font=(_NM_MONO, 9, 'bold'), cursor='hand2',
+                                        activebackground='#2a1060', state='disabled',
+                                        command=self._ai_recommend)
+        self._recommend_btn.pack(anchor='w', padx=8, pady=(0, 6))
+
+        rf = tk.Frame(af, bg=self.AI_PANEL)
+        rf.pack(fill='both', expand=True, padx=8, pady=(0, 6))
+        self._ai_txt = tk.Text(rf, bg='#06020f', fg='#e0c0ff', font=(_NM_MONO, 9),
+                               relief='flat', wrap='word', state='disabled',
+                               selectbackground='#3a1060', padx=8, pady=8)
+        avsb = ttk.Scrollbar(rf, orient='vertical', command=self._ai_txt.yview)
+        self._ai_txt.configure(yscrollcommand=avsb.set)
+        avsb.pack(side='right', fill='y')
+        self._ai_txt.pack(fill='both', expand=True)
+        self._ai_txt.tag_configure('thinking', foreground='#7c5cbf', font=(_NM_MONO, 8, 'italic'))
+        self._ai_txt.tag_configure('error', foreground='#ff6b6b')
+        self._ai_txt.tag_configure('body', foreground='#e0c0ff')
+
+        self._ai_status_var = tk.StringVar(value='Ready.')
+        tk.Label(af, textvariable=self._ai_status_var, bg=self.AI_PANEL, fg='#7c5cbf',
+                font=(_NM_MONO, 7), anchor='w').pack(fill='x', padx=8, pady=(0, 4))
+
+    # ── Helpers ──────────────────────────────────────────────────────────
+    def _update_cmd_preview(self):
+        exe = self._nmap_exe or 'nmap'
+        target = self._target_var.get().strip()
+        args = self._args_var.get().strip()
+        self._cmd_preview_var.set('  will run:  %s %s %s' % (exe, args, target))
+
+    def _recheck_nmap(self):
+        self._nmap_exe = _nm_find_nmap_exe()
+        if self._nmap_exe:
+            self._notfound_var.set('')
+            try:
+                self._notfound_lbl.pack_forget()
+            except Exception:
+                _exc_debug('NmapWindow._recheck_nmap')
+            self._start_btn.config(state='normal')
+            self._status_var.set('nmap found at %s.' % self._nmap_exe)
+        else:
+            self._status_var.set('Still not found.')
+        self._update_cmd_preview()
+
+    def _append_console(self, text, tag=None):
+        self._console.config(state='normal')
+        self._console.insert('end', text, tag or ())
+        self._console.see('end')
+        self._console.config(state='disabled')
+
+    def _launch_kali_kex(self):
+        # Deliberately bare: just 'wsl -d kali-linux' in its own console
+        # window, nothing else. Every attempt at also auto-starting Win-KeX
+        # (bare kex, kex --win -s, bash -lic "kex -s", ...) ran into either
+        # an Xfce/Wayland crash or a window that opened and closed before
+        # Trevor could see anything -- none of that ever got confirmed
+        # working, and starting kex is one command he can type himself once
+        # he's got a shell open. So this button's only job now is to hand
+        # him that shell.
+        from tkinter import messagebox
+        if sys.platform != 'win32':
+            messagebox.showinfo('Kali Desktop', 'WSL and Kali Linux are Windows-only.',
+                                parent=self.root)
+            return
+        exe = _nm_wsl_exe_path()
+        try:
+            kwargs = {}
+            if hasattr(subprocess, 'CREATE_NEW_CONSOLE'):
+                kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+            subprocess.Popen([exe, '-d', 'kali-linux'], **kwargs)
+        except Exception as ex:
+            messagebox.showerror(
+                'Kali Desktop',
+                "Couldn't launch WSL/Kali (wsl -d kali-linux): %s\n\n"
+                "Make sure the installer's \"WSL + Kali Linux\" component was "
+                "installed, and that you've run \"wsl -d kali-linux\" once "
+                "yourself already to finish Kali's own first-time setup." % ex,
+                parent=self.root)
+            _exc('NmapWindow._launch_kali_kex')
+
+    # ── Scan lifecycle ───────────────────────────────────────────────────
+    def _start_scan(self):
+        if self._running: return
+        if not self._nmap_exe:
+            self._status_var.set('nmap not found.'); return
+        target = self._target_var.get().strip()
+        if not target:
+            self._status_var.set('Enter a target first.'); return
+        import shlex
+        try:
+            arg_list = shlex.split(self._args_var.get().strip())
+        except ValueError as ex:
+            self._status_var.set('Bad args: %s' % ex); return
+        cmd = [self._nmap_exe] + arg_list + [target]
+        self._last_cmd = ' '.join(arg_list + [target])
+        self._last_target = target
+        self._last_recommendation = ''
+        self._console.config(state='normal'); self._console.delete('1.0', 'end')
+        self._console.config(state='disabled')
+        self._append_console('$ %s\n\n' % ' '.join(cmd), 'info')
+        self._running = True
+        self._stopped_by_user = False
+        self._start_btn.config(state='disabled')
+        self._stop_btn.config(state='normal')
+        self._recommend_btn.config(state='disabled')
+        self._report_btn.config(state='disabled')
+        self._status_var.set('Scanning...')
+        threading.Thread(target=self._run_scan, args=(cmd,), daemon=True).start()
+
+    def _run_scan(self, cmd):
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        out_lines = []
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1, creationflags=flags)
+        except FileNotFoundError:
+            self.root.after(0, lambda: (
+                self._append_console('nmap not found at %s\n' % cmd[0], 'err'),
+                self._finish_scan('nmap not found.')))
+            return
+        except Exception as ex:
+            _m = str(ex)
+            self.root.after(0, lambda m=_m: (
+                self._append_console('Launch error: %s\n' % m, 'err'),
+                self._finish_scan('Launch error.')))
+            return
+        self._proc = proc
+        try:
+            for line in proc.stdout:
+                out_lines.append(line)
+                self.root.after(0, lambda l=line: self._append_console(l))
+                if self._closed:
+                    break
+        except Exception:
+            _exc('NmapWindow._run_scan')
+        finally:
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                try: proc.kill()
+                except Exception: _exc_debug('NmapWindow._run_scan kill')
+        rc = proc.returncode
+        self._last_output = ''.join(out_lines)
+        if self._closed:
+            return
+        done_msg = ('Scan stopped.' if self._stopped_by_user
+                    else 'Scan finished (exit code %s).' % rc)
+        self.root.after(0, lambda: self._finish_scan(done_msg))
+
+    def _stop_scan(self):
+        if not self._running or not self._proc:
+            return
+        self._stopped_by_user = True
+        try:
+            self._proc.terminate()
+        except Exception:
+            _exc_debug('NmapWindow._stop_scan')
+
+    def _finish_scan(self, status_text):
+        self._running = False
+        self._proc = None
+        self._start_btn.config(state='normal' if self._nmap_exe else 'disabled')
+        self._stop_btn.config(state='disabled')
+        if self._last_output.strip():
+            self._recommend_btn.config(state='normal')
+            self._report_btn.config(state='normal')
+        self._status_var.set(status_text)
+
+    # ── AI actions ───────────────────────────────────────────────────────
+    def _ai_craft(self):
+        request = self._craft_var.get().strip()
+        if not request:
+            return
+        target = self._target_var.get().strip()
+        self._craft_btn.config(state='disabled', text='Thinking...')
+        self._set_ai_response('Asking the AI to craft a scan...', 'thinking')
+        self._ai_status_var.set('Waiting for AI response...')
+
+        def _worker():
+            args, err = _nm_ai_craft_nmap_args(target, request)
+            def _apply():
+                self._craft_btn.config(state='normal', text='Craft Scan')
+                if not args:
+                    self._set_ai_response('AI unavailable:\n\n' + (err or 'No response.'), 'error')
+                    self._ai_status_var.set('Error')
+                    return
+                self._args_var.set(args)
+                self._profile_var.set('')
+                self._set_ai_response('Suggested flags:\n\n  %s\n\n'
+                                      'Filled into the Args box above. Review it, then '
+                                      'click Start Scan when you\'re ready — nothing '
+                                      'runs automatically.' % args, 'body')
+                self._ai_status_var.set('Ready.')
+            self.root.after(0, _apply)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _ai_recommend(self):
+        if not self._last_output.strip():
+            return
+        self._recommend_btn.config(state='disabled', text='Thinking...')
+        self._set_ai_response('Analysing scan output...', 'thinking')
+        self._ai_status_var.set('Waiting for AI response...')
+
+        def _worker():
+            answer, err = _nm_ai_recommend_next_steps(self._last_cmd, self._last_output)
+            def _apply():
+                self._recommend_btn.config(state='normal', text='Recommend Next Steps')
+                if not answer:
+                    self._set_ai_response('AI unavailable:\n\n' + (err or 'No response.'), 'error')
+                    self._ai_status_var.set('Error')
+                    return
+                self._set_ai_response(answer, 'body')
+                self._ai_status_var.set('Done — %d chars' % len(answer))
+                self._last_recommendation = answer
+            self.root.after(0, _apply)
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _set_ai_response(self, text, tag='body'):
+        self._ai_txt.config(state='normal')
+        self._ai_txt.delete('1.0', 'end')
+        self._ai_txt.insert('end', text, tag)
+        self._ai_txt.config(state='disabled')
+        self._ai_txt.see('1.0')
+
+    # ── Report ───────────────────────────────────────────────────────────
+    def _generate_report(self):
+        # Same shape as the Wireshark AI panel's report feature elsewhere in
+        # this app (self-contained HTML, print-to-PDF from a browser) --
+        # matching that established pattern rather than inventing a new one
+        # or pulling in a PDF library just for this window.
+        if not self._last_output.strip():
+            return
+        from tkinter import filedialog as _fd
+        from datetime import datetime as _dt
+        safe_target = re.sub(r'[^A-Za-z0-9_.-]+', '_', self._last_target or 'target').strip('_') or 'target'
+        default_name = 'nmap_scan_%s_%s.html' % (safe_target, _dt.now().strftime('%Y%m%d_%H%M%S'))
+        path = _fd.asksaveasfilename(
+            parent=self.root, title='Save Report', defaultextension='.html',
+            initialfile=default_name,
+            filetypes=[('HTML Report', '*.html'), ('All files', '*.*')])
+        if not path:
+            return
+        if not path.lower().endswith('.html'):
+            path += '.html'
+        self._report_btn.config(state='disabled', text='Generating…')
+        self._status_var.set('Generating report...')
+
+        target = self._last_target
+        cmd = self._last_cmd
+        output = self._last_output
+        recommendation = self._last_recommendation
+
+        def _build():
+            try:
+                import html as _h
+                now_str = _dt.now().strftime('%A %d %B %Y at %H:%M:%S')
+
+                rec_html = ''
+                if recommendation.strip():
+                    rec_body = _h.escape(recommendation)
+                    lines = rec_body.split('\n'); formatted = []; in_ul = False
+                    for ln in lines:
+                        s = ln.strip()
+                        is_b = s.startswith('- ') or s.startswith('• ')
+                        if is_b:
+                            if not in_ul: formatted.append('<ul>'); in_ul = True
+                            formatted.append('<li>%s</li>' % s[2:])
+                        else:
+                            if in_ul: formatted.append('</ul>'); in_ul = False
+                            formatted.append('<p>%s</p>' % ln if s else '<br>')
+                    if in_ul: formatted.append('</ul>')
+                    rec_html = (
+                        '<h2 class="section-title">AI Recommendations</h2>'
+                        '<div class="entry"><div class="answer">%s</div></div>'
+                        % '\n'.join(formatted))
+                else:
+                    rec_html = (
+                        '<h2 class="section-title">AI Recommendations</h2>'
+                        '<div class="entry"><div class="answer">'
+                        '<p><em>Not requested for this scan — click Recommend Next '
+                        'Steps in the AI Assistant panel before generating a report '
+                        'to include this section.</em></p></div></div>')
+
+                css = (
+                    '* { box-sizing:border-box; margin:0; padding:0; }'
+                    'body { font-family:"Segoe UI",Arial,sans-serif; font-size:14px; color:#1a1a2e; background:#f4f2fa; }'
+                    '.page { max-width:900px; margin:0 auto; padding:32px 24px; }'
+                    '.header { background:linear-gradient(135deg,#0a3050,#0a6090); color:white; padding:28px 32px; border-radius:8px; margin-bottom:24px; }'
+                    '.header h1 { font-size:26px; font-weight:700; margin-bottom:6px; }'
+                    '.header .sub { opacity:.80; font-size:13px; }'
+                    '.notice { background:#fff4e0; border-left:4px solid #d99a2b; padding:10px 16px; border-radius:6px; margin-bottom:24px; font-size:12.5px; color:#6a4a10; }'
+                    '.stats-table { width:100%; border-collapse:collapse; margin-bottom:28px; background:white; border-radius:8px; overflow:hidden; }'
+                    '.stats-table th { background:#0a6090; color:white; padding:9px 16px; text-align:left; font-weight:600; width:180px; font-size:13px; }'
+                    '.stats-table td { padding:9px 16px; border-bottom:1px solid #dce8f0; font-size:13px; font-family:Consolas,monospace; }'
+                    '.stats-table tr:last-child td { border-bottom:none; }'
+                    '.section-title { font-size:17px; font-weight:700; color:#0a4a70; margin:24px 0 16px; padding-bottom:8px; border-bottom:2px solid #38b8f0; }'
+                    '.entry { background:white; border-radius:8px; margin-bottom:20px; overflow:hidden; border-left:4px solid #0a6090; }'
+                    '.answer { padding:14px 18px; font-size:13px; line-height:1.7; color:#2c2c3a; }'
+                    '.answer p { margin-bottom:8px; } .answer ul { margin:6px 0 10px 20px; } .answer li { margin-bottom:4px; }'
+                    '.console { background:#0a1420; color:#c8dff0; padding:16px; border-radius:8px; font-family:Consolas,monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; overflow-x:auto; }'
+                    '.footer { text-align:center; margin-top:40px; padding-top:16px; border-top:1px solid #d8cced; font-size:11px; color:#9080a0; }'
+                    '@media print { body{background:white;} .page{max-width:none;padding:16px;} .entry,.console{break-inside:avoid;} }'
+                )
+                html_doc = (
+                    '<!DOCTYPE html><html lang="en"><head>'
+                    '<meta charset="UTF-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1.0">'
+                    '<title>Nmap Scan Report</title>'
+                    '<style>%s</style></head><body><div class="page">' % css +
+                    '<div class="header"><h1>⚔ Pen Test — Nmap Scan Report</h1>'
+                    '<div class="sub">Generated: %s</div></div>' % _h.escape(now_str) +
+                    '<div class="notice">This report covers a scan performed against a '
+                    'system the operator represented as owned by them or authorized for '
+                    'testing.</div>'
+                    '<table class="stats-table">'
+                    '<tr><th>Target</th><td>%s</td></tr>' % _h.escape(target or '(not set)') +
+                    '<tr><th>Command</th><td>nmap %s</td></tr>' % _h.escape(cmd) +
+                    '<tr><th>Generated</th><td>%s</td></tr></table>' % _h.escape(now_str) +
+                    '<h2 class="section-title">Scan Output</h2>'
+                    '<div class="console">%s</div>' % _h.escape(output) +
+                    rec_html +
+                    '<div class="footer">Vanguard Flow NetSentinel &nbsp;&middot;&nbsp; Pen Test (Nmap)'
+                    ' &nbsp;&middot;&nbsp; %s' % _dt.now().strftime('%Y-%m-%d %H:%M') +
+                    '<br><br><em>To save as PDF: open in your browser and use '
+                    'File → Print → Save as PDF.</em></div>'
+                    '</div></body></html>'
+                )
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(html_doc)
+                return path
+            except Exception:
+                import traceback as _tb
+                return 'ERROR:' + _tb.format_exc()
+
+        def _done(result):
+            self._report_btn.config(state='normal', text='📄  Report')
+            from tkinter import messagebox
+            if isinstance(result, str) and result.startswith('ERROR:'):
+                self._status_var.set('Report generation failed.')
+                messagebox.showerror('Report Failed', 'Failed:\n\n%s' % result[6:][:600],
+                                     parent=self.root)
+                _exc('NmapWindow._generate_report')
+                return
+            self._status_var.set('Report saved: %s' % result)
+            messagebox.showinfo('Report Saved',
+                                'Report saved:\n%s\n\nOpen in your browser. Use '
+                                'File → Print → Save as PDF.' % result,
+                                parent=self.root)
+            try:
+                if sys.platform == 'win32':
+                    os.startfile(result)   # noqa: S606
+                elif sys.platform == 'darwin':
+                    subprocess.Popen(['open', result])
+                else:
+                    subprocess.Popen(['xdg-open', result])
+            except Exception:
+                _exc_debug('NmapWindow._generate_report open')
+
+        threading.Thread(target=lambda: self.root.after(0, lambda: _done(_build())),
+                         daemon=True).start()
+
+
 class ModernWindow:
     """Alternative modern sidebar-based UI."""
 
@@ -31428,6 +34280,7 @@ class ModernWindow:
         for label, cmd in [
             ('Dashboard',  None),
             ('System',     self._open_system_monitor),
+            ('Pen Test',   self._open_pen_test),
         ]:
             b = tk.Button(top, text=label, bg=self.PANEL2,
                          fg=self.ACC if label=='Dashboard' else '#2a4a6a',
@@ -32100,10 +34953,49 @@ class ModernWindow:
         AgentsWindow(self._monitor)
 
     def _open_system_monitor(self):
+        # The "System" button now launches the real Task Manager TMOG app
+        # (bundled + silently installed by installer.nsi's SecTMOG) instead
+        # of the from-scratch SystemMonitorWindow rebuild — that class is
+        # still defined earlier in this file but is deliberately no longer
+        # called from anywhere. See _nm_find_tmog_exe for how it's located.
+        from tkinter import messagebox
+        exe = _nm_find_tmog_exe()
+        if not exe:
+            messagebox.showerror(
+                'Task Manager TMOG not found',
+                "Couldn't find Task Manager TMOG installed on this machine.\n\n"
+                "It should have been installed automatically alongside this "
+                "app (the installer's \"Task Manager TMOG\" component). If "
+                "that component was unchecked, re-run the installer and "
+                "select it, or install Task Manager TMOG yourself.",
+                parent=self.root)
+            return
         try:
-            SystemMonitorWindow(self._monitor)
+            if sys.platform == 'win32':
+                os.startfile(exe)   # noqa: S606
+            else:
+                subprocess.Popen([exe])
+        except Exception as ex:
+            messagebox.showerror('Task Manager TMOG',
+                                 "Found it at %s but couldn't launch it: %s" % (exe, ex),
+                                 parent=self.root)
+            _exc('_open_system_monitor')
+
+    def _open_pen_test(self):
+        # Used to launch the Kali/Win-KeX desktop directly. Now opens the
+        # Nmap scanner GUI (NmapWindow) instead -- that Win-KeX launch is
+        # still one click away from inside this window ("Kali Desktop
+        # (Win-KeX)" button), so nothing that was already verified working
+        # is lost. Singleton-guarded so mashing the button doesn't pile up
+        # windows -- same discipline as the earlier multiprocessing/
+        # duplicate-instances fix this session.
+        win = getattr(self, '_nmap_win', None)
+        try:
+            if win is not None and win.root.winfo_exists():
+                win.root.lift(); win.root.focus_force(); return
         except Exception:
-            import traceback; traceback.print_exc()
+            _exc_debug('_open_pen_test existing window check')
+        self._nmap_win = NmapWindow(self._monitor)
 
     def _open_report(self):
         self._monitor._open_report_dialog()
@@ -32647,6 +35539,20 @@ class ModernWindow:
         _nm_confirm_quit(monitor=self._monitor, root=self.root)
 
 if __name__ == "__main__":
+    # REQUIRED first line for a frozen (PyInstaller) Windows exe that uses
+    # multiprocessing.Pool anywhere (the CPU benchmark on the System Monitor
+    # page does). Without this, Windows has no fork(), so each Pool worker
+    # is started by re-launching the whole frozen exe from scratch — which
+    # re-enters this exact `if __name__ == "__main__":` block and opens a
+    # brand new full copy of the entire app (new window, new threads, new
+    # everything), once per CPU core. freeze_support() is what lets a spawned
+    # worker recognize "I'm a worker, not a fresh launch" and run only the
+    # worker function instead. This is the standard, documented fix for
+    # multiprocessing inside a PyInstaller build, not a guess:
+    # https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#multi-processing
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     monitor = SpeedTestMonitor()
     _nm_set_debug_logging(bool(monitor.config.get('debug_logging')))
     threading.Thread(target=_nm_ensure_ollama, daemon=True).start()

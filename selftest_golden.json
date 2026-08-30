@@ -106,8 +106,8 @@
       "status": 200
     },
     "/guide": {
-      "bytes": 65425,
-      "sha256": "d7687f9d433fa160da1d14f8b5c383f64a6511e7674f0636a70ad3486fb80119",
+      "bytes": 72391,
+      "sha256": "d68eae0464cc97363864ccf74cf340ec3b8d94216b3bb42f700d7f9de6d6633e",
       "status": 200
     },
     "/honeypot": {
