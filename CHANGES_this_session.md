@@ -1,6 +1,6 @@
-# Changes this session — build `b-ef1e7021`
+# Changes this session — build `b-b51f5070`
 
-Fifty-three things this session. Build IDs for reference:
+Fifty-six things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -154,9 +154,308 @@ Fifty-three things this session. Build IDs for reference:
     page whose section order is controlled by a completely separate,
     un-synced list that had never heard of "Pen Test." System (Task
     Manager TMOG) now gets its own page too, and both new pages have a
-    real embedded screenshot (this one, current).
+    real embedded screenshot.
+54. `b-09f33cdb` — you (Trevor) added HTTPS support to the embedded web
+    server and the remote client yourself — `speedtest_monitor.py` now
+    wraps its socket in TLS when `ssl_cert`/`ssl_key` are configured,
+    and `nm_client.py` now trusts the server's cert (or falls back to
+    unverified for localhost). I found one real bug your change caused
+    in combination with my own earlier work — the Guide button and the
+    HTML report both still hardcoded `http://`, so they'd have silently
+    broken the moment HTTPS was actually on — fixed both, plus synced
+    everything.
+55. `b-464af3fd` — fixed the IDS report's hardcoded `http://localhost:8765`
+    (flagged last build as a known, pre-existing, unrelated gap) now that
+    you sent your real `netsentinel.crt`/`.key` and I could verify the
+    whole HTTPS chain against your actual files instead of a throwaway
+    test cert.
+56. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
+    found (and fixed) the same hardcoded-`http://` bug in three more
+    places my previous "check all the others" pass missed entirely
+    (this one, current).
 
-## CRITICAL FIX: the Guide page you actually open doesn't use the section list I'd been editing — System/Pen Test were real but effectively invisible
+## Fixed: 3D view, Honeypot console, and Threat Radar buttons all still hardcoded `http://`
+
+**What you said:** "when you connect to the 3d view its still trying http
+and fails fix it and check all the others." You were right, and my
+previous audit (build `b-09f33cdb`, where I claimed to have checked
+everywhere else this pattern could exist) was not thorough enough — I
+found the Guide button and the HTML report that time, but missed three
+more methods with the exact same bug. No excuse for that; here's exactly
+what I missed and how I made sure this time there's nothing left.
+
+**Root cause — three `ModernWindow` methods, all opening a browser at a
+URL built with a hardcoded scheme:**
+
+- `_open_3d_view` — `url = 'http://localhost:%d/3d' % port`
+- `_open_honeypot` — `url = 'http://localhost:%d/honeypot' % port`
+- `_open_threat_radar` — `url = 'http://localhost:%d/threats' % port`
+
+All three already read `web_port` correctly from `self._monitor.config`
+(unlike the older `_run_ids` bug, which also had the wrong port) — the
+only problem was the hardcoded `'http://'` prefix. Once your `ssl_cert`/
+`ssl_key` are set, the embedded server's socket is TLS-only, and a plain
+HTTP request against it fails outright — exactly the "still trying http
+and fails" you reported.
+
+**What changed — `speedtest_monitor.py`:** all three now build their URL
+with `_nm_web_scheme(getattr(self, '_monitor', None))` instead of a
+hardcoded `'http://'`, the same helper already used by the Guide button,
+the HTML report, and the IDS report. No other logic in these methods
+touched.
+
+**Why my last "check all the others" pass missed these:** I grepped for
+the pattern that time too, but stopped once I'd fixed the instances that
+matched what I was actively looking at (`_open_guide`, `generate_report`)
+plus the one Trevor pointed at directly. I did not, at that point, run a
+single unified sweep across the *entire* file for every `http://localhost`
+occurrence and triage each hit one by one. This time I did exactly that —
+see below.
+
+**This time's sweep — every `http://localhost` / `http://127` occurrence
+in the whole file, triaged one by one, not just the ones near code I was
+already touching:**
+
+- Lines 13731/13765/13784 (`_open_3d_view`/`_open_honeypot`/
+  `_open_threat_radar`) — **the bug, now fixed.**
+- Line 12447/12456 — `_run_ids`'s comment and its intentional
+  `monitor is None` fallback branch, already fixed last build, left
+  alone on purpose.
+- Lines 1396, 1525, 35421, 35493–35494 — all the Pi-hole Docker
+  integration (a separate container's own admin UI address, dynamically
+  read from `docker ps`/its own settings dialog) — a different service
+  entirely, nothing to do with our own embedded server's SSL config.
+- Lines 14537, 20060–20061, 21800–21802 — Ollama's default local AI
+  server port (11434), also a separate unrelated local service.
+- Lines 1214, 18318, 35658 — generic "if the user typed an address with
+  no scheme, assume `http://`" normalisation for user-entered addresses
+  (Remote Agents URL field, a report-link opener) — not URLs to our own
+  server, so not in scope.
+- Line 551 — the docstring comment inside `_nm_web_scheme` itself,
+  explaining what it does. Not a URL.
+
+Nothing else in the file matches. I'm stating the actual grep and the
+actual disposition of every hit here, rather than just asserting
+"checked everywhere," since that's the exact claim that turned out
+short last time.
+
+**Verified for real:**
+
+- Full `selftest.py`: 33/0/3 headless, 35/0/1 under `xvfb-run` — both
+  match the existing baseline, no regressions.
+- The 13-page System Monitor regression and the full Nmap GUI suite:
+  both green.
+- Wrote a script that calls the real `_nm_web_scheme()` against four
+  monitor configs (real HTTPS cert+key, HTTP-only, HTTPS configured but
+  cert files missing, and no monitor at all) and confirmed each of the
+  three fixed URL expressions builds exactly the right string in every
+  case — including the missing-files and no-monitor fallbacks, so an
+  edge case can't silently regress this either.
+- The strongest check: started the actual `_ThreeDServer` for real,
+  wrapped in TLS with your real `netsentinel.crt`/`.key` (same code
+  path as production, not a mock), and made real, fully certificate-
+  verified HTTPS `GET` requests — using the exact URLs
+  `_open_3d_view`/`_open_honeypot`/`_open_threat_radar` now build — to
+  `/3d`, `/honeypot`, and `/threats`. All three came back `200` with
+  real page content (195KB / 16KB / 11KB respectively). Then, as a
+  sanity check, sent a plain `http://` request at the same TLS-wrapped
+  port and confirmed it fails outright (`ConnectionResetError`) —
+  proving this genuinely was broken before the fix, not a cosmetic
+  change.
+
+**NOT verified:** same limitation as always — I can't click the actual
+3D-view/Honeypot/Threat-Radar buttons in your real running desktop app
+on Windows and watch a browser tab open successfully. Everything up to
+and including the exact HTTPS request your browser will make is
+verified for real against your real server and real certificate; the
+last mile (Windows opening a browser tab) isn't something this sandbox
+can reproduce.
+
+---
+
+## Fixed: IDS report's hardcoded server URL — plus real verification against your actual cert this time
+
+**What you sent:** your real `netsentinel.crt` and `netsentinel.key` — the
+private key came through in plain text in the chat, same as the API key
+earlier. It's a self-signed localhost cert for a local dev tool, not a
+production secret protecting money or accounts, so the stakes are much
+lower than the API key was — but same principle: if you want it out of
+this conversation's history at some point, regenerate the pair rather
+than trying to keep this one private going forward. I won't reproduce
+either file's contents here.
+
+**Root cause — `EtherApeWindow._run_ids` (the IDS report, opens in your
+browser):** hardcoded `_server_url = 'http://localhost:8765'`, ignoring
+both your actual `web_port` setting and, now, whether the server's
+HTTPS-only. This one predates today's HTTPS work — it was already wrong
+for anyone who'd changed `web_port` — HTTPS just added a second way for
+it to be wrong. Left unfixed last build because `EtherApeWindow` had no
+`self._monitor` reference to check config against, and guessing at a
+wiring fix without verifying it felt worse than flagging it and moving
+on.
+
+**What changed — `speedtest_monitor.py`:**
+
+- `EtherApeWindow.__init__` now accepts an optional `monitor=None`
+  parameter and stores it as `self._monitor`.
+- The only place that constructs one, `ModernWindow._open_etherape`, now
+  passes `monitor=self._monitor` through.
+- `_run_ids`'s `_run()` closure now builds `_server_url` from
+  `self._monitor.config.get('web_port', 8765)` and `_nm_web_scheme(...)`
+  when a monitor is present — matching the fix already applied to the
+  Guide button and the HTML report last build — and falls back to the
+  old hardcoded `'http://localhost:8765'` only if `self._monitor` is
+  `None` (defensive — there's currently only the one call site, and it
+  always passes a monitor, but this keeps the class from breaking if
+  that ever changes).
+
+**Verified for real, this time against your actual cert/key, not a
+throwaway one:**
+
+- Confirmed your key and cert are a matching pair (same RSA modulus),
+  the cert is valid for 10 years from issue, and — importantly — it has
+  a proper Subject Alternative Name covering both `DNS:localhost` and
+  `IP:127.0.0.1`, not just a CN (modern TLS clients require SAN, so this
+  matters and yours has it right).
+- Started a real TLS-wrapped `ThreadingHTTPServer` using your exact
+  cert/key files and connected with a client context that does full,
+  real certificate verification (not skipping it) — succeeded connecting
+  to both `https://localhost:...` and `https://127.0.0.1:...`, proving
+  the SAN coverage works in practice, not just on paper.
+- Ran `nm_client.py`'s `Api` class against that same server with your
+  cert set as `ssl_cafile` — connected and got a real response back with
+  full verification, no unverified fallback needed at all.
+- Built a real `EtherApeWindow(monitor=...)` instance under a headless
+  X server and confirmed `self._monitor` is wired through correctly, and
+  that the exact expression `_run_ids` now uses evaluates to
+  `'https://localhost:8765'` against your real config —  and confirmed
+  the `monitor=None` fallback path still behaves exactly as it did
+  before this change.
+- Full `selftest.py` (33/0/3, and 35/0/1 under `xvfb-run`), the 13-page
+  System Monitor regression, and the full Nmap GUI suite are all green.
+
+**NOT verified:** I still can't watch the actual IDS report open in a
+real browser on your machine and click the live-dashboard link from
+inside it — that's Windows/browser behaviour this sandbox can't
+reproduce. Everything up to and including the exact URL string it will
+now generate is verified for real; the last mile (you clicking it) isn't.
+
+---
+
+**What you sent:** four files — `speedtest_config.json`, `speedtest_monitor.py`,
+`nm_client.py`, and a `certs` upload — with instructions to analyse what
+changed and replicate it to all three locations. The `certs` upload came
+through as an empty 0-byte file, not the actual folder — so I never
+received your real `netsentinel.crt`/`.key`, and couldn't test against
+them specifically. I generated my own throwaway self-signed test cert to
+verify the code paths for real instead (details below); that's not the
+same as testing with your actual cert, so treat the HTTPS behaviour as
+verified in mechanism, not verified against your specific certificate
+files. Your `speedtest_config.json` is your real live config (not
+something I need to "replicate" anywhere — it's runtime state the app
+writes itself); I only compared it to confirm your `ssl_cert`/`ssl_key`
+paths matched what the code now expects.
+
+**What you changed — `speedtest_monitor.py`:**
+
+- `_load_config`'s known-keys whitelist now includes `ssl_cert` and
+  `ssl_key`, so those two settings actually get loaded from
+  `speedtest_config.json` instead of being silently dropped (this part
+  was necessary — without it, the two lines below would never see your
+  paths at all).
+- The embedded web server (`_ThreeDServer.serve`) now wraps its socket
+  in TLS when both are set and both files exist on disk: loads the cert
+  chain, enforces TLS 1.2 minimum, and falls back to plain HTTP with a
+  clear log warning if the paths don't resolve. Clean, correctly-ordered
+  code — the wrap happens before `serve_forever()` is called, which is
+  the only point it can happen.
+
+**What you changed — `nm_client.py`:**
+
+- `DEFAULT_SERVER` now points at `https://localhost:8765`.
+- New `Api._build_ssl_ctx()`: trusts your server's self-signed cert via
+  a `ssl_cafile` config value when one's set, otherwise falls back to
+  unverified TLS (acceptable for a self-signed localhost connection,
+  which is what this is for).
+- `_apply_ssl_config()` also has a sensible fallback: if no `ssl_cafile`
+  is set in config, it looks for `certs/netsentinel.crt` sitting next to
+  `nm_client.py` itself before giving up and going unverified.
+- Wired into both `get_raw()` and `post()` via a new `_ssl_ctx()` helper
+  that only actually builds a context when `self.base` starts with
+  `https://` — a plain `http://` connection is completely unaffected.
+
+This is well-built — self-consistent, handles the no-cert-trusted case
+gracefully instead of just crashing, and I found no bugs in your code
+itself.
+
+**The bug it caused — root cause:** two places in `speedtest_monitor.py`
+build a URL back to this same embedded server and both still hardcoded
+`http://`, unaware the server can now be HTTPS-only:
+
+1. `ModernWindow._open_guide` (the "? GUIDE" button — the thing I spent
+   most of last build's session fixing) — `f'http://localhost:{port}/guide?b=...'`.
+2. `generate_report`'s `{server_url}` template substitution — the
+   "view live dashboard" style link that gets baked into the
+   self-contained HTML report.
+
+With `ssl_cert`/`ssl_key` configured, the server socket only speaks TLS.
+An `http://` request against a TLS-only socket doesn't get a redirect or
+an error page — the connection just fails outright (confirmed for real,
+see below), so the Guide button and that report link would have quietly
+stopped working the moment your HTTPS change took effect, with no
+obvious link between "I turned on HTTPS" and "the Guide button broke."
+
+**What changed — `speedtest_monitor.py`:**
+
+- New helper `_nm_web_scheme(monitor)`: returns `'https'` if that
+  monitor's `ssl_cert`/`ssl_key` are set and both files actually exist
+  on disk (the exact same condition the server itself checks before
+  wrapping), else `'http'`.
+- `_open_guide` and `generate_report`'s `_server_url` both now build
+  their URL through this helper instead of assuming `http://`.
+- Left one other pre-existing, unrelated instance alone on purpose:
+  `EtherApeWindow._run_ids` (the IDS dashboard) also hardcodes
+  `_server_url = 'http://localhost:8765'` — but that's not part of your
+  change (predates it, and was already ignoring a custom `web_port` too)
+  and that class has no `self._monitor` reference to check cert/key
+  against without a larger, riskier wiring change. Flagging it here
+  rather than guessing at a fix — say the word if you want that one
+  sorted too.
+
+**Verified for real:**
+
+- `speedtest_monitor.py` and `nm_client.py` both parse clean.
+- Generated a real throwaway self-signed cert/key pair in this sandbox
+  and exercised the actual mechanism end to end: `_nm_web_scheme()`
+  returns `'https'` when a real cert/key exist, `'http'` when the paths
+  are missing or unset; started a real `ThreadingHTTPServer`, wrapped
+  its socket in TLS using the exact same code pattern you wrote, and
+  confirmed a genuine HTTPS client request gets a real response back —
+  and confirmed a plain HTTP request against that same now-wrapped
+  socket fails outright (`ConnectionResetError`), which is exactly the
+  failure `_open_guide` and the report link would have hit before this
+  fix.
+- Separately exercised your `nm_client.py` changes against that same
+  live TLS server: connecting with `ssl_cafile` set to the test cert
+  succeeds and returns real JSON; connecting with no `ssl_cafile` set
+  also succeeds via the unverified-fallback path; `_apply_ssl_config()`
+  correctly wires an explicit `ssl_cafile` value from a config dict into
+  `Api.ssl_cafile`.
+- Full `selftest.py` (33/0/3, and 35/0/1 under `xvfb-run` — `/guide`
+  route content is byte-identical, since this only changed what URL
+  `_open_guide` launches externally, not the page itself), the 13-page
+  System Monitor regression, the full Nmap GUI suite, and the
+  gauge-theme test are all green.
+
+**NOT verified:** your actual `netsentinel.crt`/`.key` files, since the
+`certs` upload didn't come through — I tested the mechanism with a
+throwaway cert I generated myself, not your real one. If your real cert
+has anything unusual about it (wrong CN/SAN for `localhost`, a chain
+that needs intermediates, etc.), that wouldn't be caught by this
+verification — worth confirming the Guide button and report link both
+actually open over `https://` for you specifically, once this is on your
+machine. Also not verified: the `_run_ids` pre-existing hardcoded-URL
+issue flagged above — left alone, not fixed, not tested either way.
 
 **What you said:** "im opening the guide from the app there is no
 reference to the system button or task manager tmog , there are still

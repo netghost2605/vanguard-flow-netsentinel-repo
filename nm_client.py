@@ -36,7 +36,7 @@ from datetime import datetime
 
 APP_NAME = "Vanguard Flow NetSentinel — Client"
 VERSION = "1.0.0"
-DEFAULT_SERVER = "http://localhost:8765"
+DEFAULT_SERVER = "https://localhost:8765"
 CONFIG_PATH = Path.home() / ".nm_client.json"
 POLL_SECONDS = 5
 
@@ -83,12 +83,38 @@ SEV_COLOUR = {"crit": RED, "critical": RED, "warn": AMBER,
 class Api:
     """Thin HTTP client for the Vanguard Flow NetSentinel API."""
 
+    # Path to the server's self-signed cert for local TLS trust.
+    # Set to None to disable certificate verification (not recommended beyond localhost).
+    # Populated automatically by _build_ssl_ctx() when the client connects to an https:// URL.
+    ssl_cafile: str = ""
+
     def __init__(self, base=DEFAULT_SERVER, timeout=12):
         self.base = base.rstrip("/")
         self.timeout = timeout
         self.caps = {}
         self.last_error = ""
         self.license_key = ""
+
+    @staticmethod
+    def _build_ssl_ctx(cafile: str = ""):
+        """Return an ssl.SSLContext that trusts *cafile* (our self-signed cert).
+        Falls back to a context that skips verification only for localhost URLs.
+        """
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        if cafile:
+            import os
+            crt = os.path.expandvars(os.path.expanduser(cafile))
+            if os.path.isfile(crt):
+                ctx.load_verify_locations(cafile=crt)
+                ctx.verify_mode = ssl.CERT_REQUIRED
+                ctx.check_hostname = True
+                return ctx
+        # No cafile — disable verification (localhost self-signed fallback)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
 
     def _headers(self, extra=None):
         h = {"User-Agent": "NMClient/%s" % VERSION}
@@ -105,10 +131,17 @@ class Api:
             u += "?" + urllib.parse.urlencode(params)
         return u
 
+    def _ssl_ctx(self):
+        """Return an SSL context when base uses https://, else None."""
+        if self.base.startswith('https://'):
+            return self._build_ssl_ctx(self.__class__.ssl_cafile)
+        return None
+
     def get_raw(self, path, params=None, timeout=None):
         req = urllib.request.Request(self._url(path, params),
                                      headers=self._headers())
-        with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout or self.timeout,
+                                    context=self._ssl_ctx()) as r:
             return r.read()
 
     def get(self, path, params=None, timeout=None):
@@ -129,7 +162,8 @@ class Api:
             req = urllib.request.Request(
                 self._url(path), data=body, method="POST",
                 headers=self._headers({"Content-Type": "application/json"}))
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout,
+                                        context=self._ssl_ctx()) as r:
                 raw = r.read().decode("utf-8", "replace")
             self.last_error = ""
             return json.loads(raw) if raw.strip() else {}
@@ -174,6 +208,20 @@ def load_config():
     except Exception:
         pass
     return {}
+
+
+def _apply_ssl_config(cfg: dict) -> None:
+    """Wire the ssl_cafile from config into the Api class so all instances
+    created after this point trust the server's self-signed certificate."""
+    cafile = cfg.get("ssl_cafile", "") or ""
+    if not cafile:
+        # Try the well-known default: certs/ next to this script
+        import os
+        here = os.path.dirname(os.path.abspath(__file__))
+        default = os.path.join(here, "certs", "netsentinel.crt")
+        if os.path.isfile(default):
+            cafile = default
+    Api.ssl_cafile = cafile
 
 
 def save_config(cfg):
@@ -228,6 +276,7 @@ class ClientApp:
         self.tk, self.ttk = tk, ttk
         self.root = root
         self.cfg = load_config()
+        _apply_ssl_config(self.cfg)          # wire TLS cert before first Api use
         self.api = Api(server or self.cfg.get("server", DEFAULT_SERVER))
         self.api.license_key = self.cfg.get("license_key", "")
         self.connected = False
@@ -403,6 +452,7 @@ class ClientApp:
         base = self.server_var.get().strip() or DEFAULT_SERVER
         if not base.startswith("http"):
             base = "http://" + base
+        _apply_ssl_config(self.cfg)          # re-apply in case server scheme changed
         self.api = Api(base)
         key = self.license_var.get().strip() if hasattr(self, "license_var") \
             else self.cfg.get("license_key", "")

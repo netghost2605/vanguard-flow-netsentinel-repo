@@ -543,6 +543,28 @@ def _nm_desktop_prefix():
         return []
 
 
+def _nm_web_scheme(monitor):
+    """'https' if *monitor*'s ssl_cert/ssl_key are both configured and exist
+    on disk — the embedded web server (_ThreeDServer.serve) wraps its socket
+    in TLS in exactly that case — else 'http'. Anything that builds a URL to
+    the embedded web server should go through this rather than assuming
+    'http://', so it always matches what the server actually ends up
+    serving instead of silently building a dead link the moment HTTPS is
+    turned on."""
+    try:
+        cfg = getattr(monitor, 'config', None) or {}
+        cert = cfg.get('ssl_cert', '') or ''
+        key = cfg.get('ssl_key', '') or ''
+        if cert and key:
+            crt = os.path.expandvars(os.path.expanduser(cert))
+            k = os.path.expandvars(os.path.expanduser(key))
+            if os.path.isfile(crt) and os.path.isfile(k):
+                return 'https'
+    except Exception:
+        _exc_debug('_nm_web_scheme')
+    return 'http'
+
+
 def _nm_open_path(target):
     """Open a URL, file or folder in the desktop's default handler.
 
@@ -2477,7 +2499,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-ef1e7021'
+_NM_BUILD_ID = 'b-b51f5070'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -3821,7 +3843,7 @@ def generate_report(monitor, report_types, period_hours, custom_start=None, cust
 
     # Web server URL — needed by section templates
     _server_port = getattr(monitor, 'config', {}).get('web_port', 8765)
-    _server_url  = f'http://localhost:{_server_port}'
+    _server_url  = f'{_nm_web_scheme(monitor)}://localhost:{_server_port}'
 
     # Load data filtered to period
     data = monitor.data
@@ -7549,7 +7571,7 @@ class SpeedTestMonitor:
                             'alert_webhook', 'alert_debounce_min',
                             'alert_dl_below', 'alert_ul_below', 'alert_ping_above',
                             'alert_jitter_above', 'alert_loss_above', 'alert_bloat_above',
-                            'bloat_host'):
+                            'bloat_host', 'ssl_cert', 'ssl_key'):
                     v = loaded.get(key, '')
                     # Accept numbers as well as strings. web_port and
                     # interval_minutes are SAVED as ints, so an isinstance(str)
@@ -9179,7 +9201,7 @@ class EtherApeWindow:
     }
     PROTO_PRIORITY = ['http2','http','tls','ssl','dns','mdns','dhcp','dhcpv6','icmpv6','icmp','tcp','udp','arp']
 
-    def __init__(self, tshark_path=None):
+    def __init__(self, tshark_path=None, monitor=None):
         _nm_pick_mono()   # font family must be resolved before widgets
         import tkinter as tk
         from tkinter import ttk
@@ -9189,6 +9211,12 @@ class EtherApeWindow:
         self._tk=tk; self._ttk=ttk
         # CHANGE: accept tshark_path from Settings
         self.TSHARK = tshark_path if tshark_path else _DEFAULT_TSHARK_PATH
+        # Real monitor reference (config: web_port, ssl_cert/ssl_key) so the
+        # IDS report can build a correct, live-matching link back to the
+        # embedded web server instead of a hardcoded guess. Optional,
+        # defaults to None so this class still works if ever constructed
+        # without one.
+        self._monitor = monitor
 
         self.root=tk.Toplevel()
         self.root.title('EtherApe — Network Topology Monitor   ·   build WHOIS-0722 (right/left-click a host)')
@@ -12416,7 +12444,16 @@ class EtherApeWindow:
             print('[IDS] Starting analysis...')
             try: self._pkt_var.set('IDS running...')
             except Exception: _exc('_run')
-            _server_url = 'http://localhost:8765'
+            # Was hardcoded to 'http://localhost:8765' — wrong scheme once
+            # HTTPS is configured, and wrong port for anyone who changed
+            # web_port. Read both from the real monitor when we have one;
+            # fall back to the old literal only if this window was somehow
+            # built without a monitor reference.
+            if self._monitor is not None:
+                _server_port = self._monitor.config.get('web_port', 8765)
+                _server_url = f'{_nm_web_scheme(self._monitor)}://localhost:{_server_port}'
+            else:
+                _server_url = 'http://localhost:8765'
             nodes = dict(self._nodes)
             flows = dict(self._flows)
             now   = datetime.now()
@@ -13691,7 +13728,9 @@ class EtherApeWindow:
                        and self._monitor.config.get('web_port', 8765) or 8765)
         except Exception:
             _exc_debug('_open_3d_view')
-        url = 'http://localhost:%d/3d' % port
+        # Scheme has to match what the server is actually serving - see
+        # _nm_web_scheme's docstring (ssl_cert/ssl_key make it HTTPS-only).
+        url = '%s://localhost:%d/3d' % (_nm_web_scheme(getattr(self, '_monitor', None)), port)
         # Check the server is actually up before blaming the browser, and never
         # fail silently - a button that does nothing is the worst outcome.
         import socket as _sk
@@ -13725,7 +13764,9 @@ class EtherApeWindow:
                        and self._monitor.config.get('web_port', 8765) or 8765)
         except Exception:
             _exc_debug('_open_honeypot')
-        url = 'http://localhost:%d/honeypot' % port
+        # Scheme has to match what the server is actually serving - see
+        # _nm_web_scheme's docstring (ssl_cert/ssl_key make it HTTPS-only).
+        url = '%s://localhost:%d/honeypot' % (_nm_web_scheme(getattr(self, '_monitor', None)), port)
         import socket as _sk
         try:
             _s = _sk.create_connection(('127.0.0.1', port), timeout=1.5)
@@ -13744,7 +13785,9 @@ class EtherApeWindow:
                        and self._monitor.config.get('web_port', 8765) or 8765)
         except Exception:
             _exc_debug('_open_threat_radar')
-        url = 'http://localhost:%d/threats' % port
+        # Scheme has to match what the server is actually serving - see
+        # _nm_web_scheme's docstring (ssl_cert/ssl_key make it HTTPS-only).
+        url = '%s://localhost:%d/threats' % (_nm_web_scheme(getattr(self, '_monitor', None)), port)
         import socket as _sk
         try:
             _s = _sk.create_connection(('127.0.0.1', port), timeout=1.5)
@@ -33247,6 +33290,35 @@ ol.steps li{margin:6px 0}
             except Exception:
                 host = '0.0.0.0'
             httpd = ThreadingHTTPServer((host, self._port), Handler)
+
+            # ── HTTPS: wrap socket with SSL if cert/key are configured ──────
+            _ssl_cert = None
+            _ssl_key  = None
+            try:
+                _ssl_cert = self._monitor.config.get('ssl_cert', '') or ''
+                _ssl_key  = self._monitor.config.get('ssl_key',  '') or ''
+            except Exception:
+                _exc_debug('serve ssl_config')
+            _scheme = 'http'
+            if _ssl_cert and _ssl_key:
+                try:
+                    import ssl as _ssl
+                    import os as _os
+                    _crt = _os.path.expandvars(_os.path.expanduser(_ssl_cert))
+                    _key = _os.path.expandvars(_os.path.expanduser(_ssl_key))
+                    if _os.path.isfile(_crt) and _os.path.isfile(_key):
+                        _ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+                        _ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
+                        _ctx.load_cert_chain(_crt, _key)
+                        httpd.socket = _ctx.wrap_socket(httpd.socket, server_side=True)
+                        _scheme = 'https'
+                        log.info('[3D] HTTPS enabled (TLS 1.2+)')
+                    else:
+                        log.warning('[3D] ssl_cert/ssl_key paths not found — falling back to HTTP')
+                except Exception:
+                    _exc('[3D] ssl wrap')
+            # ────────────────────────────────────────────────────────────────
+
             log.info(f'[3D] server listening on {host}:{self._port} '
                      f'(mobile dashboard "/" and 3D view "/3d")')
             try:
@@ -33254,7 +33326,7 @@ ol.steps li{margin:6px 0}
                 _s = _sk.socket(_sk.AF_INET, _sk.SOCK_DGRAM)
                 _s.connect(('8.8.8.8', 80)); _lan = _s.getsockname()[0]; _s.close()
                 log.info(f'[3D] open on your phone (same Wi-Fi): '
-                         f'http://{_lan}:{self._port}/')
+                         f'{_scheme}://{_lan}:{self._port}/')
             except Exception:
                 _exc_debug('serve')
             httpd.serve_forever()
@@ -35041,7 +35113,7 @@ class ModernWindow:
 
     def _open_etherape(self):
         try:
-            EtherApeWindow(tshark_path=self._monitor._tshark_exe)
+            EtherApeWindow(tshark_path=self._monitor._tshark_exe, monitor=self._monitor)
             # __init__ self-registers in _ea_instances — no need to append here
         except Exception:
             import traceback; traceback.print_exc()
@@ -35125,7 +35197,11 @@ class ModernWindow:
             # actually reloading it (the page itself is also served with
             # no-cache headers, but a re-focused tab never issues a new
             # request at all, so those headers never get a chance to act).
-            _nm_open_path(f'http://localhost:{port}/guide?b={_NM_BUILD_ID}')
+            # Scheme has to match what the server is actually serving —
+            # ssl_cert/ssl_key (added this round) make it HTTPS-only, and an
+            # http:// request against a TLS-wrapped socket just fails.
+            _scheme = _nm_web_scheme(self._monitor)
+            _nm_open_path(f'{_scheme}://localhost:{port}/guide?b={_NM_BUILD_ID}')
         except Exception:
             _exc('_open_guide')
 

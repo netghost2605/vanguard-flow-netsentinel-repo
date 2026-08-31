@@ -20,5 +20,7 @@
   "alert_jitter_above": "",
   "alert_loss_above": "",
   "alert_bloat_above": "",
-  "bloat_host": "1.1.1.1"
+  "bloat_host": "1.1.1.1",
+  "ssl_cert": "C:/coding projects/speedtestwithexport/vanguard-flow-netsentinel/certs/netsentinel.crt",
+  "ssl_key": "C:/coding projects/speedtestwithexport/vanguard-flow-netsentinel/certs/netsentinel.key"
 }
