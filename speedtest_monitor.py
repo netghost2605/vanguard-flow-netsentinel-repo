@@ -2205,20 +2205,89 @@ INTERVAL_MINUTES = 5
 # DNS row all shared that one fixed colour) -- Ocean's "dns" below is that
 # same value, so anyone already on the default theme sees no visual change;
 # every other theme now actually colours its DNS readouts too.
+# Each preset also now carries full UI-chrome colours (bg/bg2/panel/border/
+# text/text2), not just the four metric-line accents above — this is what
+# lets the web pages (/guide, /monitor, /honeypot, etc.) actually recolour
+# their background/panels/borders/text per theme instead of only the
+# gauges and charts. 'bg2' is a darker recessed tone (topbars, code blocks),
+# 'panel' a raised card tone, 'text2' a dimmer secondary text colour. Every
+# preset's own 'download' colour doubles as that page's general accent
+# (headings, links, highlights) — chosen because that's already what the
+# pre-existing hardcoded page CSS did for the old Neon-like default look.
+# Deliberately NOT themed: the semantic tip/warn/error colours used for
+# in-page callouts, which stay fixed (green/amber/red) across every theme
+# so a warning still reads as a warning regardless of which theme is active
+# — same principle already used for the Evidence Pack's fixed good/warn/bad
+# colours, which are separate from its themed download/upload/ping lines.
 THEMES = {
-    "Ocean":    {"download": "#00d4aa", "upload": "#a371f7", "ping": "#f7cc73", "dns": "#ff9f43"},
-    "Sunset":   {"download": "#ff6b6b", "upload": "#ffd93d", "ping": "#6bcb77", "dns": "#4dd0e1"},
-    "Neon":     {"download": "#39ff14", "upload": "#ff073a", "ping": "#00b4d8", "dns": "#ffb700"},
-    "Pastel":   {"download": "#74c7ec", "upload": "#cba6f7", "ping": "#f9e2af", "dns": "#f5a9b8"},
-    "Mono":     {"download": "#e0e0e0", "upload": "#a0a0a0", "ping": "#606060", "dns": "#808080"},
-    "Crimson":  {"download": "#ff4466", "upload": "#ff8800", "ping": "#ffdd00", "dns": "#ff3377"},
-    "Arctic":   {"download": "#88ddff", "upload": "#aaffee", "ping": "#ffffff", "dns": "#c9a0ff"},
-    "Hacker":   {"download": "#00ff41", "upload": "#00cc33", "ping": "#008822", "dns": "#ffb000"},
-    "Purple":   {"download": "#bf5fff", "upload": "#ff5fbf", "ping": "#5fddff", "dns": "#ffe45f"},
-    "Gold":     {"download": "#ffd700", "upload": "#ff9900", "ping": "#00ccff", "dns": "#7fff5f"},
-    "Fire":     {"download": "#ff3300", "upload": "#ff6600", "ping": "#ffaa00", "dns": "#00e5ff"},
-    "Ice":      {"download": "#00cfff", "upload": "#0066ff", "ping": "#aa88ff", "dns": "#ffcc66"},
+    "Ocean":    {"download": "#00d4aa", "upload": "#a371f7", "ping": "#f7cc73", "dns": "#ff9f43",
+                 "bg": "#050d1a", "bg2": "#03080f", "panel": "#0a1626", "border": "#123049",
+                 "text": "#cfe6f5", "text2": "#7fa8c2"},
+    "Sunset":   {"download": "#ff6b6b", "upload": "#ffd93d", "ping": "#6bcb77", "dns": "#4dd0e1",
+                 "bg": "#170a10", "bg2": "#0d0509", "panel": "#241019", "border": "#4a1f2c",
+                 "text": "#f5dde0", "text2": "#c98a95"},
+    "Neon":     {"download": "#39ff14", "upload": "#ff073a", "ping": "#00b4d8", "dns": "#ffb700",
+                 "bg": "#050d18", "bg2": "#020810", "panel": "#0a1420", "border": "#12324a",
+                 "text": "#c8dff0", "text2": "#8fb4ce"},
+    "Pastel":   {"download": "#74c7ec", "upload": "#cba6f7", "ping": "#f9e2af", "dns": "#f5a9b8",
+                 "bg": "#12101c", "bg2": "#0a0814", "panel": "#1c1930", "border": "#332c52",
+                 "text": "#e8e2f7", "text2": "#a99bd6"},
+    "Mono":     {"download": "#e0e0e0", "upload": "#a0a0a0", "ping": "#606060", "dns": "#808080",
+                 "bg": "#111111", "bg2": "#0a0a0a", "panel": "#1a1a1a", "border": "#333333",
+                 "text": "#e0e0e0", "text2": "#909090"},
+    "Crimson":  {"download": "#ff4466", "upload": "#ff8800", "ping": "#ffdd00", "dns": "#ff3377",
+                 "bg": "#160406", "bg2": "#0c0203", "panel": "#240a0d", "border": "#4a1319",
+                 "text": "#f5dadc", "text2": "#c77b83"},
+    "Arctic":   {"download": "#88ddff", "upload": "#aaffee", "ping": "#ffffff", "dns": "#c9a0ff",
+                 "bg": "#040f16", "bg2": "#020a0f", "panel": "#0a1c26", "border": "#153749",
+                 "text": "#e6f7ff", "text2": "#8fc9dd"},
+    "Hacker":   {"download": "#00ff41", "upload": "#00cc33", "ping": "#008822", "dns": "#ffb000",
+                 "bg": "#020402", "bg2": "#010301", "panel": "#041006", "border": "#0f3d10",
+                 "text": "#8aff6a", "text2": "#3d9c2c"},
+    "Purple":   {"download": "#bf5fff", "upload": "#ff5fbf", "ping": "#5fddff", "dns": "#ffe45f",
+                 "bg": "#120818", "bg2": "#0a0410", "panel": "#1d1028", "border": "#3a1f52",
+                 "text": "#eeddff", "text2": "#b98cff"},
+    "Gold":     {"download": "#ffd700", "upload": "#ff9900", "ping": "#00ccff", "dns": "#7fff5f",
+                 "bg": "#160f02", "bg2": "#0d0901", "panel": "#241a04", "border": "#4a3608",
+                 "text": "#fbe9b8", "text2": "#d9b869"},
+    "Fire":     {"download": "#ff3300", "upload": "#ff6600", "ping": "#ffaa00", "dns": "#00e5ff",
+                 "bg": "#170702", "bg2": "#0d0401", "panel": "#261006", "border": "#4a2008",
+                 "text": "#ffe0cc", "text2": "#e08a5a"},
+    "Ice":      {"download": "#00cfff", "upload": "#0066ff", "ping": "#aa88ff", "dns": "#ffcc66",
+                 "bg": "#030f18", "bg2": "#02080f", "panel": "#08202e", "border": "#123a54",
+                 "text": "#d6f0ff", "text2": "#7fbfe0"},
 }
+
+# Fallback UI-chrome values for a pre-existing 'custom' theme override that
+# was saved before these fields existed (only download/upload/ping/dns) —
+# without this, a saved custom theme would crash every page below on a
+# missing key instead of just falling back to something sane.
+_NM_THEME_UI_FALLBACK = {"bg": "#050d18", "bg2": "#020810", "panel": "#0a1420",
+                          "border": "#12324a", "text": "#c8dff0", "text2": "#8fb4ce"}
+
+
+def _nm_theme_ui(monitor):
+    """Full UI-chrome colours (bg/bg2/panel/border/text/text2/accent) for
+    *monitor*'s active theme, safe to call even with a pre-existing custom
+    override that predates these fields, or no monitor at all. 'accent' is
+    the theme's own 'download' colour, reused as the page's general accent
+    (headings/links) — see the THEMES comment above for why.
+    """
+    try:
+        c = monitor.colors if monitor is not None else THEMES['Neon']
+    except Exception:
+        c = THEMES['Neon']
+    out = dict(_NM_THEME_UI_FALLBACK)
+    for k in ('bg', 'bg2', 'panel', 'border', 'text', 'text2'):
+        v = c.get(k) if isinstance(c, dict) else None
+        if v:
+            out[k] = v
+    out['accent'] = (c.get('download') if isinstance(c, dict) else None) or '#39ff14'
+    out['download'] = out['accent']
+    out['upload']   = (c.get('upload') if isinstance(c, dict) else None) or '#a371f7'
+    out['ping']     = (c.get('ping')   if isinstance(c, dict) else None) or '#f7cc73'
+    out['dns']      = (c.get('dns')    if isinstance(c, dict) else None) or '#ff9f43'
+    return out
 
 VIEW_MODES = ["Today", "This Week", "This Month", "All Time"]
 
@@ -2499,7 +2568,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-b51f5070'
+_NM_BUILD_ID = 'b-fe30eb24'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -26057,7 +26126,7 @@ class _ThreeDServer:
 <title>EtherApe 3D</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#060d1a;color:#a0c4d8;font-family:monospace;overflow:hidden}
+body{background:@@3DBG@@;color:@@3DTEXT2@@;font-family:monospace;overflow:hidden}
 /* 100vw ignores the scrollbar and resolves against the LAYOUT viewport on
    mobile, so on an iPad the canvas came out wider than the screen and
    dragged every fixed overlay off the edge with it. Fixed inset:0 fills
@@ -26068,29 +26137,29 @@ html,body{max-width:100%;overflow-x:hidden}
 #hud{position:fixed;top:0;left:0;right:0;padding:7px 14px;
      background:rgba(6,13,26,.85);font-size:11px;color:#2a5a7a;
      display:flex;align-items:center;gap:16px;pointer-events:none;z-index:9;
-     border-bottom:1px solid #0a1828}
-#hud b{color:#38b8f0}
+     border-bottom:1px solid @@3DPANEL@@}
+#hud b{color:@@3DACCENT@@}
 #hud .warn{color:#ff4444}
 #toolbar{position:fixed;top:34px;left:0;right:0;padding:5px 12px;
          background:rgba(6,13,26,.8);display:flex;align-items:center;gap:8px;
          border-bottom:1px solid #091520;z-index:9}
-.tbtn{background:#0a1828;border:1px solid #1a3a5a;color:#38b8f0;
+.tbtn{background:@@3DPANEL@@;border:1px solid @@3DBORDER@@;color:@@3DACCENT@@;
       font:bold 10px monospace;padding:4px 10px;cursor:pointer;border-radius:3px;
       pointer-events:all}
 .tbtn:hover{background:#152840;color:#74c7ec}
-.tbtn.active{background:#1a3a5a;color:#74c7ec;border-color:#38b8f0}
+.tbtn.active{background:@@3DBORDER@@;color:#74c7ec;border-color:@@3DACCENT@@}
 #spread-row{display:flex;align-items:center;gap:6px;pointer-events:all}
 #spread-row label{font-size:10px;color:#1a4a6a}
 #spread-sl{width:90px;cursor:pointer}
 #spread-val{font-size:10px;color:#a371f7;min-width:28px}
 #info{position:fixed;bottom:14px;right:14px;width:250px;
-      background:rgba(6,13,26,.92);border:1px solid #1a3a5a;
+      background:rgba(6,13,26,.92);border:1px solid @@3DBORDER@@;
       border-radius:5px;padding:10px 12px;font-size:11px;
-      color:#6a9ab8;display:none;z-index:10;pointer-events:none}
-#info .ip{color:#38b8f0;font-size:13px;font-weight:bold;margin-bottom:5px}
+      color:@@3DTEXT2@@;display:none;z-index:10;pointer-events:none}
+#info .ip{color:@@3DACCENT@@;font-size:13px;font-weight:bold;margin-bottom:5px}
 #info .row{display:flex;justify-content:space-between;margin:2px 0}
 #info .key{color:#1a4a6a}
-#info .val{color:#a0c4d8;text-align:right;max-width:150px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#info .val{color:@@3DTEXT2@@;text-align:right;max-width:150px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #info .blocked-badge{color:#ff4444;font-weight:bold;font-size:10px;margin-top:4px}
 #info .susp-badge{color:#ff9f43;font-weight:bold;font-size:10px;margin-top:2px}
 /* Horizontal legend: a single strip along the bottom, wrapping if the window
@@ -26150,7 +26219,7 @@ html,body{max-width:100%;overflow-x:hidden}
 #legend .pdesc{color:#4a6f8c;font-size:8.5px;letter-spacing:.01em}
 #legend .ppct{font-family:monospace;color:#7fa8c0;font-size:10px;padding-left:2px}
 #crosshair{position:fixed;pointer-events:none;z-index:8;display:none;
-           width:14px;height:14px;border:1px solid #38b8f0;border-radius:50%;
+           width:14px;height:14px;border:1px solid @@3DACCENT@@;border-radius:50%;
            transform:translate(-50%,-50%)}
 
 /* Tablet portrait: the fixed bottom-right button cluster needs 768px of width,
@@ -30094,19 +30163,35 @@ poll();
 </body>
 </html>'''
         # <<<ASSET:3d.html
+        # Scoped deliberately narrow: only the 2D HUD/overlay CSS above uses
+        # @@3D...@@ markers (chosen so they can't collide with anything in
+        # the ~4000 lines of Three.js scene/material code below the CSS
+        # block) - the actual WebGL scene (particles, bars, lighting,
+        # glass walls etc.) keeps its bespoke look untouched, since that
+        # was hand-tuned over many iterations earlier this session and
+        # wasn't part of what was asked for here.
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@3DBG@@', _ui['bg']), ('@@3DPANEL@@', _ui['panel']),
+                            ('@@3DBORDER@@', _ui['border']), ('@@3DTEXT2@@', _ui['text2']),
+                            ('@@3DACCENT@@', _ui['accent'])):
+            html = html.replace(_tok, _val)
         return html.encode('utf-8')
 
     def _build_mobile_html(self):
         # >>>ASSET:mobile.html  — edit web/mobile.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''<!DOCTYPE html>
+        # --faint (a 3rd, even dimmer text tier) and the --cyan/--mint/
+        # --amber/--violet/--red feature accents stay fixed, same rule as
+        # every other page - only bg/surface/raise/line/ink/muted (the
+        # structural chrome) are theme-driven.
+        _html = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>Vanguard Flow NetSentinel</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#070e18">
+<meta name="theme-color" content="@@BG@@">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -30114,8 +30199,8 @@ poll();
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
  :root{
-   --bg:#070e18; --surface:#0c1a2b; --raise:#102437; --line:#1b3550;
-   --ink:#e6f1fa; --muted:#7595b0; --faint:#41617d;
+   --bg:@@BG@@; --surface:@@PANEL@@; --raise:@@PANEL@@; --line:@@BORDER@@;
+   --ink:@@TEXT@@; --muted:@@TEXT2@@; --faint:#41617d;
    --cyan:#3ec6ff; --mint:#3ce8b0; --amber:#ffb45a; --violet:#bb8cff; --red:#ff5d73;
    --mono:ui-monospace,"SF Mono","Cascadia Code","Segoe UI Mono",Menlo,Consolas,monospace;
    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
@@ -30476,22 +30561,28 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catc
 </body>
 </html>'''
         # <<<ASSET:mobile.html
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2'])):
+            _html = _html.replace(_tok, _val)
+        return _html
 
     def _build_vdi_html(self):
         # >>>ASSET:vdi.html  — edit web/vdi.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''<!DOCTYPE html>
+        _html = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>VDI Sessions</title>
-<meta name="theme-color" content="#050d1a">
+<meta name="theme-color" content="@@BG@@">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
- :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;}
  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
    padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px);min-height:100vh;max-width:600px;margin:0 auto;-webkit-font-smoothing:antialiased;}
@@ -30557,22 +30648,29 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 </body>
 </html>'''
         # <<<ASSET:vdi.html
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']),
+                            ('#c8dff0', _ui['text']), ('#6a9ab8', _ui['text2'])):
+            _html = _html.replace(_tok, _val)
+        return _html
 
     def _build_analytics_html(self):
         # >>>ASSET:analytics.html  — edit web/analytics.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''<!DOCTYPE html>
+        _html = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>Analytics</title>
-<meta name="theme-color" content="#050d1a">
+<meta name="theme-color" content="@@BG@@">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
- :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;}
  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
    padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px);min-height:100vh;max-width:600px;margin:0 auto;-webkit-font-smoothing:antialiased;}
@@ -30661,22 +30759,33 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 </body>
 </html>'''
         # <<<ASSET:analytics.html
+        # Not themed on purpose: the download/upload/ping stat colours
+        # (#38b8f0/#39ff14/#ff9f43) also double as this page's uptime-
+        # threshold good/warn/bad indicators further down the same script,
+        # so retheming them would silently recolour status semantics too -
+        # left fixed rather than risk that conflation.
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2'])):
+            _html = _html.replace(_tok, _val)
+        return _html
 
     def _build_monitor_html(self):
         # >>>ASSET:monitor.html  — edit web/monitor.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''<!DOCTYPE html>
+        _html = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>Alerts &amp; Devices</title>
-<meta name="theme-color" content="#050d1a">
+<meta name="theme-color" content="@@BG@@">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
- :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;}
  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
    padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 24px);min-height:100vh;max-width:600px;margin:0 auto;
@@ -30918,14 +31027,30 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 </body>
 </html>'''
         # <<<ASSET:monitor.html
+        # Theme-driven chrome (see _build_guide_html for why plain .replace()
+        # on @@TOKEN@@ markers, never % or .format, on a block this full of
+        # literal CSS/JS). The handful of JS-inline #6a9ab8/#c8dff0 literals
+        # scattered below the <style> block are exact duplicates of the same
+        # --tick/--text values (not a different colour), so they're safe to
+        # catch with the same literal replace rather than needing their own
+        # tokens. Semantic status colours (sev-warn/info/crit, badges, the
+        # tab-active gradient, online/blocked dots) are deliberately left
+        # fixed, same principle as the Guide's untouched .warn box.
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']),
+                            ('#6a9ab8', _ui['text2']), ('#c8dff0', _ui['text'])):
+            _html = _html.replace(_tok, _val)
+        return _html
 
     def _build_threats_html(self):
         # >>>ASSET:threats.html
-        return r'''<!DOCTYPE html><html lang="en"><head>
+        _html = r'''<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Threat Radar &#8212; NetSentinel</title>
 <style>
-:root{--bg:#040c18;--panel:#0a1828;--line:#12283e;--ink:#c8dff0;--dim:#6a9ab8;
+:root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--ink:@@TEXT@@;--dim:@@TEXT2@@;
   --red:#ff3020;--amber:#ff9f43;--grn:#00ff50;--blue:#38b8f0}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
@@ -31182,14 +31307,24 @@ resize(); draw(); load(); setInterval(load,4000);
 </body></html>
 '''
         # <<<ASSET:threats.html
+        # Theme-driven chrome, same pattern as _build_guide_html/
+        # _build_monitor_html. --red/--amber/--grn/--blue (threat severity)
+        # stay fixed on purpose - a critical threat should read the same
+        # regardless of theme.
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']), ('#6a9ab8', _ui['text2'])):
+            _html = _html.replace(_tok, _val)
+        return _html
 
     def _build_honeypot_html(self):
         # >>>ASSET:honeypot.html
-        return r'''<!DOCTYPE html><html lang="en"><head>
+        _html = r'''<!DOCTYPE html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Honeypot &#8212; NetSentinel</title>
 <style>
-:root{--bg:#040c18;--panel:#0a1828;--line:#12283e;--ink:#c8dff0;--dim:#6a9ab8;
+:root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--ink:@@TEXT@@;--dim:@@TEXT2@@;
   --mint:#38f0a8;--amber:#ff9f43;--red:#ff3020;--blue:#38b8f0;--violet:#b388ff}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
@@ -31524,11 +31659,21 @@ resize(); draw(); load(); setInterval(load,3000);
 </body></html>
 '''
         # <<<ASSET:honeypot.html
+        # Theme-driven chrome, same pattern as the other pages. --mint/
+        # --amber/--red/--blue/--violet (per-action button colours + threat
+        # severity) stay fixed on purpose.
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']), ('#6a9ab8', _ui['text2']),
+                            ('#040c18', _ui['bg'])):
+            _html = _html.replace(_tok, _val)
+        return _html
 
     def _build_agents_html(self):
         # >>>ASSET:agents.html  — edit web/agents.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''<!DOCTYPE html>
+        _html = r'''<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Remote Agents</title><style>
@@ -31634,11 +31779,30 @@ function refresh(){
 refresh(); setInterval(refresh, 15000);
 </script></body></html>'''
         # <<<ASSET:agents.html
+        # This page has no :root block (colours are inlined directly), so
+        # theme structural chrome with a straight literal-value replace
+        # instead of tokens - #040c18/#0a1828/#12283e/#c8dff0/#6a9ab8 only
+        # ever mean bg/panel/border/text/dim on this page. Everything else
+        # (mint header, amber/red status, blue/purple accents, the offline-
+        # card red border) stays fixed, same rule as every other page.
+        _ui = _nm_theme_ui(self._monitor)
+        for _old, _new in (('#040c18', _ui['bg']), ('#0a1828', _ui['panel']),
+                            ('#12283e', _ui['border']), ('#c8dff0', _ui['text']),
+                            ('#6a9ab8', _ui['text2'])):
+            _html = _html.replace(_old, _new)
+        return _html
 
     def _build_talkers_html(self):
         # >>>ASSET:talkers.html  — edit web/talkers.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''<!DOCTYPE html>
+        # This page's dim-text/accent colours are a deliberate multi-shade
+        # data-table palette (rank/IP/org/bytes/protocol-tag each get their
+        # own tone) rather than one repeated role, so — unlike the other
+        # pages — only the unambiguous structural values are themed here:
+        # page background, primary text, the header/thead panel tone, and
+        # the (near-identical, unified) border colour. Everything else is
+        # left as its own deliberate shade rather than guessed at.
+        _html = r'''<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Top Talkers</title>
@@ -31779,22 +31943,29 @@ load();setInterval(tick,2000);
 </script>
 </body></html>'''
         # <<<ASSET:talkers.html
+        _ui = _nm_theme_ui(self._monitor)
+        for _old, _new in (('#050d1a', _ui['bg']), ('#c8dff0', _ui['text']),
+                            ('#061426', _ui['panel']),
+                            ('#0a1e30', _ui['border']), ('#12283f', _ui['border']),
+                            ('#0c1c30', _ui['border'])):
+            _html = _html.replace(_old, _new)
+        return _html
 
     def _build_sankey_html(self):
         # >>>ASSET:sankey.html  — edit web/sankey.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''<!DOCTYPE html>
+        _html = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>Top Flow Talkers</title>
-<meta name="theme-color" content="#050d1a">
+<meta name="theme-color" content="@@BG@@">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
- :root{--bg:#050d1a;--panel:#0a1728;--line:#12283f;--text:#c8dff0;--tick:#6a9ab8;}
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;}
  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
  body{background:var(--bg);color:var(--text);
    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
@@ -32364,6 +32535,15 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 </body>
 </html>'''
         # <<<ASSET:sankey.html
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']),
+                            ('#050d1a', _ui['bg']), ('#0a1728', _ui['panel']),
+                            ('#12283f', _ui['border']), ('#c8dff0', _ui['text']),
+                            ('#6a9ab8', _ui['text2'])):
+            _html = _html.replace(_tok, _val)
+        return _html
 
     def _build_manifest(self):
         # >>>ASSET:manifest.webmanifest  — edit web/manifest.webmanifest, then run:
@@ -32616,41 +32796,54 @@ self.addEventListener('fetch',function(e){
                 body.append(gallery(shots))
             body.append('</section>')
 
+        # Theme-driven chrome: background/panel/border/text/accents come from
+        # the active theme (_nm_theme_ui) via plain string replace (never %
+        # or .format on this block — it's full of literal CSS %'s and JS-like
+        # braces elsewhere in sibling pages, so a find/replace on unique
+        # @@TOKEN@@ markers is the only safe way to parameterise it).
+        # .warn is deliberately NOT themed — a warning stays amber regardless
+        # of theme, same principle as the Evidence Pack's fixed good/warn/bad.
+        _ui = _nm_theme_ui(self._monitor)
         css = """
 *{box-sizing:border-box}
-body{margin:0;background:#050d18;color:#c8dff0;font:15px/1.6 -apple-system,'Segoe UI',system-ui,sans-serif}
-.topbar{position:sticky;top:0;z-index:5;background:#020810;border-bottom:1px solid #12324a;padding:10px 18px}
-.topbar a{color:#38b8f0;text-decoration:none;font:600 13px Consolas,monospace}
-.topbar a:hover{color:#7fe0ff}
+body{margin:0;background:@@BG@@;color:@@TEXT@@;font:15px/1.6 -apple-system,'Segoe UI',system-ui,sans-serif}
+.topbar{position:sticky;top:0;z-index:5;background:@@BG2@@;border-bottom:1px solid @@BORDER@@;padding:10px 18px}
+.topbar a{color:@@ACCENT2@@;text-decoration:none;font:600 13px Consolas,monospace}
+.topbar a:hover{color:@@TEXT@@}
 .wrap{display:flex;max-width:1200px;margin:0 auto}
 nav{position:sticky;top:44px;align-self:flex-start;width:230px;flex:0 0 230px;
-    height:calc(100vh - 44px);overflow:auto;padding:18px 10px;border-right:1px solid #12324a}
-nav a{display:block;padding:6px 10px;margin:1px 0;color:#8fb4ce;text-decoration:none;
+    height:calc(100vh - 44px);overflow:auto;padding:18px 10px;border-right:1px solid @@BORDER@@}
+nav a{display:block;padding:6px 10px;margin:1px 0;color:@@TEXT2@@;text-decoration:none;
       border-radius:6px;font:500 13px Consolas,monospace}
-nav a:hover{background:#0c1f30;color:#38b8f0}
+nav a:hover{background:@@PANEL@@;color:@@ACCENT2@@}
 main{flex:1;min-width:0;padding:26px 34px 80px}
 section{padding-top:8px;margin-bottom:10px}
-h1{color:#39ff14;font:700 22px Consolas,monospace;margin:26px 0 10px;
-   border-bottom:1px solid #12324a;padding-bottom:8px}
-h2{color:#38b8f0;font:600 16px Consolas,monospace;margin:22px 0 8px}
-p{margin:8px 0;color:#bcd6ea}
+h1{color:@@ACCENT@@;font:700 22px Consolas,monospace;margin:26px 0 10px;
+   border-bottom:1px solid @@BORDER@@;padding-bottom:8px}
+h2{color:@@ACCENT2@@;font:600 16px Consolas,monospace;margin:22px 0 8px}
+p{margin:8px 0;color:@@TEXT2@@}
 ul{margin:8px 0 8px 4px;padding-left:20px}
-li{margin:4px 0;color:#bcd6ea}
+li{margin:4px 0;color:@@TEXT2@@}
 ol.steps{margin:10px 0;padding-left:26px}
 ol.steps li{margin:6px 0}
-.tip{border-left:3px solid #39ff14;background:#0a1f14;padding:8px 12px;margin:12px 0;border-radius:0 6px 6px 0}
+.tip{border-left:3px solid @@ACCENT@@;background:@@PANEL@@;padding:8px 12px;margin:12px 0;border-radius:0 6px 6px 0}
 .warn{border-left:3px solid #ffb300;background:#211a06;padding:8px 12px;margin:12px 0;border-radius:0 6px 6px 0}
-.diagram{background:#020810;border:1px solid #12324a;border-radius:8px;padding:12px;
-         overflow:auto;color:#7fe0ff;font:12px Consolas,monospace}
+.diagram{background:@@BG2@@;border:1px solid @@BORDER@@;border-radius:8px;padding:12px;
+         overflow:auto;color:@@ACCENT2@@;font:12px Consolas,monospace}
 .shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;margin:16px 0}
-.shots figure{margin:0;background:#020810;border:1px solid #12324a;border-radius:8px;overflow:hidden}
+.shots figure{margin:0;background:@@BG2@@;border:1px solid @@BORDER@@;border-radius:8px;overflow:hidden}
 .shots a{display:block;line-height:0}
-.shots img{display:block;width:100%;height:auto;background:#020810;transition:opacity .15s}
+.shots img{display:block;width:100%;height:auto;background:@@BG2@@;transition:opacity .15s}
 .shots img:hover{opacity:.85}
-.shots figcaption{padding:7px 10px;color:#8fb4ce;font:12px Consolas,monospace;border-top:1px solid #12324a}
+.shots figcaption{padding:7px 10px;color:@@TEXT2@@;font:12px Consolas,monospace;border-top:1px solid @@BORDER@@}
 @media(max-width:760px){.wrap{flex-direction:column}nav{position:static;width:auto;height:auto;
-  flex:none;border-right:0;border-bottom:1px solid #12324a;display:flex;flex-wrap:wrap}main{padding:18px}}
+  flex:none;border-right:0;border-bottom:1px solid @@BORDER@@;display:flex;flex-wrap:wrap}main{padding:18px}}
 """
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@BG2@@', _ui['bg2']),
+                            ('@@PANEL@@', _ui['panel']), ('@@BORDER@@', _ui['border']),
+                            ('@@TEXT@@', _ui['text']), ('@@TEXT2@@', _ui['text2']),
+                            ('@@ACCENT@@', _ui['accent']), ('@@ACCENT2@@', _ui['upload'])):
+            css = css.replace(_tok, _val)
         return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
                 '<meta name="viewport" content="width=device-width, initial-scale=1">'
                 '<title>Vanguard Flow NetSentinel \u2014 Guide</title><style>' + css + '</style>'

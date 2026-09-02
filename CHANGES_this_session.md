@@ -1,6 +1,6 @@
-# Changes this session — build `b-b51f5070`
+# Changes this session — build `b-fe30eb24`
 
-Fifty-six things this session. Build IDs for reference:
+Fifty-seven things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -171,8 +171,109 @@ Fifty-six things this session. Build IDs for reference:
     test cert.
 56. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
     found (and fixed) the same hardcoded-`http://` bug in three more
-    places my previous "check all the others" pass missed entirely
-    (this one, current).
+    places my previous "check all the others" pass missed entirely.
+57. `b-fe30eb24` — colour themes now apply to all 11 web-served pages
+    (Guide, Monitor, Threat Radar, Honeypot, Remote Agents, Top Talkers,
+    Topology, VDI, Analytics, the mobile dashboard, and the 3D view's 2D
+    HUD) — previously the 12 themes only touched the main dashboard's
+    gauges, the Remote Agents chart, and the Evidence Pack PDF (this one,
+    current).
+
+## Colour themes now apply to all 11 web-served pages, not just 3 things
+
+**What you asked:** "can the themes be applied to all pages?" I checked
+first rather than guessing — at the time, your 12 colour themes only
+touched three things in the whole app: the main dashboard's gauges/live-
+traffic chart, the Remote Agents chart, and the Evidence Pack PDF.
+Everything web-served (Guide, 3D View, Honeypot, Threat Radar, Monitor,
+Speedtest analytics, the mobile dashboard, etc. — 11 pages) had its own
+fixed, hardcoded colours regardless of which theme you had picked.
+
+**Scope, as agreed before I started (two decisions locked in up front so
+I wasn't guessing mid-way through):**
+
+- Full reskin of all 11 web pages — not just the 4 metric accent colours,
+  but background/panel/border/text too, so picking a different theme
+  visibly changes how these pages look, not just chart line colours.
+- Task Manager TMOG's own separate 6-preset theme picker (Neon, Mono,
+  Green Phosphor, Amber, Blue, Light) stays completely separate, untouched
+  — it's a different-shaped palette (full UI colours already) and you
+  said to leave it as its own thing.
+
+**What changed — `speedtest_monitor.py`:**
+
+- The module-level `THEMES` dict (all 12 presets) now carries six new
+  fields per theme — `bg`, `bg2`, `panel`, `border`, `text`, `text2` — on
+  top of the four existing metric-accent colours (download/upload/ping/
+  dns), which are unchanged. Each theme's own `download` colour doubles
+  as that page's general accent (headings, links, highlights) — that's
+  what the old hardcoded page CSS was already doing with a fixed green/
+  blue, just not tied to your theme choice.
+- New `_nm_theme_ui(monitor)` helper resolves a theme's full UI-chrome
+  colours safely — including a fallback for a pre-existing `custom`
+  theme override saved before these fields existed, and for no monitor
+  at all — so nothing crashes on an old config or an edge case.
+- All 11 `_build_*_html` methods (`_build_guide_html`, `_build_monitor_
+  html`, `_build_threats_html`, `_build_honeypot_html`, `_build_agents_
+  html`, `_build_talkers_html`, `_build_sankey_html`, `_build_vdi_html`,
+  `_build_analytics_html`, `_build_mobile_html`, `_build_3d_html`) now
+  pull their background/panel/border/text colours from the active theme
+  instead of a fixed hex value baked into the page.
+
+**Deliberately NOT themed, on purpose, not by oversight — same reasoning
+applied consistently on every page:**
+
+- Semantic status colours (warning amber, critical/blocked red, online/
+  live green, info blue) stay fixed on every page regardless of theme —
+  a warning should read as a warning no matter which theme is active.
+  Same principle the Evidence Pack already used for its fixed good/warn/
+  bad colours, separate from its themed download/upload/ping lines.
+- Per-button brand colours (e.g. the 3D view's kill-switch red, attack-
+  sim orange, world-view blue, firewall gold buttons) stay fixed — they're
+  colour-coded by function, not decoration.
+- The Top Talkers page has a genuinely multi-shade data-table palette
+  (rank/IP/org/bytes/protocol-tag each get their own deliberate tone)
+  rather than one repeated role — only its unambiguous background/text/
+  panel/border values are themed; the column-specific shades are left as
+  they were rather than guessed at.
+- The 3D view's actual WebGL scene — particles, protocol bars, glass
+  walls, lighting, bloom — is completely untouched. That look was hand-
+  tuned over many rounds earlier this session (build IDs `b-7b6beaf3`
+  through `b-61579561` in this same log), and reskinning it per-theme
+  wasn't part of what was asked here. Only the 2D HUD overlay (toolbar,
+  info panel, HUD text, crosshair) pulls from the theme now.
+
+**Verified for real, not just read:**
+
+- Full `selftest.py`: 33/0/3 headless, 35/0/1 under `xvfb-run` — both
+  clean against a freshly re-baselined golden (all 11 routes' content
+  changed on purpose, so the baseline was updated with `--update-ok`
+  and then re-verified clean).
+- The 13-page System Monitor regression and the full Nmap GUI suite:
+  both green, untouched by this change.
+- The real test: started the actual `_ThreeDServer`, and for every one
+  of the 12 themes fetched all 11 pages over real HTTP and confirmed
+  that theme's actual hex colours are genuinely present in the served
+  bytes — 132 (theme × page) combinations, all passing.
+- A cross-theme negative check: fetched `/guide` under Ocean, then under
+  Fire, and confirmed Ocean's background colour is *not* present in the
+  Fire response and vice versa — proving the page is actually switching
+  with the theme, not just coincidentally containing every theme's
+  colours.
+- For the 3D view specifically: fetched it under Fire and under Ice and
+  diffed the two responses byte-for-byte — only 81 characters differ out
+  of 190,864 (exactly the handful of HUD hex codes that were touched),
+  confirming the WebGL scene genuinely comes through identical regardless
+  of theme, not just "probably fine."
+
+**NOT verified:** I can't open these pages in a real browser on your
+machine and eyeball whether every theme actually looks *good* — the
+palettes for all 12 presets (bg/panel/border/text per theme) are new
+colour choices I designed to be internally consistent and readable
+(dark background, adequate contrast against light text), but I haven't
+had a human look at them. If any of the 12 look off to you, tell me
+which one and what's wrong — palette tuning is quick to iterate on
+once I know what's wrong with it.
 
 ## Fixed: 3D view, Honeypot console, and Threat Radar buttons all still hardcoded `http://`
 
