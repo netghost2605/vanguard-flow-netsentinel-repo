@@ -1,6 +1,6 @@
-# Changes this session — build `b-fe30eb24`
+# Changes this session — build `b-ed99f4cc`
 
-Fifty-seven things this session. Build IDs for reference:
+Sixty-one things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -176,8 +176,357 @@ Fifty-seven things this session. Build IDs for reference:
     (Guide, Monitor, Threat Radar, Honeypot, Remote Agents, Top Talkers,
     Topology, VDI, Analytics, the mobile dashboard, and the 3D view's 2D
     HUD) — previously the 12 themes only touched the main dashboard's
-    gauges, the Remote Agents chart, and the Evidence Pack PDF (this one,
-    current).
+    gauges, the Remote Agents chart, and the Evidence Pack PDF.
+58. `b-d3604f66` — captured-traffic pcap file is now actually deleted when
+    the app closes, instead of only being wiped at the *next* launch.
+59. `b-1fbadf59` — the Wireshark Monitor window itself now stops capture
+    and deletes the pcap when just that window is closed (X button), not
+    only when the whole app quits — closes the gap flagged in the last
+    entry.
+60. `b-e787ec87` — you reported "reporting is broken"; found and
+    fixed the actual crash — `_fmt_ms()` had no `None` guard, so any HTML
+    report over a period with no ping or DNS readings threw
+    `TypeError: unsupported format string passed to NoneType.__format__`.
+61. `b-ed99f4cc` (current) — EtherApe toolbar redesign: the old two-row,
+    ~55-control toolbar (the "mess" you flagged, that needed full-screen to
+    see half of it) is replaced with a left icon rail + collapsible bottom
+    filters drawer (the "Option B" mockup you picked). Plus two real,
+    previously-unknown bugs found and fixed while rebuilding it — a
+    `self._replay_btn` name collision that had left the PCAP-replay-start
+    button permanently stuck disabled, and a window-packing order bug that
+    could make the bottom status bar and the LIVE/REPLAY scrubber bar
+    invisible whenever the window's content needed more height than it had.
+
+## EtherApe toolbar redesign — Option B (icon rail + bottom drawer)
+
+**What you asked:** "the buttons in the etherape view are a pain. firstly
+you have to go full screen to see half of them its just a mess thats
+occured with project sprawl. redesign the layout and show me a few options
+before i commit to one" — followed by "option b and dont make any mistakes
+verify everything" once you'd picked from the three mockups.
+
+**What changed — `speedtest_monitor.py`, `EtherApeWindow._build_ui`:**
+
+The old layout was two fixed, non-wrapping toolbar rows stacked at the top
+(`tb1`/`tb2`, ~55 controls total) that simply ran off the edge of the
+window below full-screen width, with no way to reach whatever didn't fit.
+Every one of those controls still exists, unchanged — same command, same
+colour, same variable — only where it lives changed:
+
+- **Left icon rail** (76px wide): the 11 controls that just open another
+  window (Behavioral, Traffic, IDS, Geo Map, LAN Scan, 3D View, Spread,
+  Firewall, Honeypot, Threat Radar, Test Traffic) moved here as compact
+  two-line icon buttons, grouped with the same separators as the original
+  toolbar's grouping.
+- **Top bar**: kept to only the controls you touch while actually running a
+  capture — interface picker, Start/Stop/Clear, PCAP replay, capture
+  filter, layout toggle, the live timeline scrubber, Kill Switch/Attack
+  Sim, the four display checkboxes, and the packet/blocked counters.
+- **Collapsible bottom drawer** (click the "FILTERS & BLOCKING" handle,
+  starts collapsed): the advanced/occasional controls — flow width
+  presets, BPF filter, country search/manage, min-traffic threshold, block
+  country, block IP range, font family/size.
+- All three of the top bar, the rail, and the drawer now scroll along
+  their own axis instead of clipping if content still doesn't fit at a
+  given window size — a new `_ScrollStrip` helper (Canvas + Scrollbar +
+  inner Frame) that only shows its scrollbar when actually needed.
+
+**Bonus fix #1 — PCAP-replay button was permanently broken:** while
+tracing every toolbar attribute to make sure moving widgets to new parent
+frames wouldn't break anything referencing them, found that the top bar's
+"⏵ REPLAY" (PCAP-file-replay-start) button and the separate bottom
+LIVE/REPLAY scrubber's "⏱ REPLAY" (DB-history-replay) button were both
+assigned to the same `self._replay_btn` name — the bottom bar is built
+*after* the top bar, so its assignment silently overwrote the top bar's,
+and every place that meant to control the PCAP-replay button
+(`_open_pcap_replay`, `_start_replay`, `_replay_ended`) was actually
+manipulating the *other*, unrelated button instead. The PCAP-replay button
+was constructed `state='disabled'` and nothing that ever ran could
+re-enable it — it was dead from construction, in the version you already
+had installed, not something the redesign introduced. Renamed the top
+bar's button to `self._pcap_replay_btn` throughout (its definition and all
+3 usage sites) and left the bottom bar's own `self._replay_btn`
+completely alone.
+
+**Bonus fix #2 — status bar / LIVE-REPLAY scrubber could go invisible:**
+found while stress-testing the new layout at your app's actual 900×600
+minimum window size. Tk's `pack()` geometry manager carves space out of
+the window in the order widgets are *packed*, not the order they end up
+on-screen: the main content area (rail + canvas + right panel) was packed
+*before* the bottom status bar and the LIVE/REPLAY scrubber bar, so
+whenever the content wanted more vertical room than the window actually
+had — which turned out to be true even at the default 1440×940 window
+size, not just at the 900×600 minimum, since the topology canvas and
+detail panel routinely need more height than that — the content area
+claimed the entire remaining cavity for itself before the bottom bars got
+a turn, squeezing both of them down to nothing. Fixed by simply reordering
+*when* the content area's own `.pack()` call happens (moved to after the
+status bar and scrubber bar are packed) — nothing about what's inside any
+of them changed, so the fix is one line moved, not a redesign of the
+window's structure. This bug already existed before today's redesign (the
+old layout packed its main canvas area the same way, before the same two
+bottom bars), it just hadn't been specifically tested for at real-world
+window sizes until now.
+
+**Verified for real, under `xvfb-run` against a real constructed
+`EtherApeWindow` (not a mock):**
+
+- Checked all 41 toolbar-related instance attributes exist after
+  construction — none missing.
+- Confirmed `_pcap_replay_btn` and `_replay_btn` are genuinely distinct
+  widget objects (not just distinct names pointing at the same object),
+  and that simulating a PCAP file load enables `_pcap_replay_btn` while
+  leaving the bottom bar's `_replay_btn` untouched — the collision fix
+  actually works, not just compiles.
+- Opened and closed the filters drawer by simulating a real click on its
+  handle, confirming drawer-only widgets (e.g. the country filter entry)
+  are mapped/visible only while open.
+- Resized the real window down to the app's actual 900×600 minimum and
+  enumerated every Button widget's mapped state: all 11 rail buttons
+  reachable, the previously-invisible-when-squeezed status bar and
+  LIVE/REPLAY scrubber both now mapped and full-sized (confirmed the same
+  at the 1440×940 default size too, before assuming the fix only mattered
+  at the extreme minimum). The only buttons still unmapped at 900×600 are
+  the drawer's own controls while the drawer is deliberately collapsed
+  (expected — that's the point of a collapsible drawer) and the flow
+  detail panel's "Ask" (AI query) button, which lives in an unrelated,
+  user-resizable split panel on the right side that I didn't touch — you
+  can always reveal it by dragging that panel's own divider or enlarging
+  the window, unlike the two bugs above which had no such recourse.
+- Rail button sizing was measured, not eyeballed: used Tk's real font
+  metrics to find the widest rail label ("FIREWALL"/"HONEYPOT"/"LAN
+  SCAN") actually needs at most 56px at the font size used, then set the
+  rail to 76px so nothing is ever squeezed.
+- Full `selftest.py` (35/0/1 under `xvfb-run` on Python 3.12), the 13-page
+  System Monitor regression, the Nmap GUI suite, the theme suite (132
+  combinations), and every prior build's pcap-shutdown/Wireshark-window-
+  close/report-generation regression tests: all still green — this change
+  touched nothing outside `EtherApeWindow`.
+
+**NOT verified:** what this actually looks like on your machine — real
+Windows, real Consolas font (this sandbox falls back to a substitute
+monospace font, confirmed via the app's own startup log line), and your
+actual screen/DPI. The pixel measurements above (76px rail width, 56px
+widest label) were taken against the fallback font here; Consolas may
+render slightly differently, though 76px was chosen with real margin
+above the measured 56px specifically to absorb some of that uncertainty.
+Also unverified: real packet capture/replay against actual tshark
+hardware, same standing limitation as every session so far — this sandbox
+has no tshark.
+
+## Reporting was broken — `_fmt_ms()` crashed on any period with no ping/DNS data
+
+**What you asked:** "reporting is broken." Narrowed via a follow-up
+question to: the HTML report ("Generate Report"), and "nothing happens"
+when you click Generate. You then sent the actual error text mid-
+investigation: "error unsupported format string passed to
+nonetype__format" — that was the piece that pinned the exact bug down
+instead of leaving it a guess.
+
+**Root cause — `speedtest_monitor.py`:**
+
+- `_fmt_mbps(v)` (the download/upload number formatter used throughout
+  report generation) has always had a guard: `if v is None: return '—'`.
+- `_fmt_ms(v)` (the ping/DNS-latency formatter, right next to it) never
+  had that guard — it went straight to `f'{v:.1f}'`.
+- `_safe_avg()` / `_safe_min()` / `_safe_max()` (which feed both
+  formatters) return `None` whenever the list they're averaging is empty
+  after filtering — which happens for real, routinely: any report period
+  with zero DNS checks in it (DNS monitoring is a separate, often-sparser
+  data stream from the speed/ping readings), or zero ping readings in the
+  window.
+- Result: pick a report period that happens to have no DNS-check data (or
+  no ping data) in it — extremely common, not an edge case — and
+  `_fmt_ms(None)` runs `f'{None:.1f}'`, which raises exactly
+  `TypeError: unsupported format string passed to NoneType.__format__`.
+  That's your literal error text, word for word.
+
+**What changed:** one line. `_fmt_ms()` now carries the same guard
+`_fmt_mbps()` already had:
+
+```python
+def _fmt_ms(v):
+    if v is None: return '—'
+    return f'{v:.1f}'
+```
+
+**Verified for real — reproduced the crash first, then confirmed the fix:**
+
+- Built a fake monitor with real speed/ping data but an empty DNS series
+  (no DNS checks in the period) and called the real `generate_report()`.
+  Before the fix: `CRASHED: TypeError unsupported format string passed to
+  NoneType.__format__` — an exact match to what you reported. After the
+  fix: report generates successfully.
+- Swept every other call site of `_fmt_ms()` in the report generator (10
+  call sites, including one that explicitly passes `None` when an index
+  is out of range) — all of them go through either `_safe_avg`/`_safe_min`/
+  `_safe_max` (which can return `None`) or an explicit `None`, and all are
+  now safe with the single guard, same as `_fmt_mbps`'s existing sites.
+- Additionally tested a report period with *zero* matching readings of any
+  kind (all data outside the requested window) and a DNS series with some
+  individual `None` entries mixed among real ones (a partial-null DB row)
+  — both generate cleanly.
+- Full `selftest.py`: 35/0/1 under `xvfb-run` on Python 3.12 (this
+  sandbox's Python 3.11 has no `tkinter` package available this session,
+  so the desktop-window checks specifically were run under 3.12, which
+  the app is fully compatible with — confirmed by clean import first).
+  Also re-ran the 13-page System Monitor regression, the Nmap GUI suite,
+  the theme suite (132 combinations), and both previous builds' pcap/
+  Wireshark-window-close tests — all still green, confirming this change
+  touched nothing else.
+
+**Investigated and ruled out, for honesty:** while sweeping edge cases I
+also fed the report generator a deliberately mismatched dataset (a `ping`
+list shorter than the `timestamps` list) and hit a *different* crash,
+`IndexError: list index out of range`, at the line that reads
+`data['ping'][i]`. I traced where `monitor.data` actually comes from —
+both the SQLite loader (`Database.load_all`/`load_range`, one query, so
+every column list is always the same length) and the JSON-file loader
+(which explicitly truncates all four lists to their shortest common
+length at load time, specifically to guard against exactly this kind of
+mismatch from old data) — and confirmed the app never actually produces
+misaligned lists in practice. That IndexError is real in the sense that
+the code has no defensive check for it, but it's not reachable through
+any real usage of your app, only through a hand-crafted test that
+violates an invariant the app enforces elsewhere. I did not change
+anything for it, to avoid touching code for a scenario that can't occur —
+flagging it here rather than silently either "fixing" or ignoring it. Say
+the word if you'd like a defensive guard added anyway for extra safety
+margin.
+
+## Wireshark Monitor window now cleans up on its own close, not just on app quit
+
+**What you asked:** "yes i do" — confirming you wanted the gap from the
+previous fix closed: the Wireshark Monitor window had no close handler at
+all, so clicking its own X (without quitting the whole app) left any
+running capture orphaned in the background indefinitely.
+
+**What changed — `speedtest_monitor.py`, `WiresharkWindow`:**
+
+- `self.root.protocol('WM_DELETE_WINDOW', self._on_close)` now wired up in
+  `__init__`, same pattern every other window in this app already uses —
+  this one was simply missing it.
+- New `_on_close()`: stops the capture and waits for tshark/dumpcap to
+  actually exit (same `wait=True` reasoning as the app-shutdown fix —
+  can't delete a file a not-yet-exited process still has open), removes
+  itself from the `_ws_instances` registry, then deletes the shared pcap
+  file — but only if this is the *last* open Wireshark Monitor window.
+- That last condition matters: nothing stops more than one Wireshark
+  Monitor window being open at once (`_open_wireshark` has no singleton
+  guard, unlike Pen Test), and every instance points at the exact same
+  fixed pcap path, not a per-window one. Closing window A while window B
+  is still open and reading that same file for its own Info/Stats/Detail
+  tabs would otherwise yank the file out from under B the moment A
+  closes, even if B isn't actively capturing. `_on_close` now checks
+  `_ws_instances` (after removing itself) and only deletes when nothing
+  else is left depending on it — the file survives for B, and gets
+  deleted when B eventually closes too (or the app quits, via last
+  build's shutdown-sweep, whichever comes first).
+
+**Verified for real, under `xvfb-run` against real `WiresharkWindow`
+instances (not stand-ins) with real Tk windows and a real registered
+`WM_DELETE_WINDOW` handler:**
+
+- Confirmed the handler is genuinely registered (queried it back off the
+  real Tk window rather than assuming the `protocol()` call worked).
+- One window open, closed — pcap deleted.
+- Two windows open, close one — pcap *survives* for the still-open
+  sibling (this is the case that would have silently broken without the
+  last-window check above).
+- Close the remaining sibling — pcap now deleted.
+- Calling `_on_close()` twice on the same window doesn't raise (the
+  `_ws_instances.remove()` `ValueError` on the second call is caught, same
+  "recursive destroy is harmless" tolerance the rest of this class
+  already relies on).
+- Full `selftest.py` (33/0/3, 35/0/1 under `xvfb-run`), the 13-page System
+  Monitor regression, the Nmap GUI suite, and both of the previous
+  build's pcap-shutdown tests: all still green.
+
+**NOT verified:** same limitation as always for anything involving a real
+capture process on your actual machine — I can't watch a real
+tshark.exe/dumpcap.exe release its Windows file lock and confirm
+`nm_wireshark.pcap` is actually gone from your temp folder after closing
+the window for real. The window-count bookkeeping and the wait-then-
+delete sequence are verified for real against genuine Tk windows; the
+OS-level process/file-lock behaviour on Windows isn't something this
+sandbox can reproduce.
+
+## Pcap file now deleted on app closure, not just at next startup
+
+**What you asked:** "ensure pcap files are deleted on app closure."
+
+**What I found:** the Wireshark Monitor's live capture always writes to
+one fixed scratch file (`nm_wireshark.pcap` in your temp folder — same
+path whether it's opened once or many times in a session). There was
+already cleanup logic for it, but only in two places: a manual "Clear"
+button, and a startup sweep that deletes any leftover file from a crash
+or a kill *the next time the app launches*. Closing the app normally —
+even via the main window's X button, which already runs a full shutdown
+sequence (`_nm_shutdown_all`) that stops capture processes and the web
+server — never touched the pcap file itself. So captured traffic sat on
+disk from the moment you quit until the next time you happened to start
+the app again, which could be a while.
+
+**What changed — `speedtest_monitor.py`, in `_nm_shutdown_all` (the one
+function every quit path funnels through — main window close, and the
+tray icon's Exit, both confirmed by tracing every call site):**
+
+- The existing per-window `w._stop_capture()` call (step 3, Wireshark
+  windows) now passes `wait=True`. It didn't before — meaning shutdown
+  only *asked* tshark/dumpcap to stop and moved on, rather than
+  confirming they'd actually exited. `_stop_capture`'s own docstring
+  already explains why that matters: a file still held open by a
+  not-yet-exited capture process can't be unlinked, especially on
+  Windows — so without this, the new delete step below could have
+  silently failed to delete anything most of the time.
+- New step after `_nm_kill_children()` (which force-kills anything that
+  didn't stop cleanly, and already waits for that too): unconditionally
+  checks for the pcap file at its fixed path and deletes it, with the
+  same 4-attempt retry loop the manual "Clear" button already used
+  (rather than assuming the first attempt always succeeds), logging
+  either "deleted" or "still locked" honestly instead of claiming
+  success either way.
+- This runs regardless of whether a Wireshark window happens to be open
+  or in the tracked instance list at the moment you quit — it checks the
+  file's fixed path directly, so a capture that was left running in a
+  window closed earlier in the session (that window has no close handler
+  of its own, a separate pre-existing gap not part of what was asked
+  here) still gets its process stopped and its file deleted when the
+  whole app exits, not just the common case.
+
+**Verified for real:** wrote a test that patches out `os._exit` (the real
+function's last line, which would otherwise kill the test process itself)
+and calls the actual `_nm_shutdown_all` three times against real files
+and a fake-but-realistic capture-process stand-in: a leftover pcap file
+with no window involved (deleted), no pcap file present at all (no error),
+and an actively "capturing" window instance in `_ws_instances` at
+shutdown time (capture process stopped and waited for, file deleted,
+instance list cleared). All three passed against the real function, not
+a re-implementation of it. Also traced every place `_nm_shutdown_all` or
+`_nm_confirm_quit` is called from, to confirm this is genuinely the one
+place all graceful-quit paths go through — main window close and the
+tray icon's Exit both funnel through it; there's no separate `sys.exit()`
+path that would skip it.
+Full `selftest.py` (33/0/3, 35/0/1 under `xvfb-run`), the 13-page System
+Monitor regression and the Nmap GUI suite are all green and unaffected —
+this change is pure shutdown-sequence logic, nothing that touches served
+page content.
+
+**NOT verified:** I can't watch this happen on your real Windows machine
+— confirm a real tshark.exe/dumpcap.exe process actually releases its
+Windows file lock the moment `.wait()` returns, and that `nm_wireshark.pcap`
+is genuinely gone from your temp folder after a real quit. The logic and
+the wait-then-delete ordering are verified for real against a faithful
+stand-in; the actual OS-level file lock behaviour on your machine isn't
+something this sandbox can reproduce.
+
+**Also worth knowing, not fixed here because it's a different ask:** the
+Wireshark Monitor window itself has no close handler at all — clicking
+its own X button (without quitting the whole app) doesn't stop a running
+capture or remove it from the tracked window list; the process just keeps
+running in the background until you either use Clear, reopen the window,
+or quit the app (at which point this fix now cleans it up). Say the word
+if you want that closed too.
 
 ## Colour themes now apply to all 11 web-served pages, not just 3 things
 

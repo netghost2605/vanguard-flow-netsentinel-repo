@@ -2562,13 +2562,14 @@ def _fmt_mbps(v):
     return f'{v:.1f}'
 
 def _fmt_ms(v):
+    if v is None: return '—'
     return f'{v:.1f}'
 
 # No residential (or datacentre) link is faster than this; anything above is a
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-fe30eb24'
+_NM_BUILD_ID = 'b-ed99f4cc'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -5452,11 +5453,14 @@ def _nm_shutdown_all(monitor=None, root=None, confirm_parent=None):
             _exc('[shutdown] etherape')
     _ea_instances.clear()
 
-    # 3. Wireshark windows
+    # 3. Wireshark windows. wait=True actually blocks until tshark/dumpcap
+    #    has exited (not just been asked to) — same reason _clear() waits
+    #    before deleting: a file still held open by a not-yet-exited capture
+    #    process can't be unlinked, especially on Windows.
     for w in list(_ws_instances):
         try:
             w._closed = True
-            try: w._stop_capture()
+            try: w._stop_capture(wait=True)
             except Exception: _exc_debug('_nm_shutdown_all')
             try: w.root.destroy()
             except Exception: _exc_debug('_nm_shutdown_all')
@@ -5469,6 +5473,37 @@ def _nm_shutdown_all(monitor=None, root=None, confirm_parent=None):
     if killed:
         log.info(f'[shutdown] terminated: {", ".join(killed)}')
         print(f'  Stopped capture processes: {", ".join(killed)}')
+
+    # 5b. Delete the pcap scratch file on the way out, rather than leaving
+    #     captured traffic sitting in temp until the next launch's startup
+    #     sweep (or forever, if the app never runs again). Every
+    #     WiresharkWindow — however many were opened — writes to this same
+    #     fixed path, so there's only ever the one file to worry about.
+    #     By this point every tshark/dumpcap process is confirmed dead
+    #     (step 3 waited, step 5 waited too), so the file should never
+    #     still be locked — but retry a few times anyway, same pattern as
+    #     the manual "Clear" button, rather than assume the first attempt
+    #     always wins.
+    try:
+        import tempfile
+        _pcap = Path(tempfile.gettempdir()) / 'nm_wireshark.pcap'
+        if _pcap.exists():
+            _deleted = False
+            for _attempt in range(4):
+                try:
+                    _pcap.unlink()
+                    _deleted = True
+                    break
+                except Exception:
+                    _exc_debug('_nm_shutdown_all pcap')
+                    time.sleep(0.25)
+            if _deleted:
+                log.info('[shutdown] deleted pcap scratch file')
+                print('  Deleted captured traffic file.')
+            else:
+                log.warning('[shutdown] could not delete pcap scratch file — still locked')
+    except Exception:
+        _exc('[shutdown] pcap cleanup')
 
     # 6. Matplotlib figures (the classic UI owns one; dialogs own others)
     try:
@@ -9457,8 +9492,19 @@ class EtherApeWindow:
                      'Live Network Topology & Traffic Flow',
                      right_widget_fn=_ea_right, accent=self._ACC)
 
-        tb1=tk.Frame(r,bg='#020810',pady=6); tb1.pack(fill='x',padx=0)
-        # High-tech button helper
+        # ── Body: [icon rail] | [content: top toolbar / canvas+panel / filters drawer] ──
+        # Replaces the old two fixed, non-wrapping toolbar rows (~55 controls, clipped
+        # below full screen) with: a left rail for the 11 "opens another window" tools,
+        # a short top toolbar for live capture controls, and a collapsible bottom
+        # drawer for the advanced filter/block controls. Every widget below is the
+        # exact same construction (same command, same colors, same variable) as
+        # before — only its parent frame and packing changed.
+        body_row = tk.Frame(r, bg='#020810')
+        # NOTE: body_row.pack() is deliberately deferred until after the bottom
+        # status bar (sb) and the replay bar (_build_replay_bar) are packed,
+        # near the end of this method — see the comment there for why.
+
+        # High-tech button helper (unchanged from the original toolbar)
         def htbtn(parent, text, cmd, acc='#38b8f0', width=9):
             """Neon pill button — dark bg, coloured border + text, glow on hover."""
             b = tk.Button(parent, text=text, command=cmd,
@@ -9473,8 +9519,150 @@ class EtherApeWindow:
             b.pack(side='left', padx=3)
             return b
 
-        def sep(parent):
-            tk.Frame(parent, bg='#0d2030', width=1).pack(side='left', fill='y', padx=4, pady=3)
+        def sep(parent, vertical=True):
+            if vertical:
+                tk.Frame(parent, bg='#0d2030', width=1).pack(side='left', fill='y', padx=4, pady=3)
+            else:
+                tk.Frame(parent, bg='#0d2030', height=1).pack(fill='x', pady=4)
+
+        def railbtn(parent, glyph, label, cmd, acc='#38b8f0'):
+            """Compact two-line icon button for the left rail — same glyph, same
+            label text, same command/colour as the original inline toolbar button,
+            just stacked vertically to fit a narrow column."""
+            b = tk.Button(parent, text=f'{glyph}\n{label}', command=cmd,
+                          bg='#060f1c', fg=acc,
+                          activebackground=acc, activeforeground='#000408',
+                          relief='flat', font=(_NM_MONO, 6, 'bold'),
+                          cursor='hand2', justify='center', width=7, height=2,
+                          bd=0, highlightthickness=1,
+                          highlightbackground=acc, highlightcolor=acc)
+            b.pack(side='top', pady=3, padx=4)
+            return b
+
+        # ── Scroll strip: a pack()-based row/column that scrolls instead of
+        # clipping when its content doesn't fit — used for the top toolbar, the
+        # rail, and the filters drawer, so nothing is ever unreachable no matter
+        # how narrow or short the window gets. Children are built exactly like
+        # normal (pack(side='left'/'top', ...) into `.inner`); only the outer
+        # container differs from a plain Frame.
+        class _ScrollStrip(tk.Frame):
+            """A pack()-based row (horizontal) or column (vertical) that scrolls
+            along its main axis instead of clipping when content overflows.
+            Horizontal: height always grows to fit content (nothing is ever
+            vertically cropped), only width scrolls. Vertical: width is whatever
+            the parent allocates (a fixed-width rail, typically), only height
+            scrolls -- content is never horizontally squeezed because callers
+            size the outer column to comfortably fit the widest child up front."""
+            def __init__(self, parent, bg, orient='horizontal'):
+                super().__init__(parent, bg=bg)
+                self._orient = orient
+                horiz = orient == 'horizontal'
+                self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
+                self._sb = tk.Scrollbar(
+                    self, orient=orient, command=(self._canvas.xview if horiz else self._canvas.yview),
+                    bg='#0a1220', troughcolor='#020810', activebackground='#1a3a5a',
+                    bd=0, highlightthickness=0)
+                if horiz:
+                    self._canvas.configure(xscrollcommand=self._sb.set)
+                else:
+                    self._canvas.configure(yscrollcommand=self._sb.set)
+                self._canvas.pack(side='top' if horiz else 'left', fill='both', expand=True)
+                self.inner = tk.Frame(self._canvas, bg=bg)
+                self._win = self._canvas.create_window((0, 0), window=self.inner, anchor='nw')
+                self._sb_shown = False
+                self.inner.bind('<Configure>', self._on_inner_configure)
+                self._canvas.bind('<Configure>', self._on_canvas_configure)
+                self._canvas.bind('<Enter>', self._bind_wheel)
+                self._canvas.bind('<Leave>', self._unbind_wheel)
+
+            def _bind_wheel(self, _e=None):
+                self._canvas.bind_all('<MouseWheel>', self._on_wheel)
+                self._canvas.bind_all('<Button-4>', self._on_wheel)
+                self._canvas.bind_all('<Button-5>', self._on_wheel)
+
+            def _unbind_wheel(self, _e=None):
+                try:
+                    self._canvas.unbind_all('<MouseWheel>')
+                    self._canvas.unbind_all('<Button-4>')
+                    self._canvas.unbind_all('<Button-5>')
+                except Exception: pass
+
+            def _on_wheel(self, event):
+                units = -1 if (getattr(event, 'delta', 0) > 0 or getattr(event, 'num', None) == 4) else 1
+                (self._canvas.xview_scroll if self._orient == 'horizontal' else self._canvas.yview_scroll)(units, 'units')
+
+            def _on_inner_configure(self, _e=None):
+                try:
+                    bbox = self._canvas.bbox('all')
+                    if bbox:
+                        self._canvas.configure(scrollregion=bbox)
+                        if self._orient == 'horizontal':
+                            # Height is never a scroll axis here -- grow the canvas
+                            # to fit content so buttons are never vertically cropped.
+                            self._canvas.configure(height=bbox[3] - bbox[1])
+                except Exception: pass
+                self._sync_scrollbar()
+
+            def _on_canvas_configure(self, event=None):
+                if event is not None:
+                    try:
+                        if self._orient == 'horizontal':
+                            self._canvas.itemconfigure(self._win, height=event.height)
+                        else:
+                            # Vertical rail: width is fixed by the caller's outer
+                            # column: fill it exactly, never stretch/shrink content.
+                            self._canvas.itemconfigure(self._win, width=event.width)
+                    except Exception: pass
+                self._sync_scrollbar()
+
+            def _sync_scrollbar(self):
+                try:
+                    bbox = self._canvas.bbox('all')
+                    if not bbox: return
+                    if self._orient == 'horizontal':
+                        need = (bbox[2] - bbox[0]) > self._canvas.winfo_width() + 2
+                    else:
+                        need = (bbox[3] - bbox[1]) > self._canvas.winfo_height() + 2
+                except Exception:
+                    return
+                if need and not self._sb_shown:
+                    self._sb.pack(side=('bottom' if self._orient == 'horizontal' else 'right'),
+                                   fill='x' if self._orient == 'horizontal' else 'y')
+                    self._sb_shown = True
+                elif not need and self._sb_shown:
+                    self._sb.pack_forget(); self._sb_shown = False
+
+        # ── Left icon rail: the 11 "opens another window" tools ────────────────
+        rail_outer = tk.Frame(body_row, bg='#020810', width=76)
+        rail_outer.pack(side='left', fill='y')
+        rail_outer.pack_propagate(False)
+        rail = _ScrollStrip(rail_outer, bg='#020810', orient='vertical')
+        rail.pack(fill='both', expand=True)
+        railbtn(rail.inner, '⚠', 'BEHAV', self._analyze_behavioral, '#ffd93d')
+        railbtn(rail.inner, '◎', 'TRAFFIC', self._analyze_traffic, '#a371f7')
+        railbtn(rail.inner, '◼', 'IDS', self._run_ids, '#ff4444')
+        sep(rail.inner, vertical=False)
+        railbtn(rail.inner, '⊕', 'GEO MAP', self._open_geo_window, '#38f0a8')
+        railbtn(rail.inner, '\U0001f5a7', 'LAN SCAN', self._open_lan_scan_window, '#39ff14')
+        railbtn(rail.inner, '⬡', '3D VIEW', self._open_3d_view, '#ff9f43')
+        railbtn(rail.inner, '⊛', 'SPREAD', self._spread_nodes, '#74c7ec')
+        sep(rail.inner, vertical=False)
+        railbtn(rail.inner, '⛔', 'FIREWALL', self._open_firewall_window, '#ff9f43')
+        railbtn(rail.inner, '\U0001f36f', 'HONEYPOT', self._open_honeypot, '#38f0a8')
+        railbtn(rail.inner, '⚠', 'THREATS', self._open_threat_radar, '#ff4444')
+        sep(rail.inner, vertical=False)
+        railbtn(rail.inner, '\U0001f9ea', 'TEST', self._inject_test_traffic, '#ff6bff')
+
+        # ── Content column: top toolbar / canvas+panel / filters drawer ────────
+        content = tk.Frame(body_row, bg=self._BG)
+        content.pack(side='left', fill='both', expand=True)
+
+        top_outer = tk.Frame(content, bg='#020810')
+        top_outer.pack(fill='x', side='top')
+        top_strip = _ScrollStrip(top_outer, bg='#020810', orient='horizontal')
+        top_strip.pack(fill='x')
+        tb1 = top_strip.inner
+        tb1.configure(pady=6)
 
         # Interface selector
         tk.Label(tb1,text='INTERFACE',bg='#020810',fg='#1a3a5a',
@@ -9489,8 +9677,15 @@ class EtherApeWindow:
         htbtn(tb1,'⊘  CLEAR',self._clear,'#a371f7',8)
         sep(tb1)
         htbtn(tb1,'📂  PCAP',self._open_pcap_replay,'#ffd93d',7)
-        self._replay_btn=htbtn(tb1,'⏵  REPLAY',self._start_replay,'#ff9f43',8)
-        self._replay_btn.config(state='disabled')
+        # NOTE: this button's own attribute name was previously `self._replay_btn`,
+        # which `_build_replay_bar()` (a separate, unrelated bottom-bar "live vs
+        # replay-from-database" toggle, further below) also assigns to — the second
+        # assignment silently overwrote the first, so this PCAP-replay button was
+        # permanently stuck disabled after loading a file: `_open_pcap_replay`,
+        # `_start_replay` and `_replay_ended` were actually toggling the OTHER
+        # button's state instead of this one. Fixed by giving this one its own name.
+        self._pcap_replay_btn=htbtn(tb1,'⏵  REPLAY',self._start_replay,'#ff9f43',8)
+        self._pcap_replay_btn.config(state='disabled')
         self._stop_replay_btn=htbtn(tb1,'⏹  STOP',self._stop_replay,'#ff6b6b',6)
         self._stop_replay_btn.config(state='disabled')
         tk.Label(tb1,text='×',bg='#020810',fg='#1a3a5a',font=(_NM_MONO, 8)).pack(side='left')
@@ -9531,7 +9726,7 @@ class EtherApeWindow:
         # interface dropdown below would never get populated.
         try:
             self._tl_live_btn = tk.Button(
-                tb1, text='\u25cf LIVE', command=self._tl_go_live,
+                tb1, text='● LIVE', command=self._tl_go_live,
                 bg='#0a1828', fg='#39ff14', activebackground='#16324a',
                 activeforeground='white', relief='flat', font=(_NM_MONO, 8),
                 cursor='hand2', padx=8, pady=2, bd=0,
@@ -9547,14 +9742,14 @@ class EtherApeWindow:
                 bd=0, sliderlength=18, width=12, length=140)
             self._tl_scale.pack(side='left', padx=(0, 4))
             self._tl_time_lbl = tk.Label(
-                tb1, text='buffering\u2026', bg='#020810', fg='#6a9ab8',
+                tb1, text='buffering…', bg='#020810', fg='#6a9ab8',
                 font=(_NM_MONO, 8), width=10, anchor='w')
             self._tl_time_lbl.pack(side='left', padx=(0, 6))
             sep(tb1)
             # ── Kill switch: cut all network traffic (Windows Firewall block-all) ──
             self._kill_active = False
             self._kill_btn = tk.Button(
-                tb1, text='\u23fb  KILL CONNECTION', command=self._kill_toggle,
+                tb1, text='⏻  KILL CONNECTION', command=self._kill_toggle,
                 bg='#2a0a0a', fg='#ff5555', activebackground='#3a0f0f',
                 activeforeground='white', relief='flat', font=(_NM_MONO, 8, 'bold'),
                 cursor='hand2', padx=10, pady=2, bd=0,
@@ -9563,7 +9758,7 @@ class EtherApeWindow:
             threading.Thread(target=self._kill_probe, daemon=True).start()
             # ── Attack drill (shared with the web views) ──
             self._atk_btn = tk.Button(
-                tb1, text='\u2620  ATTACK SIM', command=self._toggle_attack_sim,
+                tb1, text='☠  ATTACK SIM', command=self._toggle_attack_sim,
                 bg='#2a1206', fg='#ff8a4a', activebackground='#3a1a0a',
                 activeforeground='white', relief='flat', font=(_NM_MONO, 8, 'bold'),
                 cursor='hand2', padx=10, pady=2, bd=0,
@@ -9588,31 +9783,54 @@ class EtherApeWindow:
                            activebackground='#020810',activeforeground='white',
                            font=(_NM_MONO, 8),relief='flat').pack(side='left',padx=4)
         sep(tb1)
-        htbtn(tb1,'⚠  BEHAV',self._analyze_behavioral,'#ffd93d',8)
-        htbtn(tb1,'◎  TRAFFIC',self._analyze_traffic,'#a371f7',9)
-        htbtn(tb1,'◼  IDS',self._run_ids,'#ff4444',7)
-        htbtn(tb1,'⊕  GEO MAP',self._open_geo_window,'#38f0a8',9)
-        htbtn(tb1,'\U0001f5a7  LAN SCAN',self._open_lan_scan_window,'#39ff14',10)
-        htbtn(tb1,'⬡  3D VIEW',self._open_3d_view,'#ff9f43',9)
-        htbtn(tb1,'⊛  SPREAD',self._spread_nodes,'#74c7ec',8)
-        htbtn(tb1,'\u26d4  FIREWALL',self._open_firewall_window,'#ff9f43',10)
-        htbtn(tb1,'\U0001f36f HONEYPOT',self._open_honeypot,'#38f0a8',9)
-        htbtn(tb1,'\u26a0 THREATS',self._open_threat_radar,'#ff4444',9)
-        htbtn(tb1,'\U0001f9ea TEST',self._inject_test_traffic,'#ff6bff',6)
         self._pkt_var=tk.StringVar(value='0 pkts')
         tk.Label(tb1,textvariable=self._pkt_var,bg='#020810',fg='#38b8f0',
-                 font=(_NM_MONO, 9,'bold')).pack(side='right',padx=14)
+                 font=(_NM_MONO, 9,'bold')).pack(side='left',padx=14)
         # Blocked count, next to the packet count, so it is visible without
         # opening anything. Clicking it opens the rule list.
         self._blocked_var = tk.StringVar(value='')
         _bl = tk.Label(tb1, textvariable=self._blocked_var, bg='#020810',
                        fg='#ff4444', font=(_NM_MONO, 9, 'bold'), cursor='hand2')
-        _bl.pack(side='right', padx=(0, 6))
+        _bl.pack(side='left', padx=(0, 6))
         _bl.bind('<Button-1>', lambda e: self._open_firewall_window())
         self._blocked_lbl = _bl
 
-        tb2=tk.Frame(r,bg='#020810',pady=4); tb2.pack(fill='x',padx=0)
-        tk.Frame(r,bg='#0d2030',height=1).pack(fill='x')
+        # ── Filters & Blocking drawer: collapsed by default, everything the old
+        # row 2 held (flow width, BPF filter, country search, traffic threshold,
+        # block rules, font) — same widgets, same commands, just tucked away
+        # until the handle is clicked instead of always taking a full row. ──
+        drawer_outer = tk.Frame(content, bg='#06101e')
+        self._drawer_open = False
+
+        def _toggle_drawer():
+            self._drawer_open = not self._drawer_open
+            if self._drawer_open:
+                drawer_body.pack(fill='x', side='top')
+                handle_chevron.config(text='▾')
+            else:
+                drawer_body.pack_forget()
+                handle_chevron.config(text='▴')
+
+        handle = tk.Frame(drawer_outer, bg='#020810', height=24)
+        handle.pack(fill='x', side='bottom')
+        handle.pack_propagate(False)
+        handle_chevron = tk.Label(handle, text='▴', bg='#020810', fg='#2f6690',
+                                   font=(_NM_MONO, 8, 'bold'), cursor='hand2')
+        handle_chevron.pack(side='left', padx=(12, 4))
+        handle_lbl = tk.Label(
+            handle, text='FILTERS & BLOCKING  —  flow width · capture filter · country · threshold · block rules',
+            bg='#020810', fg='#2f6690', font=(_NM_MONO, 7, 'bold'), cursor='hand2')
+        handle_lbl.pack(side='left')
+        for _w in (handle, handle_chevron, handle_lbl):
+            _w.bind('<Button-1>', lambda e: _toggle_drawer())
+
+        drawer_body = tk.Frame(drawer_outer, bg='#06101e')
+        # not packed yet — starts collapsed; _toggle_drawer() packs it on demand
+        tb2_strip = _ScrollStrip(drawer_body, bg='#020810', orient='horizontal')
+        tb2_strip.pack(fill='x')
+        tb2 = tb2_strip.inner
+        tb2.configure(pady=4)
+
         # Flow width controls
         tk.Label(tb2,text='FLOW WIDTH',bg='#020810',fg='#1a3a5a',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(10,6))
@@ -9772,39 +9990,43 @@ class EtherApeWindow:
         self._block_range_lbl=tk.Label(tb2,text='',bg='#020810',fg='#ff4444',
                                        font=(_NM_MONO, 7,'bold'))
         self._block_range_lbl.pack(side='left',padx=(0,4))
-        # Font controls (right side)
+        # Font controls
+        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
         FONT_FAMILIES=list(_NM_MONO_PREFS)+['Arial','Helvetica']
         self._font_family_var=tk.StringVar(value=_NM_MONO)
         self._font_size_var=tk.IntVar(value=9)
-        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='right',fill='y',padx=6,pady=3)
+        tk.Label(tb2,text='FONT',bg='#020810',fg='#1a3a5a',
+                 font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,2))
         ff_cb=ttk.Combobox(tb2,textvariable=self._font_family_var,values=FONT_FAMILIES,
                             width=14,state='readonly',font=(_NM_MONO, 8))
-        ff_cb.pack(side='right',padx=(0,4),ipady=1)
+        ff_cb.pack(side='left',padx=(0,6),ipady=1)
         ff_cb.bind('<<ComboboxSelected>>',lambda e:self._apply_font())
-        tk.Label(tb2,text='FONT',bg='#020810',fg='#1a3a5a',
-                 font=(_NM_MONO, 7,'bold')).pack(side='right',padx=(6,2))
+        tk.Label(tb2,text='SIZE',bg='#020810',fg='#1a3a5a',
+                 font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,2))
         fs_spin=tk.Spinbox(tb2,from_=6,to=24,textvariable=self._font_size_var,width=3,
                            bg='#0a1220',fg='#38b8f0',insertbackground='#38b8f0',
                            relief='flat',font=(_NM_MONO, 9),buttonbackground='#0a1220',
                            command=self._apply_font)
-        fs_spin.pack(side='right',padx=(0,2),ipady=2)
+        fs_spin.pack(side='left',padx=(0,2),ipady=2)
         fs_spin.bind('<Return>',lambda e:self._apply_font())
-        tk.Label(tb2,text='SIZE',bg='#020810',fg='#1a3a5a',
-                 font=(_NM_MONO, 7,'bold')).pack(side='right',padx=(6,2))
 
-        tk.Frame(r,bg='#0d2030',height=1).pack(fill='x')
+        drawer_outer.pack(fill='x', side='bottom')
+        # starts collapsed (self._drawer_open = False, set above); drawer_body
+        # is intentionally not packed here — _toggle_drawer() does that on click
+
+        tk.Frame(content,bg='#0d2030',height=1).pack(fill='x')
 
         import matplotlib; matplotlib.use('TkAgg')
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.collections import LineCollection
 
-        pw=tk.PanedWindow(r,orient='horizontal',bg='#0a1828',sashwidth=10,sashrelief='raised',handlesize=24,sashpad=2)
+        pw=tk.PanedWindow(content,orient='horizontal',bg='#0a1828',sashwidth=10,sashrelief='raised',handlesize=24,sashpad=2)
         pw.pack(fill='both',expand=True)
         canvas_frame=tk.Frame(pw,bg=self._BG); pw.add(canvas_frame,width=960)
         # Keep right panel at a sensible fixed width when window is resized
         def _clamp_right_panel(event=None):
             try:
-                total_w = r.winfo_width()
+                total_w = content.winfo_width()
                 if total_w < 100: return
                 right_w = 460  # fixed right-panel width
                 pw.sash_place(0, total_w - right_w, 0)
@@ -10029,6 +10251,18 @@ class EtherApeWindow:
         self._flow_tree.bind('<Button-3>', self._flow_ctx_menu)
         sb=tk.Frame(r,bg='#020810',height=22); sb.pack(fill='x',side='bottom'); sb.pack_propagate(False)
         self._build_replay_bar(r)   # timeline scrubber sits above the status bar
+        # Now that the bottom status bar and replay bar have claimed their fixed-
+        # height parcels at the bottom of `r`, pack body_row to fill what's left.
+        # (Tk's packer carves cavity in pack()-call order, not creation order or
+        # final on-screen side: an expand=True widget packed *before* a bottom-
+        # docked sibling claims the whole remaining cavity right then, leaving
+        # nothing for that sibling if content is taller than the window — which
+        # it usually is here, since body_row's real content (topology canvas +
+        # right panel) is far taller than the app's 900x600 minimum size. Packing
+        # body_row last guarantees sb/bar always get their reserved height, and
+        # body_row (whose own children scroll/clip gracefully) absorbs the
+        # squeeze instead.)
+        body_row.pack(fill='both', expand=True)
         self._status=tk.StringVar(value='Ready — select an interface and click ▶ Start')
         tk.Label(sb,textvariable=self._status,bg='#020810',fg=self._TICK,font=(_NM_MONO, 8),anchor='w').pack(side='left',padx=8,pady=2)
 
@@ -10638,7 +10872,7 @@ class EtherApeWindow:
         self._pcap_replay_path=path
         name=path.split('/')[-1].split('\\')[-1]
         self._replay_file_var.set(f'  {name}')
-        self._replay_btn.config(state='normal')
+        self._pcap_replay_btn.config(state='normal')
         self._status.set(f'PCAP loaded: {name}  \u2014 click \u23f5 Replay to start')
 
     def _start_replay(self):
@@ -10646,7 +10880,7 @@ class EtherApeWindow:
         path=getattr(self,'_pcap_replay_path',None)
         if not path: return
         self._stop_replay(); self._clear(); self._replaying=True
-        self._replay_btn.config(state='disabled'); self._stop_replay_btn.config(state='normal')
+        self._pcap_replay_btn.config(state='disabled'); self._stop_replay_btn.config(state='normal')
         self._start_btn.config(state='disabled')
         speed=self._replay_speed if self._replay_speed>0 else 1.0
         self._replay_thread=threading.Thread(target=self._replay_loop,args=(path,speed),daemon=True)
@@ -10697,7 +10931,7 @@ class EtherApeWindow:
         if not self._closed: self.root.after(0,self._replay_ended)
 
     def _replay_ended(self):
-        self._replaying=False; self._replay_btn.config(state='normal')
+        self._replaying=False; self._pcap_replay_btn.config(state='normal')
         self._stop_replay_btn.config(state='disabled'); self._start_btn.config(state='normal')
         path=getattr(self,'_pcap_replay_path','')
         name=path.split('/')[-1].split('\\')[-1] if path else ''
@@ -16131,6 +16365,13 @@ class WiresharkWindow:
         self.root.configure(bg=self._BG)
         self.root.geometry('1440x940')
         self.root.minsize(900, 620)
+        self._closed = False
+        # Without this, closing just this window (not the whole app) via the
+        # X button left a running tshark/dumpcap capturing in the background
+        # indefinitely - the process and its pcap file only got cleaned up
+        # later, either by _clear(), reopening this window, or quitting the
+        # whole app. Now closing the window stops it immediately.
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
 
         self._packets    = []
         self._all_pkts   = []
@@ -16747,6 +16988,49 @@ class WiresharkWindow:
                         proc.wait(timeout=1.0)
                     except Exception:
                         _exc('_stop_capture_kill')
+
+    def _on_close(self):
+        """Window closed (X button) without quitting the whole app.
+
+        Previously this window had no close handler at all, so Tk's default
+        destroy left any running capture orphaned in the background — the
+        process and its pcap file only got cleaned up later, by _clear(),
+        by reopening this window, or by quitting the app entirely. Stop and
+        wait for the capture here too, same as _clear() and app shutdown
+        already do, so closing the window is itself enough.
+        """
+        self._closed = True
+        try:
+            self._stop_capture(wait=True)
+        except Exception:
+            _exc_debug('_on_close stop_capture')
+        try:
+            _ws_instances.remove(self)
+        except ValueError:
+            pass
+        except Exception:
+            _exc_debug('_on_close remove instance')
+        # Nothing stops more than one Wireshark Monitor window being open at
+        # once, and every instance shares this exact same pcap path (it's
+        # not per-window) — so only delete it once this is the LAST such
+        # window closing. Deleting it out from under a still-open sibling
+        # window would yank the file it's reading for its own Info/Stats/
+        # Detail tabs, even if that sibling isn't actively capturing.
+        try:
+            if not _ws_instances and self._capfile.exists():
+                for _attempt in range(4):
+                    try:
+                        self._capfile.unlink()
+                        break
+                    except Exception:
+                        _exc_debug('_on_close delete pcap')
+                        time.sleep(0.25)
+        except Exception:
+            _exc_debug('_on_close pcap cleanup')
+        try:
+            self.root.destroy()
+        except Exception:
+            _exc_debug('_on_close destroy')  # TclError on recursive destroy is harmless
 
     def _on_ended(self):
         self._capturing = False
