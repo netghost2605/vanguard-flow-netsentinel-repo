@@ -2569,7 +2569,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-ed99f4cc'
+_NM_BUILD_ID = 'b-25adc03e'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -9339,7 +9339,7 @@ class EtherApeWindow:
         self._filter_country=''   # country name filter, empty = show all
         self._resolve_names=True; self._dns_cache={}   # ip -> DISPLAY name
         self._dns_raw={}          # ip -> full name as resolved (for detail panes)
-        self._dns_src={}          # ip -> 'dns' (sniffed) | 'ptr' | 'special'
+        self._dns_src={}          # ip -> 'dns' (sniffed) | 'sni' (TLS ClientHello) | 'ptr' | 'special'
         self._dns_inflight=set()  # PTR lookups already running (1 thread per ip)
         self._total_bytes=0; self._total_pkts=0; self._tick=0; self._pulse_t=0.0
         self._label_fontsize=9; self._label_fontfamily=_NM_MONO
@@ -9528,15 +9528,20 @@ class EtherApeWindow:
         def railbtn(parent, glyph, label, cmd, acc='#38b8f0'):
             """Compact two-line icon button for the left rail — same glyph, same
             label text, same command/colour as the original inline toolbar button,
-            just stacked vertically to fit a narrow column."""
+            just stacked vertically to fit a narrow column. Sized naturally (no
+            forced width=/height= character cells) rather than the earlier
+            fixed-cell approach, which was actually LESS space-efficient than
+            just letting Tk fit the real glyph+label pixels — that's what freed
+            up room to size the font for readability instead."""
             b = tk.Button(parent, text=f'{glyph}\n{label}', command=cmd,
                           bg='#060f1c', fg=acc,
                           activebackground=acc, activeforeground='#000408',
-                          relief='flat', font=(_NM_MONO, 6, 'bold'),
-                          cursor='hand2', justify='center', width=7, height=2,
+                          relief='flat', font=(_NM_MONO, 8, 'bold'),
+                          cursor='hand2', justify='center',
                           bd=0, highlightthickness=1,
-                          highlightbackground=acc, highlightcolor=acc)
-            b.pack(side='top', pady=3, padx=4)
+                          highlightbackground=acc, highlightcolor=acc,
+                          padx=2, pady=4)
+            b.pack(side='top', pady=3, padx=4, fill='x')
             return b
 
         # ── Scroll strip: a pack()-based row/column that scrolls instead of
@@ -9633,7 +9638,7 @@ class EtherApeWindow:
                     self._sb.pack_forget(); self._sb_shown = False
 
         # ── Left icon rail: the 11 "opens another window" tools ────────────────
-        rail_outer = tk.Frame(body_row, bg='#020810', width=76)
+        rail_outer = tk.Frame(body_row, bg='#020810', width=80)
         rail_outer.pack(side='left', fill='y')
         rail_outer.pack_propagate(False)
         rail = _ScrollStrip(rail_outer, bg='#020810', orient='vertical')
@@ -10713,6 +10718,13 @@ class EtherApeWindow:
              '-e','ip.src','-e','ip.dst','-e','ipv6.src','-e','ipv6.dst',
              '-e','eth.src','-e','eth.dst','-e','frame.protocols','-e','frame.len',
              '-e','dns.qry.name','-e','dns.a','-e','dns.aaaa',
+             # TLS SNI (the plaintext hostname a ClientHello asks for) — the only
+             # hostname signal that still works when the OS/browser resolves DNS
+             # over HTTPS or through a VPN's own DNS, since neither of those
+             # touch the TLS handshake itself. See _capture_loop for why this
+             # was added: plain DNS sniffing above depends on seeing an actual
+             # port-53 query, which modern browsers increasingly never send.
+             '-e','tls.handshake.extensions_server_name',
              '-E','separator=\t','-E','quote=n','-E','occurrence=f']
         cf=getattr(self,'_cfilt_var',None)
         if cf:
@@ -10749,7 +10761,7 @@ class EtherApeWindow:
                 raw=line.decode('utf-8',errors='replace').rstrip('\r\n')
                 if not raw: continue
                 parts=raw.split('\t')
-                while len(parts)<11: parts.append('')
+                while len(parts)<12: parts.append('')
                 src=parts[0] or parts[2] or parts[4] or ''
                 dst=parts[1] or parts[3] or parts[5] or ''
                 protos=parts[6].lower()
@@ -10768,6 +10780,23 @@ class EtherApeWindow:
                         self._dns_raw[resolved_ip]   = _fwd
                         self._dns_cache[resolved_ip] = _nm_friendly_host(resolved_ip, _fwd)
                         self._dns_src[resolved_ip]   = 'dns'
+                # TLS SNI (parts[11]): the plaintext hostname inside a
+                # ClientHello. This is the resilient fallback for the DNS
+                # sniffing above — it works even when DNS itself is invisible
+                # to capture, which is now the common case: DNS-over-HTTPS
+                # (the default in most current browsers) and VPN clients that
+                # route DNS through their own tunnel both hide the port-53
+                # query this app would otherwise be watching for, but neither
+                # touches the TLS handshake that still has to name the server
+                # in plaintext. Same clobber rule as forward DNS: first
+                # genuinely-observed name for an IP wins, PTR never overrides
+                # either.
+                sni=parts[11].strip()
+                if sni and self._dns_src.get(dst) not in ('dns','sni'):
+                    _fwd = sni.rstrip('.')
+                    self._dns_raw[dst]   = _fwd
+                    self._dns_cache[dst] = _nm_friendly_host(dst, _fwd)
+                    self._dns_src[dst]   = 'sni'
                 if src and dst:
                     got_packets=True; self._pkts_this_run+=1
                     self._pkt_queue.append((src,dst,protos,length))
@@ -11444,10 +11473,19 @@ class EtherApeWindow:
         _pkt_scale = min(1.0, _pkt_budget / (_n_flows * 6.0))
 
         flow_seg_map=[]
+        # Protocols actually drawn as ribbons/edges this frame — separate from
+        # protos_seen below (which only looks at each NODE's single proto tag).
+        # A node's dot and the ribbons connecting it are coloured from two
+        # different fields (node tag vs. per-flow proto), so a flow whose
+        # protocol never happens to be any node's own tag — e.g. TLS/HTTP
+        # ribbons between two nodes both tagged plain TCP — was a real colour
+        # on screen with no matching legend entry anywhere.
+        flow_protos_seen=set()
         for (src,dst,proto),fl in flows.items():
             if src not in nodes or dst not in nodes: continue
             if fl['bytes']<0.1: continue
             if fp!='ALL' and fp.lower()!=proto: continue
+            flow_protos_seen.add(proto)
             x0,y0=nodes[src]['pos']; x1,y1=nodes[dst]['pos']
             # ── Manual reposition: in sankey mode a flow the user has dragged
             #    carries a persistent (dx,dy) offset applied to BOTH endpoints,
@@ -11729,7 +11767,11 @@ class EtherApeWindow:
                                         edgecolor='#ff4444',alpha=0.85))
                 self._blocked_label_artists.append(a)
         if self._show_legend:
-            protos_seen=set(nd['proto'] for nd in nodes.values())
+            # Union of node-dot protocols AND ribbon/edge protocols — see the
+            # flow_protos_seen comment above the flow loop for why both are
+            # needed: a colour only ever drawn as a ribbon (never a node's own
+            # tag) used to have no legend entry at all.
+            protos_seen=set(nd['proto'] for nd in nodes.values()) | flow_protos_seen
             # Clear old legend artists and redraw (legend is small, cheap to redo)
             for a in getattr(self,'_legend_artists',[]):
                 try: a.remove()
@@ -12365,7 +12407,8 @@ class EtherApeWindow:
             # The friendly label is for the graph; show the real record here.
             if fullname and fullname.lower() != hostname.lower():
                 row('DNS record', fullname)
-                row('Source', 'forward DNS' if self._dns_src.get(ip)=='dns' else 'reverse DNS (PTR)')
+                _src_lbl = {'dns': 'forward DNS', 'sni': 'TLS SNI'}.get(self._dns_src.get(ip), 'reverse DNS (PTR)')
+                row('Source', _src_lbl)
             row('Total bytes',   fmt_b(nd.get('bytes', 0)))
             row('Total packets', f'{nd.get("pkts", 0):,}')
             row('Protocol',      nd.get('proto', '?').upper())
@@ -14975,8 +15018,16 @@ class EtherApeWindow:
                 # Keep the FULL name — truncating at 20 chars was cutting
                 # 'ec2-...compute.amazonaws.com' down to 'ec2-54-167-136-58.co'.
                 raw = socket.gethostbyaddr(addr)[0].rstrip('.')
-                self._dns_raw[addr]=raw
-                if self._dns_src.get(addr) != 'dns':      # don't clobber a sniffed name
+                # Don't clobber a name actually observed on the wire (a DNS
+                # query/response, or a TLS SNI) with a PTR record — PTR is
+                # the least reliable of the three (plenty of real hosts have
+                # none at all, or one that doesn't match what's actually
+                # served there) — including _dns_raw, which used to be
+                # written unconditionally here even when _dns_cache's update
+                # below was correctly skipped, quietly downgrading a good
+                # sniffed name back to a worse PTR one.
+                if self._dns_src.get(addr) not in ('dns', 'sni'):
+                    self._dns_raw[addr]=raw
                     self._dns_cache[addr]=_nm_friendly_host(addr, raw)
                     self._dns_src[addr]='ptr'
             except Exception:
@@ -26328,6 +26379,11 @@ class _ThreeDServer:
                 try:
                     import socket as _sock
                     _raw = _sock.gethostbyaddr(addr)[0].rstrip('.')
+                    # By the time this (slow, async) PTR lookup lands, a
+                    # better name may have already arrived via sniffed DNS or
+                    # TLS SNI in the desktop capture loop — don't downgrade it.
+                    if getattr(ea, '_dns_src', {}).get(addr) in ('dns', 'sni'):
+                        return
                     # Store the FRIENDLY name — this cache feeds the 3D view,
                     # Top Talkers and the web dashboard. Writing the raw PTR here
                     # put 'ec2-...compute-1.amazonaws.com' straight back on screen.
@@ -26338,16 +26394,33 @@ class _ThreeDServer:
                     cache[addr] = addr
         dns_cache = getattr(ea, '_dns_cache', {})
         for n in out_nodes:
-            ip = n.get('ip','')
+            # NOTE: node dicts key the address as 'id', not 'ip' — this loop was
+            # reading n.get('ip','') and so `ip` was always '', meaning this
+            # kick-off never actually ran (the desktop canvas's own per-draw
+            # self._resolve() call was doing all the real resolution work
+            # instead). Harmless on its own, but left this backup trigger dead.
+            ip = n.get('id','')
             if ip and (ip not in dns_cache or dns_cache.get(ip) == ip):
                 _thr.Thread(target=_resolve_ip, args=(ip, dns_cache), daemon=True).start()
 
+        # Visited Hosts must read the RAW resolved name (_dns_raw), not the
+        # display-friendly one (_dns_cache): _nm_friendly_host() deliberately
+        # shortens anything from a recognised organisation straight to its org
+        # name for readability elsewhere (Active Hosts, canvas labels) — e.g.
+        # 'www.google.com' -> 'Google', 'x.amazonaws.com' -> 'Amazon'. Most
+        # real traffic goes to exactly these well-known providers, so reading
+        # dns_cache here meant nearly every real hostname got dropped by the
+        # '.' not in hn filter below (an org name has no dot) and the panel
+        # stayed empty even with plenty of genuinely-resolved traffic. _dns_raw
+        # keeps the untouched, full name precisely so a real domain is always
+        # available here.
+        dns_raw = getattr(ea, '_dns_raw', {})
         _ugly = ('in-addr.arpa','_tcp','_udp','local','localhost',
                  '.arpa','ptr.','ip6.','broadcasthost')
         _ip_re = _re.compile(r'\d{1,3}(\.\d{1,3}){3}')
         visited_urls = []
         seen_urls = set()
-        for ip, hostname in dns_cache.items():
+        for ip, hostname in dns_raw.items():
             if not hostname: continue
             hn = hostname.lower().rstrip('.')
             if not hn or hn in seen_urls: continue

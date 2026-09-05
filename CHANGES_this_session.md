@@ -1,6 +1,6 @@
-# Changes this session — build `b-ed99f4cc`
+# Changes this session — build `b-25adc03e`
 
-Sixty-one things this session. Build IDs for reference:
+Sixty-five things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -187,7 +187,7 @@ Sixty-one things this session. Build IDs for reference:
     fixed the actual crash — `_fmt_ms()` had no `None` guard, so any HTML
     report over a period with no ping or DNS readings threw
     `TypeError: unsupported format string passed to NoneType.__format__`.
-61. `b-ed99f4cc` (current) — EtherApe toolbar redesign: the old two-row,
+61. `b-ed99f4cc` — EtherApe toolbar redesign: the old two-row,
     ~55-control toolbar (the "mess" you flagged, that needed full-screen to
     see half of it) is replaced with a left icon rail + collapsible bottom
     filters drawer (the "Option B" mockup you picked). Plus two real,
@@ -196,6 +196,358 @@ Sixty-one things this session. Build IDs for reference:
     button permanently stuck disabled, and a window-packing order bug that
     could make the bottom status bar and the LIVE/REPLAY scrubber bar
     invisible whenever the window's content needed more height than it had.
+62. `b-c368fa76` — rail button text was too small to read (your report);
+    bumped the rail icon buttons from 6pt to 8pt and re-verified nothing
+    gets squeezed. Also traced your "DNS is broken" report — turned out to
+    be two different panels, one working as designed (see entry 63).
+63. `b-e0c512dc` — found and fixed the real bug behind "Visited
+    Hosts" staying empty: it was reading the *shortened* display name
+    ("Google", "Amazon" — no dot) instead of the actual resolved domain,
+    so real hostnames for every well-known provider — which is most real
+    traffic — were silently filtered out. Also fixed a dead-code typo
+    (`'ip'` vs `'id'`) that meant the panel's own backup DNS-resolution
+    kick-off never actually ran. Turned out not to be the whole story —
+    see entry 64.
+64. `b-7118b630` — the actual root cause of "Visited Hosts" is empty,
+    confirmed against your real machine: nothing was resolving *at all*
+    for external hosts, DNS or PTR, VPN on or off. Added TLS SNI sniffing
+    as a second, independent hostname source that doesn't depend on DNS
+    working at all — see the section below for why plain DNS sniffing was
+    never going to be enough in 2026. It worked — `api.telegram.org`
+    showed up in your very next screenshot.
+65. `b-25adc03e` (current) — found and fixed the real bug behind the
+    Sankey legend not listing every colour actually on screen (your
+    "green ribbons, no legend entry" report): the legend and the ribbons
+    were reading two different fields — a node's single, last-packet-wins
+    protocol tag vs. each flow's own, more specific protocol — so a
+    protocol like TLS could colour a ribbon without ever being any node's
+    tag, and the legend simply never knew it existed.
+
+## Sankey legend missing colours — the real bug, found by reading both code paths
+
+**What you reported:** two screenshots of the Sankey topology view — thick
+green ribbons connecting your machine to `api.telegram.org`, and a legend
+in the corner listing only MDNS, TCP, and UDP. No green anywhere in it.
+
+**What I actually did this time, since "don't guess" was the point:**
+read the two places a protocol's colour comes from side by side instead of
+speculating about which one might be wrong.
+
+- The **ribbons** (`speedtest_monitor.py`, `_render_tick_inner`, the flow-
+  drawing loop): coloured from `proto`, the third element of each flow's
+  key — `for (src, dst, proto), fl in flows.items(): col =
+  self.PROTO_COLORS.get(proto, ...)`. Each flow is keyed by its own
+  specific protocol tag (`http2`/`http`/`tls`/`ssl`/`dns`/`mdns`/.../`tcp`/
+  `udp`/`arp`), picked by priority order out of tshark's full
+  `frame.protocols` string — so a flow that's actually TLS gets tagged
+  `'tls'`, not just generically `'tcp'`.
+- The **legend**: built from `protos_seen = set(nd['proto'] for nd in
+  nodes.values())` — a completely different field, each *node's* single
+  proto tag, not the flows'.
+- The node's own tag turns out to be much less specific, by design
+  elsewhere in the same file: `_render_tick_inner`'s packet-ingest loop
+  sets `nd['proto'] = ptag` on **every single packet** that touches that
+  node, so it's really "whatever this node's most recent packet happened
+  to be tagged," not a stable summary of what that host does. A host that
+  talks TLS *and* plain TCP (essentially every HTTPS conversation, which
+  negotiates as TLS and then carries data as TCP once picked apart into
+  a specific protocol) can easily end up tagged plain `'tcp'` on the node
+  even while a `(src, dst, 'tls')` flow — a completely separate entry,
+  since flows are keyed by protocol too — genuinely exists and is being
+  drawn as a green ribbon right now. The legend, reading only the node's
+  tag, never finds out that flow's protocol exists at all.
+
+**The fix:** collect the set of protocols actually drawn as ribbons this
+frame (the same flows loop already filters out anything not actually
+rendered — wrong-node, near-zero bytes, protocol-filtered-out — so this
+reuses that exact filtering rather than a separate pass) and union it into
+the legend's protocol set, instead of relying solely on the nodes' tags.
+Every colour that can appear on screen — as a node dot or a ribbon — now
+has a matching legend entry.
+
+**Verified for real, not just read:** built a small reproduction that
+feeds `_render_tick_inner` real packets the way `_capture_loop` does —
+first a burst tagged `tls`, then a burst tagged plain `tcp`, for the same
+host pair (deliberately reproducing "last packet wins" on the node tag).
+Confirmed against the real running code: both nodes end up tagged
+`'tcp'` (exactly the failure mode above), the `(src, dst, 'tls')` flow
+exists in `self._flows` the whole time, and — before this fix, tracing
+the old code path — the legend would have shown only `TCP`. After the
+fix, the actual legend artists constructed by the real method read `TCP`
+*and* `TLS`. Also re-ran the full EtherApe test suite (toolbar, drawer,
+rail buttons, both DNS-cache fixes) plus full regression: `selftest.py`
+(35/0/1), the 13-page System Monitor suite, and the Nmap GUI suite — all
+still green.
+
+**On "still not much traffic showing":** I looked for a concrete bug here
+too rather than guess at one — checked the node/flow eviction logic
+(`speedtest_monitor.py`, `_render_tick_inner`: nodes drop after 6000 idle
+ticks / 5 minutes, flows after 2400 / 2 minutes) and the capacity caps
+(`MAX_NODES=500`, `MAX_FLOWS=2000`) that could theoretically be silently
+capping what's shown. Neither one is close to being the limiting factor
+at the handful of hosts/flows in your screenshot — nothing there is being
+evicted or capped. I don't have a confirmed cause for the low volume
+itself yet, and I'd rather say that plainly than guess: was that
+screenshot taken shortly after starting a fresh capture (in which case a
+sparse graph is just accurate — the view hasn't had time to see much
+yet), or had it been running a while with traffic you know was
+happening that never showed up? That distinction is what tells me
+whether this needs more digging or isn't actually a bug.
+
+## Visited Hosts really was empty — TLS SNI added as a DNS-independent hostname source
+
+**What you reported, after entries 62/63 didn't fix it:** with the
+`b-e0c512dc` fix confirmed running (checked the build-ID status dot) and
+NordVPN fully closed, the desktop Active Hosts panel still showed *zero*
+external hosts resolved to anything — not even a shortened org name. Every
+external IP was still just showing its own address back.
+
+**Why that ruled out entries 62 and 63 as the fix, and pointed somewhere
+new:** those two fixes were both about what the app does with a hostname
+*after* it resolves — reading the right cache, running the right kick-off
+thread. Neither one can produce a name out of nothing. If Active Hosts
+(fed by the exact same resolution pipeline, just displayed differently)
+also had zero real hostnames, the problem was upstream of both fixes:
+nothing was landing in `_dns_cache`/`_dns_raw` in the first place, from
+either of the app's two hostname sources — sniffed DNS queries or PTR
+lookups.
+
+**The actual cause:** this app has always had exactly two ways to learn a
+hostname — watch for plaintext DNS query/response packets on the wire
+(`dns.qry.name`/`dns.a`/`dns.aaaa`), or ask the OS to reverse-look-up an IP
+(`socket.gethostbyaddr`, a PTR query). Both depend on a real, visible,
+working DNS exchange happening somewhere the app can see or trigger it.
+Neither one is guaranteed anymore. DNS-over-HTTPS is the *default* in
+current Chrome, Edge and Firefox in most regions — meaning your browser's
+actual DNS queries are encrypted HTTPS traffic indistinguishable from any
+other HTTPS request, so `dns.qry.name` never appears in the capture at
+all. A VPN's own DNS handling can hide it a second way (this turned out
+not to be your specific cause once you closed NordVPN, but it's a real
+factor for anyone who has one active). And PTR lookups are simply
+unreliable on their own merits — plenty of real, popular websites and CDN
+IPs have no reverse DNS record configured, or one that's generic and
+doesn't name the actual site. With DoH the norm now, "wait for a
+plaintext DNS packet, or hope PTR works" reduces to "usually see nothing,"
+which is exactly the empty panel you kept getting, on every build, no
+matter what the filter or cache logic did with whatever name showed up.
+
+**What changed — `speedtest_monitor.py`, `EtherApeWindow._launch_tshark` /
+`_capture_loop` / `_resolve`, and `_ThreeDServer._resolve_ip`:**
+
+- Added `-e tls.handshake.extensions_server_name` to the live tshark
+  capture command. This is the *Server Name Indication* field from a TLS
+  ClientHello — the plaintext hostname a browser has to name in the clear
+  when starting an HTTPS connection, completely independent of how (or
+  whether) DNS resolution for that connection was ever visible. TLS 1.2
+  and 1.3 both send it unencrypted (this only stops working once
+  Encrypted Client Hello sees real-world adoption, which as of now is
+  early and provider-specific, not the general case) — and it works even
+  when DoH or a VPN has hidden the DNS exchange entirely, because it isn't
+  DNS at all.
+- `_capture_loop` now parses that 12th field and, on an actual
+  ClientHello, maps the hostname to the packet's destination IP the exact
+  same way sniffed DNS answers already did — same cache, same friendly-
+  name shortening, tagged with a new source `'sni'` instead of `'dns'`.
+- Extended the existing "don't let a PTR record clobber a name we
+  actually observed" guard (previously only protecting `'dns'`) to also
+  protect `'sni'` — in both places it's enforced (`_resolve`'s background
+  PTR thread, and the web dashboard's own `_resolve_ip`). Found and fixed
+  a real bug in the same guard while I was in there: `_resolve`'s PTR
+  thread was writing `_dns_raw` *unconditionally*, even on the branch
+  where it correctly skipped updating the friendly-name cache to avoid
+  clobbering a sniffed DNS name — so a slow-to-land PTR result could still
+  quietly downgrade `_dns_raw` (which entry 63's Visited Hosts fix reads
+  from) back to a worse name, even though `_dns_cache` was protected
+  correctly. Both fields are now written together, under the same guard.
+- The Flow Detail pane's "Source" row (forward DNS vs. reverse DNS) now
+  also reports "TLS SNI" instead of folding it into "reverse DNS (PTR)".
+
+**Verified for real, with fabricated tshark output run through the actual
+parsing code — not just read and reasoned about:**
+
+- Fed `_capture_loop` real tab-separated lines shaped exactly like
+  tshark's `-T fields` output, including cases with the DNS fields
+  completely empty (simulating DoH/VPN) and only the SNI field populated
+  — confirmed `_dns_raw`, `_dns_cache`, and `_dns_src` all populate
+  correctly from SNI alone, with the friendly-name shortening still
+  applying (`fastly.net` → `Fastly`) exactly as it does for sniffed DNS.
+- Ran that same SNI-only data all the way through the real
+  `_ThreeDServer._serve_topology3d` handler (the actual `/3d` endpoint)
+  and confirmed `visited_urls` in the JSON response came back correct —
+  proving the full chain (packet → cache → panel) now works even with
+  zero DNS visibility, which is exactly your situation.
+- Re-ran every EtherApe verification test from entries 61-63 (toolbar
+  layout, drawer, rail buttons, the two earlier DNS-cache fixes) plus full
+  regression: `selftest.py` (35/0/1), the 13-page System Monitor suite,
+  the Nmap GUI suite, the theme suite (132 combinations), and the pcap-
+  shutdown/Wireshark-window-close tests. All still green.
+
+**NOT verified:** real TLS traffic on your actual machine and tshark
+build. This sandbox has tshark installed but no real network for it to
+capture from, so I could not watch a genuine ClientHello go by and get
+picked up — only prove the parsing/caching/serving code handles that
+shaped data correctly once it arrives. `tls.handshake.extensions_server_name`
+is a long-stable Wireshark field name that should work on the tshark 4.6.4
+you have installed, but real-world capture (a live NIC, WinPcap/Npcap
+driver behavior, whatever traffic mix you actually generate) is exactly
+the part this sandbox cannot reproduce. Also worth knowing going in: any
+site using Encrypted Client Hello (ECH) will hide its SNI too — that's
+currently a minority of traffic (mainly some Cloudflare-fronted and a few
+Google properties), not the general case, but if you still see gaps for
+specific sites after this build, ECH is a plausible reason why, not a bug.
+
+## Rail button text size + "DNS is broken" report — follow-up to the toolbar redesign
+
+**What you asked:** "dns is enabled this is something you have broken and
+the text on the new lefthad side bar buttons is way to small to read
+easily" — sent with two screenshots of the real app.
+
+**Rail button text — fixed, `speedtest_monitor.py`, `EtherApeWindow._build_ui`:**
+
+- `railbtn()`'s font went from 6pt to 8pt (a real ~33% size increase, not
+  a token bump).
+- That font change alone would have squeezed the widest labels
+  ("FIREWALL"/"HONEYPOT"/"LAN SCAN") past the 76px rail — so while fixing
+  this I also noticed the button sizing itself was working against the
+  goal: it forced a `width=7, height=2` character-cell size, which for
+  this glyph+label text was actually *less* space-efficient than just
+  letting Tk size the button to the real pixels needed (measured: the old
+  forced-width approach needed 77px at 8pt; natural sizing needs only
+  64px at the same 8pt). Switched to natural sizing and widened the rail
+  from 76px to 80px for a little margin — net result is bigger, more
+  readable text in a rail that's only 4px wider than before, with real
+  measurements confirming zero squeeze on any of the 11 labels this time
+  (previously verified 76px was also zero-squeeze, but that was measured
+  against the old forced-width sizing, not the same thing).
+
+**"DNS is broken" — investigated, not fixed, because I couldn't find
+anything the redesign touched:**
+
+- Traced every line involved in host-name resolution and display: the
+  toolbar's DNS checkbox (`self._dns_var` → `self._resolve_names`), the
+  background resolver (`_resolve()`, real `socket.gethostbyaddr()` PTR
+  lookups on a worker thread, with an mDNS/observed-DNS-traffic fast path
+  that's why local devices resolve instantly), and the Active Hosts panel
+  that displays the result (`_table_tick_inner`, reading `self._dns_cache`).
+  None of it is inside `_build_ui`'s toolbar section — the only part of
+  this class today's redesign touched — and I didn't change any of it.
+- What your own screenshot actually shows, read closely: "terminator"
+  (192.168.1.165, your own machine) and "xbox" (192.168.1.195) *are*
+  resolved names, sitting right next to entries like `187.13.222.225`
+  whose Name column just repeats the IP address. That split — instant
+  names for local/observed devices, IP-as-placeholder for everything
+  else — is the resolver's designed fallback behaviour
+  (`self._dns_cache[ip] = ip` "placeholder until the lookup lands", kept
+  as the permanent value if the PTR lookup then fails or times out) not
+  new to this build. Most consumer ISP address blocks and a lot of cloud/
+  CDN ranges simply don't have PTR records to resolve, on any DNS setup.
+- So on the evidence I can see, this looks like existing best-effort
+  behaviour rather than something the toolbar redesign broke — but I
+  don't have your live network to test PTR resolution against, and you'd
+  know immediately if a specific external IP you've seen resolve before
+  has stopped. If you can point at one that used to show a real hostname
+  and now just shows its own IP, tell me which one (or send a fresh
+  screenshot with DNS on for a minute or two so more lookups land) and
+  I'll dig further — right now I don't have a reproduction, only code
+  that reads as correct.
+
+**Verified for real:**
+
+- Rail buttons: constructed the real `EtherApeWindow`, walked the widget
+  tree, and measured all 11 rail buttons' actual vs. requested width at
+  8pt — none squeezed, all rendered at the full 72px the 80px rail leaves
+  after padding.
+- Full regression: `selftest.py` (35/0/1), the 13-page System Monitor
+  suite, and the Nmap GUI suite all still green after this build.
+
+**NOT verified:** the DNS behaviour against real internet traffic (this
+sandbox has neither your network nor a live resolver to test PTR lookups
+against) and real Consolas rendering, same standing caveats as the
+previous build.
+
+## Visited Hosts panel — the actual bug, found and fixed
+
+**What you asked:** "no just fix it to show visited hosts again" — after I
+reported back that the resolution pipeline looked correct but the "Visited
+Hosts" web panel (a different thing from the desktop's Active Hosts list —
+this one lives on the `/3d` dashboard) still came up empty in your
+screenshot.
+
+**What I'd gotten wrong last time:** I'd concluded the code was behaving
+as designed. It wasn't — I just hadn't looked at the one function that
+actually builds that panel's list (`_ThreeDServer._serve_topology3d`,
+`speedtest_monitor.py`) closely enough. Once you pushed back and asked for
+an actual fix, I traced it fully and found a real bug.
+
+**Root cause:** the list-building loop read hostnames from
+`ea._dns_cache` — the *display-friendly* name used everywhere else in the
+app (Active Hosts, canvas labels). `_nm_friendly_host()` deliberately
+shortens any hostname from a recognised organisation straight to its org
+name for readability — `www.google.com` becomes `Google`, anything on
+`amazonaws.com` becomes `Amazon`, and so on for every provider in the
+app's org table. That's the right call for a compact canvas label. It's
+the wrong source for a "visited hosts" list, though, because the panel's
+own filter throws out anything without a dot in it (reasonable — it's
+trying to skip IPs, LAN device names like "xbox", and multicast pseudo-
+names) — and a shortened org name like `Google` has no dot. Since most
+real internet traffic goes to exactly these well-known providers, nearly
+every genuinely-resolved hostname was being generated by the same
+function that then got itself filtered out one line later. Only the rare
+IP that *didn't* match a known org ever made it into the list — which is
+consistent with what your screenshot showed: effectively nothing, despite
+real, working DNS resolution underneath.
+
+**The fix:** read from `ea._dns_raw` instead — a second cache the app
+already maintains alongside `_dns_cache` specifically holding the
+*untouched* full hostname ("ip -> full name as resolved, for detail
+panes", per its own existing comment), populated by the same forward-DNS-
+sniffing and reverse-PTR-lookup code paths, just never wired into this
+one panel. No new resolution logic, no filter changes — one dictionary
+swapped for the sibling dictionary that was always sitting right next to
+it with the exact data this panel needed.
+
+**Bonus fix in the same function:** found a second, unrelated bug two
+lines above it while I was in there — a backup DNS-resolution kick-off
+for nodes seen by this web endpoint was reading `n.get('ip', '')`, but
+the node dictionaries key the address as `'id'`, not `'ip'`. That `ip`
+variable was always an empty string, so the kick-off silently never ran
+(harmless day-to-day, since the desktop canvas's own per-frame resolution
+call was already doing the real work independently — but dead code
+nonetheless). Fixed to `n.get('id', '')`.
+
+**Verified for real, with realistic data, through the actual server
+method — not just read and reasoned about:**
+
+- Built a small standalone reproduction first with representative data
+  (a mix of well-known-org hostnames, one still-unresolved placeholder,
+  one obscure hostname with no org match) run through the *exact* filter
+  logic, old source vs. new: the old code kept 1 of 5 genuinely-resolved
+  hostnames, the new code kept all 4 that had actually resolved (the 5th
+  was correctly still excluded — it really was unresolved). Confirms the
+  diagnosis, not just the fix.
+- Then verified end-to-end against the real thing: constructed an actual
+  `EtherApeWindow`, seeded it with that same realistic node/DNS data,
+  constructed a real `_ThreeDServer`, and called the real
+  `_serve_topology3d(handler)` — the literal HTTP handler your browser's
+  `/3d` page calls — with a fake handler object capturing the JSON
+  response. `visited_urls` in that real response came back with all 4
+  real hostnames, sorted, deduplicated, exactly as expected.
+- Separately verified the `'ip'`→`'id'` kick-off fix: added a node with
+  an address not yet in any DNS cache, called the real handler, confirmed
+  a resolution thread actually started and the cache got an entry back
+  (a placeholder in this sandbox, since there's no real DNS server to
+  resolve `198.18.0.99` against — but the *mechanism* firing is what was
+  broken, and it now does).
+- Full regression: `selftest.py` (35/0/1), the 13-page System Monitor
+  suite, and the Nmap GUI suite all still green.
+
+**NOT verified:** real hostnames actually landing in the panel against
+your live traffic — this sandbox has no real network or DNS server to
+resolve against, only synthetic data standing in for what your capture
+would produce. The mechanism is now provably correct end-to-end; whether
+a given external IP on your network has a PTR record or gets seen in a
+DNS query at all is still a fact about your traffic, not something code
+can guarantee.
 
 ## EtherApe toolbar redesign — Option B (icon rail + bottom drawer)
 
