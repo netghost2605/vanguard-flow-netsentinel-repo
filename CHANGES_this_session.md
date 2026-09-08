@@ -1,6 +1,6 @@
-# Changes this session — build `b-25adc03e`
+# Changes this session — build `b-8854f5c0`
 
-Sixty-five things this session. Build IDs for reference:
+Seventy-four things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -215,13 +215,632 @@ Sixty-five things this session. Build IDs for reference:
     working at all — see the section below for why plain DNS sniffing was
     never going to be enough in 2026. It worked — `api.telegram.org`
     showed up in your very next screenshot.
-65. `b-25adc03e` (current) — found and fixed the real bug behind the
-    Sankey legend not listing every colour actually on screen (your
-    "green ribbons, no legend entry" report): the legend and the ribbons
-    were reading two different fields — a node's single, last-packet-wins
-    protocol tag vs. each flow's own, more specific protocol — so a
-    protocol like TLS could colour a ribbon without ever being any node's
-    tag, and the legend simply never knew it existed.
+65. `b-25adc03e` — found and fixed the real bug behind the Sankey legend
+    not listing every colour actually on screen (your "green ribbons, no
+    legend entry" report): the legend and the ribbons were reading two
+    different fields — a node's single, last-packet-wins protocol tag vs.
+    each flow's own, more specific protocol — so a protocol like TLS
+    could colour a ribbon without ever being any node's tag, and the
+    legend simply never knew it existed.
+66. `b-7ee49e69` — moved the MIN TRAFFIC (flow-size) slider out
+    of the collapsed FILTERS & BLOCKING drawer and onto the always-visible
+    top toolbar, and fixed a real bug in the slider itself: its handle was
+    drawn in the exact same colour as the toolbar background, so even
+    with the drawer open the handle was effectively invisible.
+67. `b-85909778` — 3D view: the VPN status pill (shows
+    "○ VPN" when idle, "🔒 TAILSCALE"/"🔒 NORDVPN"/etc. when a tunnel is
+    actually carrying traffic) was independently centred over the top
+    header, with no awareness of the nodes/flows/pkts stats and toolbar
+    buttons on either side of it — reproduced in a real headless browser
+    at your screen's approximate width and confirmed it collides.
+    Repositioned it to sit below both header rows instead, verified with
+    the same real-browser test at three window widths.
+68. `b-0517e611` — Top Flow Talkers: gave the ribbons the same
+    scrolling neon circuit-trace overlay the 3D view's protocol bars use,
+    and fixed the real reason incoming flows looked like an unreadable
+    blur — a particle speed/count calculation that only ever measured
+    against the biggest OUTGOING flow, so any incoming flow bigger than
+    that (a big download vs. a tiny request — normal, everyday asymmetric
+    traffic) blew way past its intended bounds.
+69. `b-58cf88ca` — the new Top Flow Talkers trace overlay from
+    #68 was gated at 20px of band thickness (copied from an unrelated
+    effect that needed that floor to avoid strobing), which silently
+    excluded most flows in any capture with one dominant host and a long
+    tail of small ones -- dropped to a token floor so every non-blocked
+    band gets it. Also made the whole effect noticeably more vibrant:
+    thicker/brighter trace lines and a much stronger compositing opacity
+    (0.45-0.90, was 0.14-0.36) -- the original numbers were copied
+    straight from the WebGL 3D bars, which look right there because
+    WebGL adds its own bloom on top; a flat 2D canvas has no bloom, so
+    the same numbers just looked dim.
+70. `b-4edd6c7a` — switched the default local AI model from llama3.2 to
+    deepseek-r1:7b everywhere it's referenced in the app (Flow Detail AI
+    box, Settings, the Guide, and the actual Ollama call itself), and
+    added the handling a reasoning model like deepseek-r1 actually needs
+    that llama3.2 never did: it wraps its real answer in a
+    `<think>...</think>` chain-of-thought block, which is now stripped
+    before the text reaches any panel or JSON parser, and the reply token
+    budget was raised so that reasoning doesn't eat the whole allowance
+    and leave nothing for the actual answer.
+71. `b-abb8c4b4` — added a floating "AI QUERY" button to every one of the
+    11 web-served pages (previously the only free-form "ask the AI" boxes
+    lived in the desktop app; the web pages only had a couple of
+    single-purpose canned-prompt buttons).
+72. `b-2433c0ac` — clicking RUN TEST on the main dashboard now pops up a
+    live speed-test gauge, needle and all, like Ookla's own app. See the
+    section below for how it actually gets "live" numbers, since the real
+    speed-test CLI turned out not to offer any.
+73. `b-36cc030b` — investigated the "dashboard still shows 5.0 Mbps while
+    the log says 27.57" report; hardened the dashboard's DB read against
+    the most plausible cause found at the time (see the section below —
+    this turned out not to be the actual cause, but the hardening is
+    harmless and stays in).
+74. `b-8854f5c0` (current) — found and fixed the REAL cause of the above:
+    the automatic scheduled speed test and a manually-triggered one could
+    run at the same time, each corrupting the other's reading. See the
+    section below.
+
+## The real cause: automatic and manual speed tests could run at the same time
+
+**What actually happened, once you sent a screenshot with the real log
+lines in it:** `b-36cc030b`'s DB-read hardening shipped, you tried it again,
+and it made no difference — the dashboard's "LIVE" badge was green (so the
+new "DB READ ERROR" indicator never fired; that path really wasn't it) and
+the numbers still didn't match the console. Your screenshot's thread names
+gave it away: one completed test's log line was tagged
+`Thread-193 (_w)` — that's the manual RUN TEST button's own worker thread —
+and moments later `Thread-10 (run_continuous)` (the automatic scheduler)
+started a DNS check, meaning ITS OWN speed test had just finished around
+the same time. Two separate `run_speedtest()` calls, on two different
+threads, running close enough together to both be saturating the same link
+at once. That lines up exactly with what both readings looked like: ping in
+the hundreds of ms, 12–25% packet loss, wildly different download numbers
+seconds apart — not two real, independent measurements, but two tests
+fighting each other for bandwidth, each dragging the other's numbers down.
+
+**Why the earlier DB-layer investigation didn't find this:** it was a real,
+thorough investigation, just aimed at the wrong layer. Reading and writing
+the database was never the problem — it was that TWO writes could legitimately
+happen in quick succession from two uncoordinated test runs, so whichever
+one committed last simply "won" the dashboard's next refresh, while the
+console had shown a different one moments earlier. Both numbers were real,
+both were in the database, and both were garbage — collected under network
+contention neither test intended to share. That's a different bug (and a
+more serious one, since it also poisons your speed-history data with junk
+readings) than a stale read, which is why the retry/backoff and "DB READ
+ERROR" badge from `b-36cc030b` didn't fix it — that hardening is still a
+reasonable safety net for an actual DB hiccup, so it stays in, it just
+wasn't what you were hitting.
+
+**What was already there and what was missing:** the dashboard's RUN TEST
+button, the System Monitor's own "Internet Benchmark" tab, and the web
+`/api/run_test` endpoint already all checked/set a shared `_running_manual`
+flag, so none of those three could ever collide with EACH OTHER. But
+`run_continuous()` — the background loop that fires the automatic
+scheduled test — never checked that flag at all, and nothing existed for a
+manual trigger to check "is the automatic scheduler mid-test right now."
+So the one pairing that was never guarded was manual-vs-automatic, which is
+exactly the pairing your screenshot caught in the act.
+
+**What changed:**
+- Added a second flag, `_running_auto`, set for the duration of
+  `run_continuous()`'s own test, and a shared `_test_busy()` check
+  (`_running_manual OR _running_auto`).
+- `run_continuous()` now checks `_running_manual` before starting its
+  scheduled test; if a manual test is already running, it skips that cycle
+  entirely (logs it, and just waits out the normal interval before trying
+  again) instead of piling a second test on top.
+- All three manual entry points (dashboard button, benchmark tab, web API)
+  now check the shared `_test_busy()` instead of only `_running_manual`, so
+  a click during an automatic test is correctly treated as "busy" too,
+  the same way a double-click already was.
+- The dashboard's "LIVE"/"TESTING" badge now reflects `_test_busy()`, so it
+  correctly shows "TESTING" during an automatic scheduled test as well as a
+  manual one (previously only manual tests lit it up).
+
+**Verified:**
+- A new test drives the real `SpeedTestMonitor.run_continuous()` and the
+  real `_test_busy()` logic (not a reimplementation): with `_running_manual`
+  set, `run_continuous()` is confirmed to skip its cycle and make zero calls
+  to `run_speedtest()`; with nothing in the way, it's confirmed to run
+  normally AND to correctly report itself busy (`_test_busy() == True`)
+  to anything that checks mid-test, then clear that flag again afterward.
+- Re-ran the earlier DB-retry/badge test and the full `selftest.py` suite
+  (36 checks) against this exact build — still 35/1-skip/0-fail, no web
+  route changed.
+- `python3 -m py_compile` clean on the exact synced build.
+
+**Not verified:** I can't replay your exact original scenario end-to-end
+(that needs your real install and real network conditions), but this is no
+longer a guess about a plausible mechanism — it's a fix for a concrete race
+your own log lines demonstrated was actually happening. If two tests ever
+overlap again, `run_continuous`'s log will now say so explicitly
+("skipping this cycle, a manual test is already running").
+
+**Confirmed on your machine:** rebuilt+reinstalled to `b-8854f5c0`,
+restarted the app, retested — dashboard now tracking correctly. Closing
+this one out.
+
+## Dashboard gauges frozen on an old number while the log kept logging new ones
+
+**What you asked:** "the download speed is 27.57 on the left but the gui
+hasnt reflected that" — a completed automatic speed test showed up in the
+log/console with a real download number, but the dashboard's gauge cards
+still showed an old value (5.0 Mbps) more than a minute later.
+
+**What I checked and ruled out, with real tests, not just reading the
+code:**
+- Built a faithful two-thread reproduction using the actual `SpeedDB`
+  class (not a simplified stand-in): one thread inserts a reading exactly
+  like `run_speedtest()` does, another reads it back on its own connection
+  exactly like the dashboard's 2-second refresh does. The reader saw the
+  new row immediately, every time. This rules out stale WAL snapshots as
+  the cause.
+- Confirmed there's exactly one `SpeedTestMonitor()` and one `ModernWindow`
+  in the whole app (one `monitor = SpeedTestMonitor()` / one
+  `ModernWindow(monitor)` call) — ruled out two independent in-process
+  copies of the data.
+- Found and read `run_continuous()` (the background thread that actually
+  runs the automatic tests — confirmed it's started via
+  `threading.Thread(target=monitor.run_continuous, daemon=True).start()`
+  at startup) and confirmed it writes through the same `run_speedtest()` /
+  `self._db.insert_reading()` path the dashboard reads from.
+- Asked you directly rather than guess blind: confirmed you were running
+  the installed app (Start Menu / Program Files shortcut) with only one
+  instance open — so it isn't two separate copies of the app pointed at
+  two different data files, which was the next most likely explanation
+  once the DB layer itself checked out.
+- Checked the installed app's actual location: the installer puts it in
+  `Program Files\NetworkMonitor`, which isn't one of the folders synced to
+  this session, so I could not inspect your real `speedtest_data.db` or
+  `speedtest_monitor.log` from the moment it happened. This is the
+  boundary of what I could verify directly.
+
+**Most plausible remaining mechanism (not confirmed, but the best fit):**
+`SpeedTestMonitor._load_data()` reads from SQLite on every 2-second
+dashboard refresh, but if that read throws for any reason, it silently
+falls back to `speedtest_data.json` — a file that, once the app is running
+in database mode, never gets written to again (`_save_data()` returns
+immediately when `USE_DB` is on). If a read failed even once and kept
+failing, the dashboard would show whatever was in that old, frozen JSON
+file (or nothing) indefinitely, while the log/console kept printing real
+successful test results from `run_speedtest()`/`run_continuous()`, which
+don't go through `_load_data()` at all. That combination — a silent
+fallback plus a JSON file that can be months old — matches what you saw
+exactly. Your app also runs 7+ background worker threads (device scan,
+latency, traffic/flows, briefing, VDI, topology) all writing to the same
+SQLite file on their own connections, on top of the speed-test/DNS
+scheduler — real contention my two-thread test never exercised, so a
+transient "database is locked" on a live install is plausible even though
+I couldn't reproduce it here.
+
+**What changed either way:**
+- `_load_data()` now retries a failed DB read up to 3 times with a short
+  backoff (up to ~0.45s total) before falling back to JSON, so a brief
+  lock no longer causes even one visibly-stale refresh.
+- If it still fails after retrying, that failure is now logged with the
+  real exception (`log.error`, goes to the log file) instead of only a
+  bare `print()`, and the dashboard's top-right status badge — normally
+  "LIVE" / "TESTING" / "DNS CHECK" — switches to a bright red "DB READ
+  ERROR" instead of silently continuing to show old numbers with nothing
+  to indicate anything is wrong.
+
+**Verified:**
+- Two new test cases against the real `_load_data()` method: (1) a DB read
+  that fails twice then recovers on the 3rd attempt — confirmed it still
+  returns the fresh row and leaves the badge in its normal state; (2) a DB
+  read that fails every time — confirmed it falls back to JSON as before
+  AND sets the new `_db_load_ok` flag the dashboard badge checks.
+- `python3 -m py_compile` clean on the exact synced build.
+- Full `selftest.py` (36 checks: every web route byte-identical to the
+  golden baseline, all APIs, JS syntax, desktop window construction, and
+  the honeypot radar) still 35/1-skip/0-fail against this exact build —
+  this change is desktop-data-layer only and touches no web-served route.
+
+**Not verified — genuinely unresolved:** I could not confirm this was
+actually the mechanism that produced your specific screenshot, because I
+don't have access to the real `Program Files\NetworkMonitor` install
+folder or its log from that moment. If the dashboard ever shows "DB READ
+ERROR" in red, that confirms this is what's happening and the retry/backoff
+should mostly ride it out going forward; if the gauges freeze again WITHOUT
+that badge ever turning red, this wasn't the cause and it needs a fresh
+look — please send me the log file from around when it happens next time,
+that would settle it either way.
+
+## Live speed-test gauge, Ookla-style
+
+**What you asked:** "when i run a speedtest manually i want a gauge to pop
+up showing realtime metrics like ookla does."
+
+**What was actually there before:** clicking RUN TEST silently blocked in
+the background for however long the speed-test CLI took (usually 20-40
+seconds), then the gauge cards on the main dashboard updated once, all at
+once, with the final numbers. Nothing moved during the test itself.
+
+**Why this took real investigation, not just wiring a progress bar:** the
+obvious way to build this is to parse the speed-test CLI's own live output
+while it runs. Checked that against the real thing before assuming it —
+downloaded the exact librespeed-cli build this app ships (v1.0.13) and
+read its actual `--help` end to end. It has `--json`/`--csv`/`--simple` for
+a single final result and nothing else — no streaming mode, no progress
+events. There IS a `--json-stream` flag that does exactly this (newline-
+delimited JSON, a progress event every second with the live rate) sitting
+in the project's current source on GitHub, but checking the actual
+librespeed.org release page confirmed it has never shipped in a tagged
+release — it's unreleased, so it isn't something a real install has, and
+building against it would have been building against source code you
+don't actually run. Ookla's own CLI and speedtest-cli (the other two
+engines this app supports) aren't any better documented on this front, and
+`run_speedtest()` already runs all three through one shared code path that
+waits for the process to exit and reads back one final result regardless
+of engine — there was no live text to parse for any of the three without
+gambling on undocumented behaviour.
+
+**What it does instead:** samples the same thing Ookla's own gauge is
+ultimately downstream of — actual bytes moving on the network right now
+(`psutil.net_io_counters()`, read every 150ms while the CLI subprocess is
+alive). That's engine-agnostic (works identically whichever of the three
+supported CLIs `run_speedtest()` ends up using), needed zero changes to
+the tested measurement/parsing code itself, and is real measured
+throughput rather than a replay of a number some CLI computed for itself.
+`run_speedtest()` now also returns its result as a dict instead of
+nothing, purely additive — the three other places that call it (the
+continuous background scheduler, the web dashboard's own Run Test button,
+and a "Benchmarks" tab that hasn't actually been reachable from the app's
+menus since the System button was pointed at Task Manager TMOG earlier
+this session) all already ignored its return value, so nothing about them
+changes.
+
+Phase (ping / download / upload) isn't reported by the CLI either, so it's
+inferred from the same real samples: both directions quiet = ping; once
+one direction sustains real traffic, that's the active phase and the
+needle tracks it with a smoothed, auto-scaling dial (25 → 5000 Mbps
+tiers, same idea as Ookla's own range jumps); a sustained drop in that
+direction while the other picks up means the CLI has moved on to the
+other leg. When the background thread's `run_speedtest()` call actually
+returns, the dial freezes and shows a clean Download / Upload / Ping
+summary card, then auto-closes after 6 seconds.
+
+**Worth knowing, not hidden:** `net_io_counters()` is system-wide — every
+interface, every process — not scoped to the speed test alone. On an
+ordinary manual test the test itself completely dwarfs anything else on
+the connection, but heavy unrelated traffic at the exact same moment (a
+big unrelated download finishing, say) would show up on the needle too.
+Whatever it shows is real observed bytes either way, never a simulated or
+interpolated animation standing in for one.
+
+**Scope:** wired into the main dashboard's RUN TEST button specifically
+(`ModernWindow._run_test`) — the only reachable manual "run a speed test
+now" control in the desktop app. The mobile/web dashboard has its own Run
+Test button that hits the same `run_speedtest()` through a different
+(server-side, no Tkinter) code path; it still runs exactly as before,
+just without a matching gauge on the phone — that would need a browser-
+side version of this same idea and wasn't part of what was asked.
+
+**Verified:** a real Tkinter mainloop (not a mocked/synchronous stand-in)
+driving the actual `ModernWindow._run_test` method against a stand-in
+monitor object, with genuine loopback network traffic generated in
+parallel — confirmed the dial's live number actually moves in response to
+real observed bytes (not any kind of scripted animation), confirmed the
+phase correctly flips from the idle-ping wobble to a tracked ramp, and
+confirmed the cross-thread handoff when the background test thread calls
+back into the gauge (`root.after(0, ...)`, the same mechanism the rest of
+this app already uses for thread-safety) actually lands and shows the
+final Download/Upload/Ping numbers. A second check confirmed a failed
+test renders a clear error state instead of throwing. `selftest.py`'s
+full 35-check regression suite still passes clean — this is a desktop-
+only, additive change, so no web route's content moved.
+
+## AI Query button added to every web page
+
+**What you asked:** "add an ai query button to all pages."
+
+**What was actually there before:** free-form "ask the AI anything" only
+existed in the desktop app (EtherApe's Flow Detail `✦ AI:` box, and
+Wireshark Monitor's `❆ AI Query` popup). The web pages only had two
+single-purpose, fixed-prompt AI buttons: the mobile dashboard's health
+summary button, and Top Flow Talkers' `⚠ AI SCAN` inside the 3D view.
+None of the 11 web pages had a general "ask it anything" box.
+
+**What changed:** every page the web server serves (`/`, `/3d`,
+`/sankey`, `/agents`, `/threats`, `/honeypot`, `/talkers`, `/guide`,
+`/monitor`, `/analytics`, `/vdi`) now has a small floating "✦ AI QUERY"
+button. Clicking it opens a popup with a text box; typing a question and
+hitting Ask sends it to the same `/api/ai_analyze` endpoint the Top
+Talkers scan button already uses (so it goes through whatever provider/
+model you have configured — deepseek-r1:7b by default per #70 above — no
+new backend code needed), along with a snapshot of whatever text is
+currently visible on that page. That's deliberate: every one of these 11
+pages is its own bespoke bit of HTML/JS with a completely different data
+shape, so rather than writing 11 separate page-specific "here's my table
+data" integrations (fragile, and a lot of duplicated plumbing for a
+"read the screen and answer" feature), it just reads
+`document.body.innerText` — literally what you're looking at — and lets
+the AI work from that. Ask it "what's the biggest talker right now" on
+Top Talkers, or "what does this mean" on the Guide, and it answers from
+whatever's actually rendered.
+
+One placement wrinkle: every page gets the button bottom-right except
+`/3d`, which keeps it vertically centred on the right edge instead. That
+page's own bottom row is already wall-to-wall with the info panel,
+legend, and the FIREWALL/WORLD VIEW/ATTACK SIM/KILL CONNECTION buttons
+(`#info`/`#legend`/`#killbtn`/`#atkbtn`/`#worldbtn`/`#fwbtn` — all fixed
+at `bottom:14px`) — a bottom-right button there would have sat directly
+on top of `#info`, so it's placed somewhere actually clear on that page
+instead. Checked with a real headless-browser measurement of the
+button's bounding box against both panels — no overlap at 1440px.
+
+One bug caught in verification and fixed before shipping: the agents
+page's whole page script runs right up to a single combined
+`</script></body></html>` with no separate `</script>` line to anchor
+on (every other page closes its script and then has `</body>`/`</html>`
+on their own lines) — the first version of this change spliced the
+widget in *before* that whole combined string, which planted the
+widget's `<div>` markup inside the middle of the page's live JavaScript
+and would have broken its script with a syntax error. Fixed by anchoring
+after `</script>` specifically on that one page, then re-verified with
+`selftest.py`'s "javascript syntax — N script blocks valid" check, which
+confirmed every page's inline script (agents included) still parses.
+
+Colours are the same purple (`#a371f7`/`#c084fc`/`#b98cff`/`#d9c7ff`) the
+app already used to mean "AI" (the mobile page's health-summary output,
+the exported report's analysis box) and are literal hex rather than the
+`@@TOKEN@@` theme tokens most pages use, on purpose — several pages
+theme themselves by replacing specific literal hex codes, and this
+palette was checked against every page's own replace list so the widget
+can't get silently retextured (or accidentally themed away) by a page's
+own find/replace pass.
+
+**Verified:** a real Playwright run against all 11 routes with a mocked
+AI backend confirmed, per page: the button renders on-screen, opens the
+modal on click, the typed question round-trips through
+`/api/ai_analyze` and the mocked answer renders in the popup, and the X
+button closes it again — plus the `/3d`-specific placement check above.
+`selftest.py`'s full regression suite (35 checks) passes clean after
+regenerating the golden baseline for the 11 pages' now-larger byte
+counts — the diffs were exactly the 11 pages this change touched, sizes
+grew by the same widget's worth of HTML/CSS/JS each time, nothing else
+moved.
+
+**Not verified (same limitation as #70):** this device bridge still
+can't reach your real machine's Ollama instance, so the actual AI
+answers you'll see depend on deepseek-r1:7b (or whatever model you have
+configured) actually being installed and running there — everything
+about the button, the popup, and the request it sends was verified for
+real; the quality of what comes back is between you and Ollama.
+
+## Switching the default AI model to deepseek-r1:7b
+
+**What you asked:** use deepseek-r1:7b instead of the current model.
+
+**What changed in the code:** every place a default model name was
+hard-coded (the Flow Detail AI panel's model box, the Settings dialog's
+model box, the Guide's troubleshooting text, and the actual fallback used
+by the live Ollama API call in `_nm_ai_complete`) now defaults to
+`deepseek-r1:7b` instead of `llama3.2`. `_NM_DEFAULT_MODEL`, which drives
+the app's one-time first-run auto-pull/auto-select logic, was updated the
+same way.
+
+**Two things this model needs that the old one didn't, handled rather than
+ignored:**
+- deepseek-r1 is a *reasoning* model — before its real answer, it writes
+  out a `<think>...</think>` block of raw chain-of-thought. Untouched,
+  that block would land straight in the Flow Detail AI panel or break any
+  code expecting clean JSON back. `_nm_ai_complete` now strips it before
+  returning, verified with a mocked Ollama response containing a real
+  `<think>` block: confirmed the tag and its contents are gone and the
+  actual answer text is returned untouched — and separately confirmed a
+  plain response with no `<think>` tag at all still passes through
+  byte-for-byte unchanged, so this is a no-op for any non-reasoning model.
+- The reply token budget (`num_predict`) was 700, sized for a plain
+  instruct model. A reasoning model spends part of that budget on the
+  `<think>` block before it ever gets to the answer, so a tight cap risked
+  the real answer being cut off entirely. Raised to 2000 — it's a ceiling,
+  not a target, so this doesn't slow down a fast model that stops well
+  short of it on its own.
+
+**What I checked before touching anything, since this also affects a
+guarantee the code makes on purpose:** `_nm_ensure_model`'s docstring says
+outright that once a model has been auto-applied once, "any model the
+user picks later is respected and never silently overwritten" — there's a
+marker file specifically to enforce that. Verified this still holds:
+wrote a test that saves a *different* model name ('qwen3:8b') as if you'd
+already picked one, then confirmed the live API call still requests
+'qwen3:8b', not the new default — so changing the default in code cannot
+silently override a model you've deliberately chosen for yourself later.
+
+**One thing I could not do from here, and why:** I don't have a way to
+reach the actual `.nm_ai_model` file on your Windows machine or your live
+Ollama installation from this session — the device bridge only has access
+to the folders you've shared, not arbitrary paths in your Windows user
+profile, and I couldn't reach `localhost:11434` from it either. So this
+ships the new *default* for any fresh install or reset, but your
+currently-running app's saved preference won't jump to deepseek-r1:7b on
+its own. Two ways to actually switch it: type `deepseek-r1:7b` into the
+model box in the app's AI settings (takes effect on your very next AI
+question, no restart needed), or delete `.nm_ai_model` and
+`.nm_ai_model_defaulted` from your Windows user profile so the app's own
+one-time provisioning logic re-applies the new default on next launch
+(this will also trigger a ~4.7GB pull if you don't already have
+deepseek-r1:7b in `ollama list`).
+
+## Top Flow Talkers trace overlay: not all flows had it, and colours needed to be more vibrant
+
+**What you reported after #68 shipped:** not all the flows had the new
+trace animation, and the colours should be more vibrant.
+
+**Missing on most flows -- confirmed and fixed.** The overlay was gated
+behind `bandThick>=20` (pixels). I'd copied that floor from the existing
+"shimmer" effect right above it in the same function, which genuinely
+needs it -- shimmer is a single bright peak sweeping across the band, and
+on a clipped strip thinner than the peak it flashes like a strobe. The
+new trace overlay is a smoothly-scrolling *static* tile, not a moving
+peak, so it doesn't have that problem -- but it inherited the same 20px
+floor anyway, which meant every band thinner than that (in practice, most
+flows whenever one or two hosts dominate the traffic and everything else
+is a long tail of small ones) never got the animation at all. Verified
+with a capture shaped exactly like that -- one big download, a couple of
+mid-size TLS sessions, two tiny DNS blips, all at once -- and confirmed
+in a real rendered screenshot that even the thinnest 8px DNS bands now
+carry the trace. Dropped the floor to 4px, which only excludes bands too
+thin for any texture to read as more than a solid line regardless.
+
+**Colours -- brightened well past the 3D view's own numbers, on purpose.**
+The first pass matched the 3D protocol bars' compositing values exactly
+(0.14-0.36 opacity), on the theory that "look like the 3D bars" meant
+using the same numbers. It doesn't work that way: the 3D bars are WebGL
+with their own bloom pass on top, so an overlay that eases toward a full
+1.0 opacity there still reads as a controlled glow, not a blown-out mess.
+This is a flat 2D canvas with no bloom, so the identical numbers just
+looked dim and washed out. Fixed by decoupling the two: kept the same
+trace pattern and palette (still reads as "the same visual language" as
+the 3D bars), but pushed the 2D-canvas-specific compositing alpha up to
+0.45-0.90, and made the underlying trace lines themselves thicker and
+fully opaque at their core instead of maxing out at 0.95. Confirmed
+visually in the same screenshot -- markedly brighter, still additive
+(`globalCompositeOperation='lighter'`) so it glows on top of each band's
+own colour rather than replacing it.
+
+Full regression suite green (35/0/1, golden `/3d` snapshot regenerated
+again since the content deliberately changed).
+
+## Top Flow Talkers: neon circuit-trace ribbons, and why incoming was an unreadable blur
+
+**What you asked:** make the Top Flow Talkers ribbons look like the
+protocol animated bars in the 3D view, and figure out why the incoming
+flows animate unreadably fast compared to outgoing.
+
+**The look — done.** The 3D view's protocol bars scroll a fixed
+blue/purple glowing right-angle "circuit trace" pattern (`_makeCircuitCanvas`,
+added earlier this session when you sent a reference clip and asked for
+that exact style) as an additive overlay on top of each bar's own colour.
+Built the same pattern for the 2D Top Flow Talkers canvas — a new
+`_makeTalkerCircuitCanvas()` using the identical palette and technique,
+just oriented for a horizontal ribbon instead of a vertical bar — and
+layered it into the existing per-band draw loop with `globalCompositeOperation
+='lighter'`, scrolling in the direction traffic is actually flowing.
+Both views now share one visual language for "traffic is moving" instead
+of two unrelated animation styles for the same concept.
+
+**The "unreadably quick" incoming flows — a real, confirmed bug.** The
+code that sets how fast particles travel and how many appear on a band
+normalised against `maxBytes` — but that was computed only from the
+*largest outgoing flow* (`_talkersBands.filter(b=>b.outgoing)[0]?.bytes`).
+Real traffic is routinely asymmetric — a big incoming download next to a
+tiny outgoing request — so an incoming flow's own bytes very often
+exceeded that "max", pushing its bytes/maxBytes ratio past 1 with nothing
+downstream clamping it. That ratio drives both particle speed (intended
+range 0.04–0.15) and particle count (intended cap of 5).
+
+Built a real reproduction rather than guessing at the size of the
+problem: a synthetic capture with a 400-byte outgoing DNS query and a
+5MB incoming download on the same host — a completely ordinary,
+everyday shape — fed through the real `_ThreeDServer` and rendered in an
+actual headless browser. The numbers it produced speak for themselves:
+
+- Old code: ratio **12,500**, giving a particle speed of **1375** (the
+  intended top end was 0.15) and a particle count of **37,502** (the
+  intended cap was 5). That is not "a bit fast" — that's thousands of
+  overlapping particles each lapping the entire ribbon over a thousand
+  times a second, which is exactly what reads as a dense, unreadable
+  blur instead of distinct traveling flow labels.
+- Fixed code: ratio correctly clamped to **1.0**, speed **0.15**, count
+  **5** — the values the animation was always supposed to produce for
+  the busiest flow on screen.
+
+Fix: `maxBytes` now takes the true maximum across both directions, not
+just outgoing. Verified with the same reproduction against the final
+build, plus a visual check that the incoming particles now render as a
+handful of distinct, readable labels instead of a smear (screenshot on
+file). Full regression suite (35/0/1, golden `/3d` snapshot regenerated
+since its content deliberately changed) is green.
+
+## 3D view: VPN status pill overlapping the header stats, and the scroll-wheel-zoom question
+
+**What you reported:** two screenshots of the 3D view with a green
+"TAILSCALE" pill sitting on top of the nodes/flows/pkts stats in the
+header, making it unreadable, and asked why scroll wheel zooms.
+
+**What I checked first, since this looked like something I broke:** every
+edit I made this session, before this one, was in the desktop EtherApe
+Tkinter window (rail buttons, DNS/SNI, Visited Hosts, the Sankey legend,
+the MIN TRAFFIC slider). None of it touches the web-based 3D view's HTML/
+JS at all — different code path entirely, served by `_ThreeDServer`. I
+did not have a hand in this one going in, but "not written by me this
+session" isn't proof of anything on its own, so I reproduced your exact
+screen instead of just asserting that.
+
+**Scroll wheel zooming — not new, not a bug.** It's documented in the
+app's own built-in Guide, "Interaction" section: "Scroll wheel — zoom
+in/out centred on cursor." The 3D view's own on-screen hint says the same
+thing ("drag·scroll·shift+drag pan"). It's a fixed camera-control feature
+that's been there since before this session, clamped so you can't zoom
+past a hard-coded near/far limit. If it feels like it moved too much per
+notch of the wheel, that's a separate, tunable thing (the `*0.025`
+multiplier on `e.deltaY`) — say so and I'll adjust it, but nothing about
+*whether* it zooms changed.
+
+**The overlapping pill — a real, pre-existing layout bug**, confirmed by
+actually reproducing your screen rather than guessing: I spun up the real
+3D server with your Tailscale connection faked active (49 nodes, 128
+flows, to match your numbers) and loaded the real page in a headless
+Chromium at your screen's approximate width. The VPN status pill
+(`#vpnbanner`) is positioned `left:50%` — dead-centre of the browser
+window — completely independent of the header row it's floating over,
+which lays its own stats out left-to-right starting from the left edge.
+At certain window widths, or once the pill has a real provider name to
+show ("TAILSCALE" is a lot wider than the idle "○ VPN"), the centred pill
+lands directly on top of whatever header text happens to be at screen-
+centre at that width. It measurably collided in the reproduction.
+
+Fix: moved the pill down to sit in its own clear band below both header
+rows (76px from the top — the second row's own bottom edge is at 67px),
+so it can never land on the stats regardless of window width or how long
+the VPN provider's name is. Re-verified with the same real-browser
+reproduction at 1920px, 1440px, and 1280px wide — no overlap at any of
+them, screenshots confirm it visually. (The "18/49 geo" text next to it,
+by the way, isn't broken either — that's a real counter: how many of your
+current nodes have a resolved geographic location out of the total node
+count.)
+
+## MIN TRAFFIC slider — moved to the main toolbar, and its handle was actually invisible
+
+**What you asked:** where's the slider that controls what size of flows
+show up in the EtherApe window, and can it be made more noticeable.
+
+**Where it was:** a real control called MIN TRAFFIC, tucked inside the
+collapsed FILTERS & BLOCKING drawer at the bottom of the window — you had
+to click a small, dim, 7pt-text handle bar to even see it existed.
+
+**A second, independent bug found while moving it:** even once the drawer
+was open, the slider's handle (the little rectangle you drag) was drawn
+with `bg='#020810'` — the exact same near-black as the toolbar background
+it sits on. In Tk, a `Scale` widget's `bg` colour is what the drag handle
+itself is painted with, not just idle background fill (this is the same
+class of bug fixed earlier this session on the timeline scrubber). So the
+handle was rendering, just camouflaged against its own background — you'd
+have had to already know where to click and drag blind to use it at all.
+
+**Fix:**
+- The MIN TRAFFIC label + readout + slider now live on the main toolbar,
+  right next to the protocol FILTER dropdown (both answer "what flows do
+  I actually see"), so they're visible the moment the window opens —
+  no drawer click needed.
+- The slider handle is now bright green (`#39ff14`, matching its own
+  readout colour) with a lighter green while dragging, so it's actually
+  visible against the dark toolbar instead of blending into it.
+- Nothing else in the drawer moved — BPF filter, country search/block,
+  flow-width slider, and BLOCK CC all still work exactly as before, just
+  minus the one relocated control.
+
+**Verified:** a real widget-tree test confirms the MIN TRAFFIC label and
+slider are mapped (visibly on-screen) without ever opening the drawer,
+dragging the slider to 250,000 correctly updates both the internal
+threshold and the "244K" readout live, the handle colour is no longer
+identical to the background, and the drawer's other controls (BLOCK CC
+etc.) are untouched. Full regression suite (rebuild, drawer/fit, legend,
+all-pages, theme, nmap, selftest — 35/0/1) still green against this exact
+build.
 
 ## Sankey legend missing colours — the real bug, found by reading both code paths
 

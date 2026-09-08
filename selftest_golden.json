@@ -81,23 +81,23 @@
   },
   "static": {
     "/": {
-      "bytes": 24325,
-      "sha256": "c98f84371867bb1d14bd4af9c29b1ec9a827477c0ba8d2c7b6500715a0ccd6ac",
+      "bytes": 28563,
+      "sha256": "0b04744f74eebd90775452078f11826eec346a76c5e58ba33f5b97e264210095",
       "status": 200
     },
     "/3d": {
-      "bytes": 195612,
-      "sha256": "8c0b2af5b6c32b3350b6d6e181ae8098927f820a212cc2183c329891af1440e1",
+      "bytes": 206171,
+      "sha256": "1dc294086b4013b616c2560db6925c1e8ac8e1611edb9cb724bdd761eec567e7",
       "status": 200
     },
     "/agents": {
-      "bytes": 5628,
-      "sha256": "2a74a8ddbc5de566e826e5d6608901ca4e952d9a2ee98fd1f90deff87b6a7c74",
+      "bytes": 9866,
+      "sha256": "56e20a279b4b6c1e81cbaa532579818305c0dddbc2ee30c05765a7438746b70f",
       "status": 200
     },
     "/analytics": {
-      "bytes": 7491,
-      "sha256": "9552ebe36403ec8cbc7bb4890056eba70db3b505cdbc08d5f6b579731ecd92c1",
+      "bytes": 11729,
+      "sha256": "ab1c04743dc6082bb5fe2544316922ca945179321149391c059ed1c3087b45da",
       "status": 200
     },
     "/day-map.jpg": {
@@ -106,13 +106,13 @@
       "status": 200
     },
     "/guide": {
-      "bytes": 73099,
-      "sha256": "d3d4cc5f95b9ba5334e53b343ad3d9afbe019af527b2482f00960a6155bf0c2a",
+      "bytes": 77418,
+      "sha256": "16f9aeb8101f5813ac8af60de850c5d505154b88074d24c3e2459cf742853a14",
       "status": 200
     },
     "/honeypot": {
-      "bytes": 16068,
-      "sha256": "76809d1031dd0558660e05d7b8cfa2491f878af587ba2236428d64fe52ef9e83",
+      "bytes": 20306,
+      "sha256": "a7825e0d9b5979789649fc7a9587609af1763ae5dc5c45927e34abbd58a3dde1",
       "status": 200
     },
     "/icon-192.png": {
@@ -131,8 +131,8 @@
       "status": 200
     },
     "/monitor": {
-      "bytes": 18114,
-      "sha256": "2c12fb6440b874da62c90e305bea65bb63c83e8c286af6822e893c810f283411",
+      "bytes": 22352,
+      "sha256": "eb879b08d5d81c974afef79589e60562b42fd543dd60c78e71c2be54f12f9ae6",
       "status": 200
     },
     "/radar-map.png": {
@@ -141,8 +141,8 @@
       "status": 200
     },
     "/sankey": {
-      "bytes": 31825,
-      "sha256": "681f338507458b4e2949bdb30f6851e01b1b5255762ce3d5b0cc25a8f1589c1a",
+      "bytes": 36063,
+      "sha256": "79dffb9c98c8119de7a647607f840949ed47bc1eac472a1331f6b32cfc438a36",
       "status": 200
     },
     "/sonar.mp3": {
@@ -156,18 +156,18 @@
       "status": 200
     },
     "/talkers": {
-      "bytes": 8234,
-      "sha256": "58da4b71a021d67569f29eb172837d8e638f59ee26d7b35f607a0b4fb4df5251",
+      "bytes": 12472,
+      "sha256": "a7068db4aad6965acb12d6aa627a0be589b9b7a079c58e1dac80f8c4e30337dd",
       "status": 200
     },
     "/threats": {
-      "bytes": 11137,
-      "sha256": "831c1ea75569f0682f03c8f99a63d837ebd84fb890a1df122550a8b13536de46",
+      "bytes": 15375,
+      "sha256": "47dcd8eebfd56bd08d278f432c2a77483576e093dd39bfec1a7667ae4f510b49",
       "status": 200
     },
     "/vdi": {
-      "bytes": 5077,
-      "sha256": "d20d7707cfcd44e6309fa1edf48fdad41b20f3a8bb382ab47294c1cb3f662d43",
+      "bytes": 9315,
+      "sha256": "d3460e291607244d0540cef199bd82a179ad8f84ccc5bf7f25a7fc64c4561554",
       "status": 200
     },
     "/world-map.jpg": {

@@ -2569,7 +2569,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-25adc03e'
+_NM_BUILD_ID = 'b-8854f5c0'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -7618,6 +7618,26 @@ class SpeedTestMonitor:
         self._dns_dirty    = False  # signals on_tick to redraw chart
         self._running_dns    = False
         self._running_manual = False
+        # Separate flag for the *automatic* scheduler (run_continuous), so a
+        # manual test (dashboard button, System Monitor benchmark tab, or the
+        # web /api/run_test endpoint -- all three already check
+        # _running_manual before starting) and the automatic scheduled test
+        # can each tell whether the OTHER kind is already in flight. Before
+        # this, nothing stopped run_continuous from firing while a manual
+        # test was mid-run (or vice versa): two speedtest/librespeed
+        # processes racing for the same link at once, each stealing the
+        # other's bandwidth -- which is exactly the kind of run that logs a
+        # believable-looking but garbage number (huge ping/jitter/loss, weird
+        # throughput) and can make the dashboard and the console appear to
+        # disagree, because they can end up showing two different finished
+        # tests rather than the same one.
+        self._running_auto   = False
+
+    def _test_busy(self):
+        """True if a speed test -- manual (any of the three UI/API entry
+        points) or automatic (run_continuous) -- is already in progress."""
+        return bool(getattr(self, '_running_manual', False) or
+                    getattr(self, '_running_auto', False))
 
     # ── Config / data persistence ──────────────────────────────────────────────
     def _load_config(self):
@@ -7721,12 +7741,38 @@ class SpeedTestMonitor:
 
     def _load_data(self):
         if USE_DB and getattr(self, '_db', None):
-            try:
-                d = self._db.load_data()
-                self._dns_history = list(zip(d['dns_timestamps'], d['dns_values']))
-                return d
-            except Exception as e:
-                print(f'  DB load error: {e}, falling back to JSON')
+            # Retry a couple of times with a short backoff before giving up.
+            # WAL-mode reads essentially never block on a concurrent writer,
+            # but this app runs 7+ background worker threads (device scan,
+            # latency, traffic, flows, briefing, VDI, topology) all writing to
+            # the same SQLite file on their own per-thread connections, on
+            # top of the speedtest/DNS scheduler -- under real sustained load
+            # a transient SQLITE_BUSY here is plausible even if it never
+            # showed up in an isolated two-thread test. Previously a single
+            # failed read silently fell back to the JSON file, which -- once
+            # USE_DB is on -- is never written to again (see _save_data) and
+            # so is frozen at whatever it held from the last JSON-mode run.
+            # That combination (silent fallback + a JSON file that can be
+            # months stale) is exactly the shape of "dashboard shows an old
+            # number forever while the log keeps logging new ones": nothing
+            # here proves that's what happened on this install, but it's the
+            # most plausible mechanism found, so it's worth closing off
+            # regardless, and the visible/logged failure below means a
+            # repeat is diagnosable instead of silent next time.
+            _last_err = None
+            for _attempt in range(3):
+                try:
+                    d = self._db.load_data()
+                    self._dns_history = list(zip(d['dns_timestamps'], d['dns_values']))
+                    self._db_load_ok = True
+                    return d
+                except Exception as e:
+                    _last_err = e
+                    if _attempt < 2:
+                        time.sleep(0.15 * (_attempt + 1))
+            self._db_load_ok = False
+            log.error(f'_load_data: DB read failed after {_attempt + 1} attempts: {_last_err}')
+            print(f'  DB load error: {_last_err}, falling back to JSON')
         # JSON fallback
         if Path(DATA_FILE).exists():
             try:
@@ -7933,6 +7979,15 @@ class SpeedTestMonitor:
                 _exc('run_speedtest.alerts')
 
             self._data_dirty = True   # signal on_tick to reload charts
+            # Returned for callers that want the just-measured numbers directly
+            # (the live speed-gauge popup) instead of re-reading self.data --
+            # purely additive: every existing caller (the continuous scheduler,
+            # the web /api/run_test handler, the dead SystemMonitorWindow
+            # benchmark tab) already ignores run_speedtest's return value, so
+            # nothing about their behaviour changes.
+            return {'ok': True, 'download': dl, 'upload': ul, 'ping': pg,
+                    'jitter': _jit, 'loss': _loss, 'bloat_ms': _bloat_ms,
+                    'bloat_grade': _bgrade}
         except Exception as e:
             try:
                 _pinger.stop()
@@ -7945,6 +8000,7 @@ class SpeedTestMonitor:
                     _nm_check_alerts(self, outage=True)
             except Exception:
                 _exc('run_speedtest.outage')
+            return {'ok': False, 'error': str(e)}
 
     DNS_HOSTS = ['google.com', 'cloudflare.com', 'microsoft.com',
                  'amazon.com', 'bbc.co.uk', 'github.com']
@@ -9272,14 +9328,32 @@ class SpeedTestMonitor:
 
     def run_continuous(self):
         while not getattr(self, '_stopping', False):
-            self.run_speedtest()
-            if getattr(self, '_stopping', False):
-                break
-            # Run DNS check after each speed test
-            try:
-                self.run_dns_check()
-            except Exception as _e:
-                print(f'DNS check error: {_e}')
+            # Don't start the scheduled test on top of a manual one (dashboard
+            # RUN TEST button, System Monitor benchmark tab, or the web
+            # /api/run_test endpoint) -- two speedtest/librespeed processes
+            # racing for the same link at once corrupts BOTH readings (each
+            # steals the other's bandwidth, so both come back with inflated
+            # ping/jitter/loss and understated throughput) and is exactly the
+            # kind of thing that makes the log and the dashboard look like
+            # they disagree, because they can end up reflecting two different
+            # finished tests instead of one. If a manual test is already
+            # running, skip this cycle entirely rather than queueing or
+            # blocking -- the next interval will try again.
+            if getattr(self, '_running_manual', False):
+                log.info('run_continuous: skipping this cycle, a manual test is already running')
+            else:
+                self._running_auto = True
+                try:
+                    self.run_speedtest()
+                finally:
+                    self._running_auto = False
+                if getattr(self, '_stopping', False):
+                    break
+                # Run DNS check after each speed test
+                try:
+                    self.run_dns_check()
+                except Exception as _e:
+                    print(f'DNS check error: {_e}')
             # Sleep in slices instead of one long block, so a shutdown request
             # is picked up in <1s rather than waiting out the whole interval.
             _total = self._interval_minutes * 60
@@ -9714,6 +9788,27 @@ class EtherApeWindow:
         proto_cb.pack(side='left',padx=(0,6),ipady=2)
         proto_cb.bind('<<ComboboxSelected>>',lambda e:setattr(self,'_filter_proto',self._proto_var.get()))
         sep(tb1)
+        # ── Min-flow-size threshold: was buried inside the collapsed FILTERS &
+        # BLOCKING drawer below, where Trevor couldn't find it. Moved up to the
+        # always-visible top toolbar, right next to the protocol FILTER, since
+        # both answer the same question ("what flows do I actually see?"). ──
+        tk.Label(tb1,text='MIN TRAFFIC',bg='#020810',fg='#1a3a5a',
+                 font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,4))
+        self._thresh_lbl=tk.Label(tb1,text='ALL',bg='#020810',fg='#39ff14',
+                                   font=(_NM_MONO, 9,'bold'),width=6)
+        self._thresh_lbl.pack(side='left',padx=(0,4))
+        def _on_thresh(v):
+            v=float(v); self._min_bytes_thresh=v
+            if v<1: self._thresh_lbl.config(text='ALL')
+            elif v<1000: self._thresh_lbl.config(text=f'{v:.0f}B')
+            elif v<1e6: self._thresh_lbl.config(text=f'{v/1024:.0f}K')
+            else: self._thresh_lbl.config(text=f'{v/1048576:.1f}M')
+        tk.Scale(tb1,from_=0,to=5000000,resolution=1000,orient='horizontal',
+                 command=_on_thresh,bg='#39ff14',fg='#39ff14',troughcolor='#0a1220',
+                 activebackground='#7fff5c',highlightthickness=0,sliderrelief='flat',bd=0,
+                 sliderlength=18,width=12,length=140,showvalue=False
+                 ).pack(side='left',padx=(0,8))
+        sep(tb1)
         # ── Layout toggle: RADIAL (original) <-> SANKEY (bipartite ribbons) ──
         _sk0 = (self._layout_mode == 'sankey')
         self._layout_btn = tk.Button(
@@ -9937,23 +10032,10 @@ class EtherApeWindow:
                                     font=(_NM_MONO, 7,'bold'))
         self._country_lbl.pack(side='left',padx=(0,6))
         # Country block
-        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
-        tk.Label(tb2,text='MIN TRAFFIC',bg='#020810',fg='#1a3a5a',
-                 font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,4))
-        self._thresh_lbl=tk.Label(tb2,text='ALL',bg='#020810',fg='#39ff14',
-                                   font=(_NM_MONO, 9,'bold'),width=6)
-        self._thresh_lbl.pack(side='left',padx=(0,4))
-        def _on_thresh(v):
-            v=float(v); self._min_bytes_thresh=v
-            if v<1: self._thresh_lbl.config(text='ALL')
-            elif v<1000: self._thresh_lbl.config(text=f'{v:.0f}B')
-            elif v<1e6: self._thresh_lbl.config(text=f'{v/1024:.0f}K')
-            else: self._thresh_lbl.config(text=f'{v/1048576:.1f}M')
-        tk.Scale(tb2,from_=0,to=5000000,resolution=1000,orient='horizontal',
-                 command=_on_thresh,bg='#020810',fg='#39ff14',troughcolor='#0a1220',
-                 activebackground='#39ff14',highlightthickness=0,
-                 sliderlength=18,width=12,length=140,showvalue=False
-                 ).pack(side='left',padx=(0,8))
+        # NOTE: the MIN TRAFFIC (flow-size) slider used to live here, buried in
+        # this collapsed drawer -- Trevor couldn't find it. It now lives on the
+        # always-visible top toolbar (tb1, next to the FILTER dropdown) instead;
+        # see that block for the widget + self._min_bytes_thresh/_thresh_lbl.
         tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
         tk.Label(tb2,text='BLOCK CC',bg='#020810',fg='#1a3a5a',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,6))
@@ -10202,11 +10284,11 @@ class EtherApeWindow:
         self._flow_ai_io_label=tk.Label(ai_ctrl,text='model:',bg=self._PANEL,
                                         fg=self._TICK,font=(_NM_MONO, 8))
         self._flow_ai_io_label.pack(side='left',padx=(8,2))
-        # Model box (Ollama) — e.g. llama3.2 / qwen3:8b / phi4-mini
+        # Model box (Ollama) — e.g. deepseek-r1:7b / llama3.2 / qwen3:8b / phi4-mini
         self._flow_ai_model_entry=tk.Entry(ai_ctrl,bg='#0d2235',fg=self._TEXT,
                                            insertbackground=self._TEXT,relief='flat',
                                            font=(_NM_MONO, 9),width=20)
-        self._flow_ai_model_entry.insert(0,_ai_rf('.nm_ai_model','llama3.2') or 'llama3.2')
+        self._flow_ai_model_entry.insert(0,_ai_rf('.nm_ai_model','deepseek-r1:7b') or 'deepseek-r1:7b')
         def _save_ai_model(_e=None):
             _ai_wf('.nm_ai_model',self._flow_ai_model_entry.get()); return 'break'
         self._flow_ai_model_entry.bind('<Return>',_save_ai_model)
@@ -14959,7 +15041,7 @@ class EtherApeWindow:
                          + (_err + '\n\n' if _err else '')
                          + 'Ollama (default, no key): make sure `ollama serve` is '
                            'running and the model is pulled (e.g. `ollama pull '
-                           'llama3.2`). The model box must match a name from '
+                           'deepseek-r1:7b`). The model box must match a name from '
                            '`ollama list`. Or switch the provider to Anthropic.')
                 self.root.after(0,lambda a=ans:self._flow_ai_set(a))
             except Exception as e:
@@ -17930,7 +18012,7 @@ class WiresharkWindow:
 
         tk.Label(kf, text='model:', bg='#08041a', fg='#7c5cbf',
                  font=(_NM_MONO, 8)).pack(side='left', padx=(0, 4))
-        model_var = tk.StringVar(value=_rdf(_model_file, 'llama3.2') or 'llama3.2')
+        model_var = tk.StringVar(value=_rdf(_model_file, 'deepseek-r1:7b') or 'deepseek-r1:7b')
         model_entry = tk.Entry(kf, textvariable=model_var, width=16,
                                bg='#0d0825', fg='#c084fc', insertbackground='#c084fc',
                                relief='flat', font=(_NM_MONO, 9),
@@ -17993,7 +18075,7 @@ class WiresharkWindow:
                     try: w.pack_forget()
                     except Exception: _exc_debug('_sync_provider')
                 if not model_var.get().strip() or model_var.get().startswith('claude'):
-                    model_var.set(_rdf(_model_file, 'llama3.2') or 'llama3.2')
+                    model_var.set(_rdf(_model_file, 'deepseek-r1:7b') or 'deepseek-r1:7b')
             try:
                 ai_status.set('Provider: ' + ('Anthropic' if prov == 'anthropic'
                                               else 'Ollama (local, no key)'))
@@ -20206,7 +20288,7 @@ class UserGuideWindow:
             ('bullet', 'Try the /health endpoint in a browser: http://<ip>:<port>/health'),
             ('bullet', 'If using a token, ensure it exactly matches what is set on the agent'),
             ('h2', 'AI Query returns an error'),
-            ('bullet', 'AI runs locally via Ollama by default — no API key needed. Install Ollama from ollama.com and pull a model (e.g. ollama pull llama3.2)'),
+            ('bullet', 'AI runs locally via Ollama by default — no API key needed. Install Ollama from ollama.com and pull a model (default is deepseek-r1:7b — ollama pull deepseek-r1:7b — or a faster non-reasoning model like llama3.2)'),
             ('bullet', 'The app starts Ollama automatically on launch; if that fails, run "ollama serve" manually, and make sure the model name matches one from "ollama list"'),
             ('bullet', 'Only if you switch the provider to Anthropic: check your API key and that the machine has outbound HTTPS access to api.anthropic.com'),
             ('bullet', 'Start a capture first — the AI needs packet data to analyse'),
@@ -20466,15 +20548,22 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
     provider = (_rf('.nm_ai_provider', 'ollama') or 'ollama').lower()
 
     if provider in ('ollama', 'local'):
-        model = _rf('.nm_ai_model', 'llama3.2') or 'llama3.2'
+        model = _rf('.nm_ai_model', 'deepseek-r1:7b') or 'deepseek-r1:7b'
         base = (_rf('.nm_ai_url', 'http://localhost:11434')
                 or 'http://localhost:11434').rstrip('/')
         try:
             body = {'model': model, 'prompt': prompt, 'stream': False,
-                    # Keep the model resident so later asks don't cold-load, and
-                    # cap the reply so a "thinking" model can't run for minutes.
+                    # Keep the model resident so later asks don't cold-load.
                     'keep_alive': '30m',
-                    'options': {'num_predict': 700, 'num_ctx': 8192,
+                    # num_predict was 700 -- fine for a plain instruct model,
+                    # but a reasoning model (deepseek-r1 and friends) spends a
+                    # chunk of this budget on its own <think>...</think>
+                    # chain-of-thought BEFORE the actual answer, so a tight
+                    # cap risked truncating the real answer entirely. Raised
+                    # to give the thinking room without being unbounded --
+                    # it's a ceiling, not a target, so a fast/non-reasoning
+                    # model still stops at its own natural end regardless.
+                    'options': {'num_predict': 2000, 'num_ctx': 8192,
                                 'temperature': 0.4}}
             if want_json:
                 body['format'] = 'json'
@@ -20484,6 +20573,15 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 out = _j.loads(r.read().decode())
             resp = out.get('response', '')
+            # Reasoning models (deepseek-r1 etc.) prefix their real answer with
+            # a <think>...</think> block of raw chain-of-thought -- useful for
+            # debugging the model, useless (and confusing) pasted into an
+            # analysis panel or JSON parser here, so strip it before anything
+            # else sees this text. Harmless no-op for a model that never
+            # emits the tag.
+            if resp:
+                resp = re.sub(r'<think>.*?</think>', '', resp,
+                              flags=re.DOTALL | re.IGNORECASE).strip()
             if resp:
                 return resp, ''
             return None, (out.get('error', '') or 'Ollama returned an empty response.')
@@ -20508,15 +20606,17 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
                 how = 'curl -fsSL https://ollama.com/install.sh | sh'
             return None, ("Ollama is not installed, so AI analysis is "
                           "unavailable. Everything else works normally.\n\n"
-                          "To enable it:\n    %s\n    ollama pull llama3.2\n\n"
+                          "To enable it:\n    %s\n    ollama pull deepseek-r1:7b\n\n"
                           "Or switch the provider to Anthropic in the AI settings "
                           "if you have an API key." % how)
         except TimeoutError:
-            return None, ('Ollama timed out after %ss. For a big prompt like a '
-                          'capture summary this usually means the model is too '
-                          'slow on this machine \u2014 try a smaller one (e.g. '
-                          '`ollama pull llama3.2`, then set model to llama3.2). '
-                          'Thinking models such as qwen3 are much slower. The '
+            return None, ('Ollama timed out after %ss. deepseek-r1:7b is a '
+                          '"thinking" model -- it reasons through the answer '
+                          'before writing it, which is slower than a plain '
+                          'instruct model, especially on modest hardware. If '
+                          'this keeps happening, try a faster non-thinking '
+                          'model instead (e.g. `ollama pull llama3.2`, then '
+                          'set model to llama3.2). The '
                           'model now stays loaded for 30 minutes, so a second '
                           'attempt is normally much quicker.' % timeout)
         except Exception as e:
@@ -22111,13 +22211,21 @@ def _nm_find_ollama():
     return None
 
 
-_NM_DEFAULT_MODEL = 'llama3.2'
+_NM_DEFAULT_MODEL = 'deepseek-r1:7b'
 
 
 def _nm_ensure_model(base, exe=None):
-    """Make sure the default model (llama3.2) is installed in Ollama, pulling it
-    if missing, and make it the app's model on first run. llama3.2 is small and
-    non-'thinking', so capture/AI prompts answer in seconds rather than minutes.
+    """Make sure the default model (deepseek-r1:7b) is installed in Ollama,
+    pulling it if missing, and make it the app's model on first run.
+
+    Was llama3.2 -- small, non-'thinking', answers in seconds. deepseek-r1:7b
+    is a reasoning model instead: bigger download (~4.7GB vs ~2GB) and slower
+    per answer since it reasons through a <think>...</think> chain-of-thought
+    before writing the actual reply (which _nm_ai_complete strips back out
+    before it reaches any UI or JSON parser). Traded the speed for reasoning
+    quality on request -- if it's too slow on a given machine, llama3.2 (or
+    another plain instruct model) is still one model-box edit away.
+
     A marker file records that the default was applied once, so any model the
     user picks later is respected and never silently overwritten."""
     import json as _j, urllib.request, subprocess, os
@@ -25488,7 +25596,7 @@ class SystemMonitorWindow:
                  command=self._start_internet_benchmark).pack(pady=10)
 
     def _start_internet_benchmark(self):
-        if getattr(self._monitor, '_running_manual', False):
+        if self._monitor._test_busy():
             self._bench_status_var.set('A speed test is already running…')
             return
         self._monitor._running_manual = True
@@ -25961,7 +26069,7 @@ class _ThreeDServer:
         mon = getattr(self, '_monitor', None)
         if mon is None:
             handler._json(200, {'ok': False, 'error': 'no monitor'}); return
-        if getattr(mon, '_running_manual', False):
+        if mon._test_busy():
             handler._json(200, {'ok': True, 'running': True, 'note': 'already running'}); return
         import threading
         def _w():
@@ -26473,6 +26581,109 @@ class _ThreeDServer:
             'attack_sim': _NM_ATTACK_ON,
         })
 
+    def _nm_ai_widget_html(self, pos='br'):
+        # A single, self-contained "AI Query" floating button + modal that
+        # gets dropped into every web page this server serves (Trevor asked
+        # for one on all pages, not just the desktop app's Flow Detail /
+        # Wireshark Monitor AI boxes). It purposely does NOT try to hook
+        # into each page's own data model -- every page here is its own
+        # bespoke HTML/CSS/JS blob with a different render()/data shape, so
+        # reaching into each one individually would be a lot of fragile,
+        # page-specific plumbing for a "read the screen and answer" feature.
+        # Instead it just grabs document.body.innerText (whatever the user
+        # is actually looking at right now, already formatted for reading)
+        # and sends that plus the typed question to the existing
+        # /api/ai_analyze endpoint -- the same provider-agnostic completion
+        # path the Top Talkers "AI SCAN" button and the mobile page's
+        # health-summary button already use, so it honours whatever model
+        # Trevor has configured (deepseek-r1:7b by default) with no new
+        # backend code needed.
+        #
+        # Colours are the app's existing "AI = purple" convention
+        # (#a371f7/#c084fc/#b98cff/#d9c7ff — see the mobile aiBtn handler
+        # and the exported report's #ai-response block) and are deliberately
+        # literal hex, not @@TOKEN@@ theme tokens, because several pages
+        # theme themselves by replacing specific literal hex codes
+        # (#c8dff0, #6a9ab8, #050d1a, #040c18, #0a1828, #12283e, #0a1e30,
+        # #12283f, #0c1c30, #061426, #0a1728 -- checked every _build_*_html
+        # theming block below for these) — this widget's palette avoids all
+        # of those so it can't be silently retextured by a page's own
+        # find/replace pass, same as the app's other fixed purple accents.
+        #
+        # pos='br' (default): fixed bottom-right, used on every page. /3d is
+        # the one exception (pos='mr') -- its own bottom row is already
+        # packed edge-to-edge with #legend/#info/#killbtn/#atkbtn/#worldbtn/
+        # #fwbtn (see their CSS in _build_3d_html), so a bottom-right button
+        # there would sit right on top of #info. Middle-right, vertically
+        # centred, is clear on that page's layout instead.
+        _pos_css = ('bottom:16px;right:16px' if pos == 'br' else
+                    'top:50%;right:14px;transform:translateY(-50%)')
+        return r'''
+<div id="nmAiBtn" title="Ask the AI about this page" style="position:fixed;@@AIPOS@@;z-index:99990;
+  background:rgba(120,60,220,0.16);border:1px solid #a371f7;color:#c084fc;
+  font:700 12px Consolas,'DejaVu Sans Mono',monospace;padding:9px 15px;border-radius:22px;
+  cursor:pointer;letter-spacing:.5px;box-shadow:0 2px 14px rgba(0,0,0,.45);user-select:none">&#10022; AI QUERY</div>
+<div id="nmAiModal" style="display:none;position:fixed;inset:0;z-index:99991;background:rgba(2,4,10,.72);
+  align-items:center;justify-content:center">
+  <div style="width:min(560px,92vw);max-height:80vh;display:flex;flex-direction:column;background:#0a0e18;
+    border:1px solid #a371f7;border-radius:10px;box-shadow:0 12px 44px rgba(0,0,0,.6);overflow:hidden">
+    <div style="display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #2a1a4a;
+      background:rgba(120,60,220,0.08)">
+      <span style="color:#c084fc;font:700 13px Consolas,monospace;letter-spacing:1px;flex:1">&#10022; ASK THE AI</span>
+      <span id="nmAiClose" style="cursor:pointer;color:#7a94ad;font-size:17px;padding:0 4px;line-height:1">&times;</span>
+    </div>
+    <div style="padding:14px;overflow-y:auto;flex:1">
+      <div style="color:#5a7a94;font-size:11px;margin-bottom:8px;line-height:1.5">
+        Asks the local AI about whatever is currently on screen on this page.</div>
+      <textarea id="nmAiInput" rows="2" placeholder="e.g. what stands out here right now?"
+        style="width:100%;background:#04070d;border:1px solid #2a1a4a;color:#d9e8f5;border-radius:6px;
+        padding:8px;font:12px Consolas,monospace;resize:vertical;outline:none;box-sizing:border-box"></textarea>
+      <div style="text-align:right;margin-top:8px">
+        <button id="nmAiAsk" style="background:rgba(120,60,220,0.18);border:1px solid #a371f7;
+          color:#c084fc;font:700 11px Consolas,monospace;padding:7px 18px;border-radius:6px;cursor:pointer">ASK</button>
+      </div>
+      <div id="nmAiOut" style="display:none;margin-top:12px;white-space:pre-wrap;font-size:12px;
+        line-height:1.6;color:#d9c7ff;border-top:1px solid #1a2438;padding-top:10px"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById('nmAiBtn'), modal=document.getElementById('nmAiModal'),
+      closeX=document.getElementById('nmAiClose'), ask=document.getElementById('nmAiAsk'),
+      inp=document.getElementById('nmAiInput'), out=document.getElementById('nmAiOut');
+  if(!btn||!modal) return;
+  function openModal(){modal.style.display='flex';inp.focus();}
+  function closeModal(){modal.style.display='none';}
+  btn.addEventListener('click',openModal);
+  closeX.addEventListener('click',closeModal);
+  modal.addEventListener('click',function(e){if(e.target===modal)closeModal();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&modal.style.display==='flex')closeModal();});
+  function askNow(){
+    var q=(inp.value||'').trim(); if(!q) return;
+    ask.disabled=true; var t0=ask.textContent; ask.textContent='ASKING…';
+    out.style.display='block'; out.style.color='#b98cff'; out.textContent='Asking the local AI…';
+    var ctx=(document.body.innerText||'').slice(0,4000);
+    var prompt='You are a network monitoring assistant embedded in Vanguard Flow NetSentinel. '
+      +'Below is the text currently visible on the \''+(document.title||'this')+'\' page. '
+      +'Answer the question clearly and concisely in plain English, using short sentences '
+      +'or bullets, no markdown headers.\n\nON-SCREEN DATA:\n'+ctx+'\n\nQUESTION: '+q;
+    fetch('/api/ai_analyze',{method:'POST',headers:{'Content-Type':'text/plain'},
+      body:JSON.stringify({prompt:prompt})})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        out.textContent=d.text||(d.error?('AI unavailable: '+d.error):'No response');
+        out.style.color=d.text?'#d9c7ff':'#ffb45a';
+      })
+      .catch(function(e){out.textContent='Error: '+e.message;out.style.color='#ff5d73';})
+      .then(function(){ask.disabled=false;ask.textContent=t0;});
+  }
+  ask.addEventListener('click',askNow);
+  inp.addEventListener('keydown',function(e){if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))askNow();});
+})();
+</script>
+'''.replace('@@AIPOS@@', _pos_css)
+
     def _build_3d_html(self):
         # >>>ASSET:3d.html  — edit web/3d.html, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
@@ -26643,7 +26854,18 @@ html,body{max-width:100%;overflow-x:hidden}
   <div id="aiBody" style="padding:14px 16px;color:#c8dff0;font-size:12px;line-height:1.65;
     white-space:pre-wrap;overflow-y:auto;max-height:62vh"></div>
 </div>
-<div id="vpnbanner" title="" style="position:fixed;top:4px;left:50%;
+<!-- top:76px, not top:4px -- this banner is independently centered
+     (left:50%) with no awareness of what #hud/#toolbar are showing on
+     either side of screen-center. At top:4px it sat squarely inside the
+     #hud row (0-39px) and #toolbar row (34-67px), so on a window narrow
+     enough, or once VPN detection had a real provider name to show
+     ("TAILSCALE" instead of the idle "VPN"), it landed directly on top of
+     the nodes/flows/pkts stats and made them unreadable -- confirmed by
+     rendering this exact page in a real headless browser at 1440px and
+     1920px wide with a fake active-Tailscale status. 76px clears both
+     rows (toolbar's own bottom edge is 67px) regardless of window width
+     or how long the provider name is. -->
+<div id="vpnbanner" title="" style="position:fixed;top:76px;left:50%;
   transform:translateX(-50%);z-index:30;padding:2px 9px;border-radius:5px;
   font-family:monospace;font-size:9px;font-weight:bold;letter-spacing:.8px;
   pointer-events:none;background:rgba(0,0,0,0);color:#6a9ab8;border:1px solid transparent;
@@ -28839,6 +29061,53 @@ let _talkers3DMode=false,_t3dRAF=null,_t3dRenderer=null,_t3dDrag=false,_t3dLX=0,
 let _t3dRotX=0.28,_t3dRotY=0.12,_t3dZoom=17,_t3dParts=[];
 let _talkersBands=[],_talkersBandsTarget=[],_talkersEvents=[],_radarFlowsAll=[];
 let _dnsMap={},_dnsRequested={};
+
+/* Neon circuit-trace overlay for the Top Talkers ribbons -- the same
+   glowing right-angle-trace look the 3D view's protocol bars scroll
+   underneath their live traffic (see _makeCircuitCanvas near the 3D scene
+   setup). Built once as a tileable pattern here too, in the same fixed
+   blue/purple palette, so this 2D "sankey" panel and the 3D scene read as
+   one visual language for "traffic is moving" instead of two unrelated
+   animation styles for the same concept. Oriented for a HORIZONTAL tile
+   (traces zigzag in Y, repeat along X) since these ribbons flow left-right
+   or right-left, unlike the 3D bars' vertical length axis. */
+function _makeTalkerCircuitCanvas(){
+  const W=640,H=72,cv=document.createElement('canvas');
+  cv.width=W;cv.height=H;
+  const x=cv.getContext('2d');
+  x.clearRect(0,0,W,H);
+  // Bolder + more saturated than the first pass -- Trevor asked for more
+  // vibrant colour after seeing this at its original (3D-bar-matching)
+  // strength, which reads dim on a 2D canvas ribbon that has no bloom/HDR
+  // the way the WebGL 3D scene does. Thicker lines and stronger glow
+  // passes here; the actual brightness boost is in the compositing alpha
+  // at the call site below (0.45-0.90 now, was 0.14-0.36).
+  const traces=[{y:H*0.28,hex:'#a6ecff',w:3.2},{y:H*0.52,hex:'#8fb4ff',w:2.7},
+                {y:H*0.74,hex:'#d7a8ff',w:2.2}];
+  traces.forEach(tr=>{
+    const N=14+Math.floor(Math.random()*5);      // right-angle step segments
+    const yPos=[tr.y];
+    for(let i=1;i<N;i++){
+      let vy=tr.y+(Math.random()<0.5?-1:1)*Math.random()*H*0.24;
+      yPos.push(Math.max(H*0.1,Math.min(H*0.9,vy)));
+    }
+    yPos.push(tr.y);                              // back to the start Y -- seamless tile
+    x.beginPath();x.moveTo(0,yPos[0]);
+    for(let i=1;i<yPos.length;i++){
+      const nx=Math.round(W*i/N);
+      x.lineTo(nx,yPos[i-1]);                     // horizontal run
+      x.lineTo(nx,yPos[i]);                       // right-angle jump to the next step
+    }
+    x.lineJoin='miter';x.lineCap='square';x.strokeStyle=tr.hex;
+    x.globalAlpha=0.24;x.lineWidth=tr.w*7;x.stroke();
+    x.globalAlpha=0.45;x.lineWidth=tr.w*3;x.stroke();
+    x.globalAlpha=1.0; x.lineWidth=tr.w;x.stroke();
+    x.globalAlpha=1;
+  });
+  return cv;
+}
+const _talkerCircuitCanvas=_makeTalkerCircuitCanvas();
+let _talkerCircuitPattern=null;   // created lazily from the talkers canvas's own 2D context
 setInterval(()=>{
   const mk=Object.keys(_dnsMap); if(mk.length>2000) mk.slice(0,500).forEach(k=>{delete _dnsMap[k];delete _dnsRequested[k];});
   const rk=Object.keys(_dnsRequested); if(rk.length>2000) rk.slice(0,500).forEach(k=>delete _dnsRequested[k]);
@@ -29645,7 +29914,18 @@ function _animateTalkers(){
   });
   const topSrc=_talkersBands._topSrc||'';
   const xL=_talkersBands._xL,xR=_talkersBands._xR,PAD=_talkersBands._PAD;
-  const maxBytes=_talkersBands.filter(b=>b.outgoing)[0]?.bytes||1;
+  // Was `_talkersBands.filter(b=>b.outgoing)[0]?.bytes` -- the largest OUTGOING
+  // flow only. Real traffic is usually asymmetric (a big incoming download vs
+  // a tiny outgoing request), so an incoming band's own bytes routinely
+  // exceeded this "max", pushing its bytes/maxBytes ratio past 1 with no
+  // clamp anywhere downstream. That ratio drives both particle speed
+  // (0.04 + ratio*0.11) and particle count (2 + round(ratio*3), "max 5" only
+  // held if ratio<=1) -- so a heavy incoming flow could get several times
+  // the intended particle count all moving several times the intended speed,
+  // which is exactly what made incoming look like an unreadable blur instead
+  // of the same clean, readable motion outgoing bands had. Fixed by taking
+  // the true max across BOTH directions, so ratio is always <=1.
+  const maxBytes=_talkersBands.reduce((m,b)=>Math.max(m,b.bytes),1);
 
   document.getElementById('talkersSubtitle').textContent=
     'source: '+_resolveName(topSrc)+'  •  '+_talkersBands.filter(b=>b.outgoing).length+' flows out / '+_talkersBands.filter(b=>!b.outgoing).length+' in';
@@ -29697,6 +29977,42 @@ function _animateTalkers(){
       sg.addColorStop(1,'rgba(255,255,255,0)');
       ctx.fillStyle=sg;ctx.globalAlpha=1;
       ctx.fillRect(0,0,W,H);  // clip path bounds it to this band's bezier shape
+    }
+
+    // Scrolling neon circuit-trace overlay -- same treatment as the 3D
+    // view's protocol bars: a fixed blue/purple glowing trace pattern,
+    // additively blended over the band's own colour, scrolling in the
+    // direction traffic is actually flowing (dir already computed above).
+    // Reuses this band's still-active clip from the top of the loop, same
+    // "fillRect bounded by the bezier clip" idiom the shimmer pass uses.
+    // Was gated on bandThick>=20 (copied from the shimmer pass above, which
+    // needs that floor to avoid a strobe on thin clipped rows). This overlay
+    // is a smoothly-scrolling static tile, not a single moving bright peak,
+    // so it doesn't strobe -- and gating it at 20px meant every band thinner
+    // than that (most flows, in any capture with one or two dominant hosts
+    // and a long tail of small ones) never got the new animation at all.
+    // Dropped to a token floor that only excludes bands too thin for any
+    // texture to read as more than a solid line anyway.
+    if(!b.blocked&&bandThick>=4){
+      if(!_talkerCircuitPattern) _talkerCircuitPattern=ctx.createPattern(_talkerCircuitCanvas,'repeat');
+      const ratio=Math.min(1,b.bytes/maxBytes);   // maxBytes is now the true cross-direction max
+      const scrollSpeed=90+ratio*260;             // px/s -- faster for busier flows
+      const patW=_talkerCircuitCanvas.width;
+      const off=((dir*T*scrollSpeed)%patW+patW)%patW;
+      _talkerCircuitPattern.setTransform(new DOMMatrix().translate(off,0));
+      ctx.globalCompositeOperation='lighter';
+      // Was 0.14-0.36 -- matched the 3D bars' own compositing call, but the
+      // 3D scene's WebGL bars ease their overlay opacity up toward a full
+      // 1.0 (see b.pulseAmt in animate()) with additive bloom on top of that;
+      // this 2D canvas has no bloom pass, so the same numbers read as dim
+      // and washed out here. Raised well past parity so it actually reads
+      // as vivid on a flat canvas instead of matching WebGL numbers that
+      // only look right with WebGL's own rendering behind them.
+      ctx.globalAlpha=0.45+ratio*0.45;
+      ctx.fillStyle=_talkerCircuitPattern;
+      ctx.fillRect(0,0,W,H);
+      ctx.globalCompositeOperation='source-over';
+      ctx.globalAlpha=1;
     }
     ctx.restore();
 
@@ -30532,6 +30848,10 @@ poll();
                             ('@@3DBORDER@@', _ui['border']), ('@@3DTEXT2@@', _ui['text2']),
                             ('@@3DACCENT@@', _ui['accent'])):
             html = html.replace(_tok, _val)
+        # 'mr' (middle-right) not 'br' -- this page's own bottom row is
+        # already wall-to-wall with #legend/#info/#killbtn/#atkbtn/
+        # #worldbtn/#fwbtn (see their CSS above), see _nm_ai_widget_html.
+        html = html.replace('</body>', self._nm_ai_widget_html('mr') + '</body>', 1)
         return html.encode('utf-8')
 
     def _build_mobile_html(self):
@@ -30923,6 +31243,7 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catc
                             ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
                             ('@@TEXT2@@', _ui['text2'])):
             _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
 
     def _build_vdi_html(self):
@@ -31011,6 +31332,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
                             ('@@TEXT2@@', _ui['text2']),
                             ('#c8dff0', _ui['text']), ('#6a9ab8', _ui['text2'])):
             _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
 
     def _build_analytics_html(self):
@@ -31126,6 +31448,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
                             ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
                             ('@@TEXT2@@', _ui['text2'])):
             _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
 
     def _build_monitor_html(self):
@@ -31399,6 +31722,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
                             ('@@TEXT2@@', _ui['text2']),
                             ('#6a9ab8', _ui['text2']), ('#c8dff0', _ui['text'])):
             _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
 
     def _build_threats_html(self):
@@ -31673,6 +31997,8 @@ resize(); draw(); load(); setInterval(load,4000);
                             ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
                             ('@@TEXT2@@', _ui['text2']), ('#6a9ab8', _ui['text2'])):
             _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body></html>',
+                               self._nm_ai_widget_html() + '</body></html>', 1)
         return _html
 
     def _build_honeypot_html(self):
@@ -32025,6 +32351,8 @@ resize(); draw(); load(); setInterval(load,3000);
                             ('@@TEXT2@@', _ui['text2']), ('#6a9ab8', _ui['text2']),
                             ('#040c18', _ui['bg'])):
             _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body></html>',
+                               self._nm_ai_widget_html() + '</body></html>', 1)
         return _html
 
     def _build_agents_html(self):
@@ -32147,6 +32475,14 @@ refresh(); setInterval(refresh, 15000);
                             ('#12283e', _ui['border']), ('#c8dff0', _ui['text']),
                             ('#6a9ab8', _ui['text2'])):
             _html = _html.replace(_old, _new)
+        # NOTE: this page's whole inline script runs right up to a single
+        # combined '</script></body></html>' (no separate '</script>' line
+        # to anchor on like the other pages), so the widget must be spliced
+        # in *after* '</script>' -- inserting it before '</script>' would
+        # drop raw HTML markup into the middle of live JS and break the
+        # page's own script with a syntax error.
+        _html = _html.replace('</script></body></html>',
+                               '</script>' + self._nm_ai_widget_html() + '</body></html>', 1)
         return _html
 
     def _build_talkers_html(self):
@@ -32306,6 +32642,8 @@ load();setInterval(tick,2000);
                             ('#0a1e30', _ui['border']), ('#12283f', _ui['border']),
                             ('#0c1c30', _ui['border'])):
             _html = _html.replace(_old, _new)
+        _html = _html.replace('</body></html>',
+                               self._nm_ai_widget_html() + '</body></html>', 1)
         return _html
 
     def _build_sankey_html(self):
@@ -32900,6 +33238,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
                             ('#12283f', _ui['border']), ('#c8dff0', _ui['text']),
                             ('#6a9ab8', _ui['text2'])):
             _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
 
     def _build_manifest(self):
@@ -33207,7 +33546,8 @@ ol.steps li{margin:6px 0}
                 '</head><body>'
                 '<div class="topbar"><a href="/">\u2190 Back to dashboard</a></div>'
                 '<div class="wrap"><nav>' + ''.join(nav) + '</nav>'
-                '<main>' + ''.join(body) + '</main></div></body></html>')
+                '<main>' + ''.join(body) + '</main></div>'
+                + self._nm_ai_widget_html() + '</body></html>')
 
     def _serve_capabilities(self, handler):
         """Advertise available endpoints so the client enables its full UI
@@ -34842,6 +35182,248 @@ class NmapWindow:
                          daemon=True).start()
 
 
+class _NmSpeedGaugeWindow:
+    """The live speed-test gauge popup Trevor asked for -- "when i run a
+    speedtest manually i want a gauge to pop up showing realtime metrics
+    like ookla does".
+
+    How this actually gets its numbers, and why: the obvious approach would
+    be to parse live progress out of whichever speed-test CLI is running.
+    Checked that against the real thing rather than assuming it exists --
+    downloaded the exact librespeed-cli build this app ships (v1.0.13) and
+    read its actual --help output end to end: no streaming/progress output
+    mode at all. A --json-stream flag does exist in the project's current
+    source on GitHub, but that's unreleased -- nothing on librespeed.org's
+    release page ships it yet, so it isn't what a real install has. Ookla's
+    own CLI and speedtest-cli (the third supported engine) aren't
+    documented any better on this point, and run_speedtest() already runs
+    all three through one code path (_nm_st_measure) that waits for the
+    process to exit and reads back a single final result either way --
+    there's no live text to parse for any of the three engines this app
+    supports without gambling on undocumented behaviour.
+
+    So instead of parsing CLI output, this samples the same thing Ookla's
+    own gauge is ultimately downstream of: how many bytes are actually
+    moving on the network right now (psutil.net_io_counters(), read every
+    150ms by the caller while the CLI subprocess is alive -- see
+    ModernWindow._run_test). That's engine-agnostic, needs zero changes to
+    the tested measurement/parsing path in run_speedtest(), and is real
+    measured throughput rather than a replay of a number some CLI computed
+    for itself.
+
+    Known limitation, worth knowing rather than hiding: net_io_counters()
+    is system-wide (every interface, every process), not scoped to the
+    speed test alone. On an ordinary manual test the test itself completely
+    dominates anything else on the line, but heavy unrelated traffic at the
+    exact same moment (e.g. a large unrelated download finishing) would
+    show up on the needle too. Whatever it shows is real observed bytes,
+    though -- never a simulated or interpolated animation.
+
+    Phase (ping / download / upload) isn't reported by the CLI either, so
+    it's inferred the same way: watching which direction actually has
+    traffic moving, live. Ping phase = both directions quiet. Once one
+    direction sustains real traffic, that's the active phase; a sustained
+    drop in that direction while the other picks up means the CLI has
+    moved on to the other leg. All still driven by real sampled bytes, not
+    a guess about timing or duration.
+    """
+
+    RANGE_TIERS = [25, 50, 100, 250, 500, 1000, 2000, 5000]
+    W, H = 360, 300
+    CX, CY, R = 180, 190, 130
+    START_DEG, SWEEP_DEG = 210, -240   # 210° sweeping clockwise down to -30°
+
+    def __init__(self, tk, root, colors):
+        self._tk = tk
+        self._root = root
+        self._c = colors or {}
+        self._phase = 'ping'      # ping | download | upload | done
+        self._ema = 0.0
+        self._range_max = self.RANGE_TIERS[0]
+        self._quiet_ticks = 0
+        self._active_ticks = 0
+        self._closed = False
+        self._items = {}
+        self._foot_vars = {}
+        self._win = None
+        self._canvas = None
+        self._build()
+
+    def _build(self):
+        tk = self._tk
+        win = tk.Toplevel(self._root)
+        win.title('Speed Test')
+        win.configure(bg='#050d1a')
+        win.geometry(f'{self.W}x{self.H + 90}')
+        win.resizable(False, False)
+        win.protocol('WM_DELETE_WINDOW', self.close)
+        try:
+            win.transient(self._root)
+        except Exception:
+            _exc_debug('_NmSpeedGaugeWindow._build transient')
+        self._win = win
+
+        cv = tk.Canvas(win, width=self.W, height=self.H, bg='#050d1a',
+                       highlightthickness=0)
+        cv.pack()
+        self._canvas = cv
+
+        cv.create_arc(self.CX - self.R, self.CY - self.R,
+                     self.CX + self.R, self.CY + self.R,
+                     start=self.START_DEG, extent=self.SWEEP_DEG,
+                     style='arc', outline='#0a1e30', width=14)
+        self._items['fill_arc'] = cv.create_arc(
+            self.CX - self.R, self.CY - self.R, self.CX + self.R, self.CY + self.R,
+            start=self.START_DEG, extent=0, style='arc', outline='#38b8f0', width=14)
+        for i in range(11):
+            ang = math.radians(self.START_DEG + self.SWEEP_DEG * i / 10)
+            x1 = self.CX + (self.R - 9) * math.cos(ang)
+            y1 = self.CY - (self.R - 9) * math.sin(ang)
+            x2 = self.CX + (self.R + 9) * math.cos(ang)
+            y2 = self.CY - (self.R + 9) * math.sin(ang)
+            cv.create_line(x1, y1, x2, y2, fill='#12283f', width=2)
+        self._items['needle'] = cv.create_line(
+            self.CX, self.CY, self.CX, self.CY - self.R + 22,
+            fill='#c8dff0', width=3, capstyle='round')
+        cv.create_oval(self.CX - 9, self.CY - 9, self.CX + 9, self.CY + 9,
+                       fill='#0a1828', outline='#38b8f0', width=2)
+        self._items['value'] = cv.create_text(
+            self.CX, self.CY + 42, text='—', fill='#c8dff0',
+            font=(_NM_MONO, 26, 'bold'))
+        self._items['unit'] = cv.create_text(
+            self.CX, self.CY + 68, text='Mbps', fill='#6a9ab8', font=(_NM_MONO, 9))
+        self._items['phase'] = cv.create_text(
+            self.CX, 26, text='TESTING PING…', fill='#38b8f0',
+            font=(_NM_MONO, 11, 'bold'))
+        self._items['range'] = cv.create_text(
+            self.CX, self.CY - self.R - 2, text='', fill='#1a3a5a', font=(_NM_MONO, 7))
+
+        foot = tk.Frame(win, bg='#050d1a')
+        foot.pack(fill='x', pady=(4, 10), padx=16)
+        for key, label, col in [
+            ('dl', 'DOWNLOAD', self._c.get('download', '#00d4aa')),
+            ('ul', 'UPLOAD',   self._c.get('upload',   '#a371f7')),
+            ('pg', 'PING',     self._c.get('ping',     '#f7cc73')),
+        ]:
+            cell = tk.Frame(foot, bg='#050d1a')
+            cell.pack(side='left', expand=True, fill='x')
+            tk.Label(cell, text=label, bg='#050d1a', fg='#3a5a7a',
+                    font=(_NM_MONO, 7)).pack()
+            v = tk.StringVar(value='—')
+            self._foot_vars[key] = v
+            tk.Label(cell, textvariable=v, bg='#050d1a', fg=col,
+                    font=(_NM_MONO, 13, 'bold')).pack()
+
+    def _angle_for(self, frac):
+        frac = max(0.0, min(1.0, frac))
+        return math.radians(self.START_DEG + self.SWEEP_DEG * frac)
+
+    def _set_needle(self, frac, color):
+        cv = self._canvas
+        ang = self._angle_for(frac)
+        x = self.CX + (self.R - 22) * math.cos(ang)
+        y = self.CY - (self.R - 22) * math.sin(ang)
+        cv.coords(self._items['needle'], self.CX, self.CY, x, y)
+        cv.itemconfig(self._items['needle'], fill=color)
+        cv.itemconfig(self._items['fill_arc'], outline=color,
+                      extent=self.SWEEP_DEG * frac)
+
+    def sample(self, rx_mbps, tx_mbps):
+        """Called ~every 150ms with real, currently-observed network
+        throughput (system-wide, both directions) while the test
+        subprocess is alive. See the class docstring for why it's this and
+        not a CLI's own self-reported progress."""
+        if self._closed or self._phase == 'done':
+            return
+        if self._phase == 'ping':
+            active = max(rx_mbps, tx_mbps)
+            if active > 1.5:
+                self._active_ticks += 1
+            else:
+                self._active_ticks = 0
+            if self._active_ticks >= 2:
+                self._phase = 'download' if rx_mbps >= tx_mbps else 'upload'
+                self._quiet_ticks = 0
+                col = self._c.get(self._phase, '#38b8f0')
+                self._canvas.itemconfig(
+                    self._items['phase'],
+                    text='DOWNLOAD ↓' if self._phase == 'download' else 'UPLOAD ↑',
+                    fill=col)
+            else:
+                # A gentle idle wobble so the dial visibly isn't frozen/broken
+                # while the CLI is still just pinging.
+                import random
+                self._set_needle(0.03 + 0.02 * random.random(), '#2a5a7a')
+            return
+
+        live = rx_mbps if self._phase == 'download' else tx_mbps
+        self._ema = live if self._ema == 0 else (self._ema * 0.65 + live * 0.35)
+        while (self._ema > self._range_max * 0.9
+               and self._range_max < self.RANGE_TIERS[-1]):
+            idx = self.RANGE_TIERS.index(self._range_max)
+            self._range_max = self.RANGE_TIERS[min(idx + 1, len(self.RANGE_TIERS) - 1)]
+            self._canvas.itemconfig(self._items['range'], text=f'0–{self._range_max}')
+        col = self._c.get(self._phase, '#38b8f0')
+        self._set_needle(self._ema / self._range_max, col)
+        self._canvas.itemconfig(self._items['value'], text=f'{self._ema:.1f}', fill=col)
+
+        # Detect the download -> upload handover purely from observed bytes:
+        # once the active direction goes quiet while the OTHER direction
+        # picks up, the CLI has moved on to the other leg.
+        mine = rx_mbps if self._phase == 'download' else tx_mbps
+        other = tx_mbps if self._phase == 'download' else rx_mbps
+        if mine < max(1.5, self._ema * 0.25) and other > 1.5:
+            self._quiet_ticks += 1
+        else:
+            self._quiet_ticks = 0
+        if self._quiet_ticks >= 3 and self._phase == 'download':
+            self._phase = 'upload'
+            self._ema = 0.0
+            self._range_max = self.RANGE_TIERS[0]
+            self._quiet_ticks = 0
+            self._canvas.itemconfig(self._items['phase'], text='UPLOAD ↑',
+                                    fill=self._c.get('upload', '#a371f7'))
+            self._canvas.itemconfig(self._items['range'], text='')
+
+    def finish(self, result):
+        """Called once run_speedtest() returns, with its result dict."""
+        if self._closed:
+            return
+        self._phase = 'done'
+        cv = self._canvas
+        if not result or not result.get('ok'):
+            cv.itemconfig(self._items['phase'], text='TEST FAILED', fill='#ff4444')
+            cv.itemconfig(self._items['value'], text='—')
+            err = ((result or {}).get('error') or 'unknown error')[:60]
+            cv.create_text(self.CX, self.CY + 90, text=err, fill='#ff9f43',
+                           font=(_NM_MONO, 8), width=self.W - 30)
+        else:
+            dl = result.get('download') or 0.0
+            ul = result.get('upload') or 0.0
+            pg = result.get('ping') or 0.0
+            cv.itemconfig(self._items['phase'], text='✓ DONE', fill='#39ff14')
+            cv.itemconfig(self._items['unit'], text='Mbps down')
+            cv.itemconfig(self._items['value'], text=f'{dl:.1f}', fill='#39ff14')
+            self._set_needle(min(1.0, dl / self._range_max) if self._range_max else 0,
+                             '#39ff14')
+            self._foot_vars['dl'].set(f'{dl:.1f}')
+            self._foot_vars['ul'].set(f'{ul:.1f}')
+            self._foot_vars['pg'].set(f'{pg:.0f} ms')
+        try:
+            self._win.after(6000, self.close)
+        except Exception:
+            _exc_debug('_NmSpeedGaugeWindow.finish autoclose')
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._win.destroy()
+        except Exception:
+            _exc_debug('_NmSpeedGaugeWindow.close')
+
+
 class ModernWindow:
     """Alternative modern sidebar-based UI."""
 
@@ -35366,12 +35948,26 @@ class ModernWindow:
         else:
             self._stat_labels['jitter'].set('—')
 
-        # Live badge
-        rm = getattr(self._monitor, '_running_manual', False)
+        # Live badge -- TESTING covers both a manual test and the automatic
+        # scheduled one (run_continuous), since only one of the two can ever
+        # be running at a time now; either way, a fresh number is imminent.
+        rm = self._monitor._test_busy()
         rd = getattr(self._monitor, '_running_dns', False)
-        self._live_var.set('TESTING' if rm else 'DNS CHECK' if rd else 'LIVE')
-        self._live_lbl.config(bg='#1a1400' if (rm or rd) else '#0a2a18',
-                              fg='#ffd93d' if (rm or rd) else '#38f0a8')
+        # If the last DB read failed (see _load_data's retry/fallback), say so
+        # loudly instead of just quietly showing whatever number was last
+        # drawn -- a frozen gauge with no indication anything is wrong is
+        # exactly what makes a stale-dashboard report hard to diagnose after
+        # the fact. This does not change when the badge is red, only what it
+        # says the rest of the time; the underlying numbers below are still
+        # whatever _load_data returned (fresh DB rows, or the JSON fallback).
+        db_ok = getattr(self._monitor, '_db_load_ok', True)
+        if not db_ok:
+            self._live_var.set('DB READ ERROR')
+            self._live_lbl.config(bg='#3a0a0a', fg='#ff6b6b')
+        else:
+            self._live_var.set('TESTING' if rm else 'DNS CHECK' if rd else 'LIVE')
+            self._live_lbl.config(bg='#1a1400' if (rm or rd) else '#0a2a18',
+                                  fg='#ffd93d' if (rm or rd) else '#38f0a8')
 
         # Status dots
         for key, path_attr, label in [
@@ -35640,12 +36236,52 @@ class ModernWindow:
 
     # ── Button actions ────────────────────────────────────────────────────────
     def _run_test(self):
-        if getattr(self._monitor, '_running_manual', False): return
+        if self._monitor._test_busy(): return
         self._monitor._running_manual = True
         import threading
+
+        # The live gauge Trevor asked for -- see _NmSpeedGaugeWindow's own
+        # docstring for why it's driven by sampled network throughput rather
+        # than parsed CLI progress. Guarded so psutil being unavailable (or
+        # any other startup hiccup) degrades to the old silent-until-done
+        # behaviour instead of blocking the test from running at all.
+        gauge = None
+        try:
+            gauge = _NmSpeedGaugeWindow(self._tk, self.root, self._monitor.colors)
+            self._speed_gauge = gauge   # keep a reference alive for the test's duration
+        except Exception:
+            _exc('_run_test gauge open')
+            gauge = None
+
+        if gauge is not None:
+            try:
+                import psutil
+                _c0 = psutil.net_io_counters()
+                _state = {'t': time.monotonic(), 'rx': _c0.bytes_recv, 'tx': _c0.bytes_sent}
+
+                def _tick():
+                    if gauge._closed:
+                        return
+                    try:
+                        c = psutil.net_io_counters()
+                        now = time.monotonic()
+                        dt = max(0.05, now - _state['t'])
+                        rx_mbps = max(0.0, (c.bytes_recv - _state['rx']) * 8 / dt / 1_000_000)
+                        tx_mbps = max(0.0, (c.bytes_sent - _state['tx']) * 8 / dt / 1_000_000)
+                        _state['t'], _state['rx'], _state['tx'] = now, c.bytes_recv, c.bytes_sent
+                        gauge.sample(rx_mbps, tx_mbps)
+                    except Exception:
+                        _exc_debug('_run_test speed gauge tick')
+                    self.root.after(150, _tick)
+                self.root.after(150, _tick)
+            except Exception:
+                _exc('_run_test gauge sampler start')
+
         def _w():
-            self._monitor.run_speedtest()
+            result = self._monitor.run_speedtest()
             self._monitor._running_manual = False
+            if gauge is not None:
+                self.root.after(0, lambda: gauge.finish(result))
         threading.Thread(target=_w, daemon=True).start()
 
     def _run_dns(self):
