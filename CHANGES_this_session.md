@@ -1,6 +1,6 @@
-# Changes this session — build `b-5aeafa1d`
+# Changes this session — build `b-c5d3c0c0`
 
-Seventy-six things this session. Build IDs for reference:
+Seventy-seven things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -283,9 +283,73 @@ Seventy-six things this session. Build IDs for reference:
     the dashboard were stuck on the same dim grey they're created with,
     forever, regardless of whether the web server or database were actually
     up. See the section below.
-76. `b-5aeafa1d` (current) — added a BLOOM button next to Pen Test that
+76. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
     turns a glow/bloom effect on and off for every chart on the main
     dashboard. See the section below.
+77. `b-c5d3c0c0` (current) — embedded guide (desktop "? GUIDE" window and
+    the web `/guide` page) updated to document everything new this
+    session: the BLOOM button, the status bar's now-real dots, the
+    live speed-test gauge popup, and the web AI Query button. See the
+    section below.
+
+## Embedded guide updated to cover everything new this session
+
+**What you asked:** "update the embedded guide with everthing thats new."
+
+**What was there before:** `UserGuideWindow.CONTENT` (the single dict
+rendered by both the desktop "? GUIDE" window and the web `/guide` page,
+via `_build_guide_html()`) hadn't been touched since before this session's
+fixes/features landed, so it didn't mention: the BLOOM button, the LIVE
+badge's new red "DB READ ERROR" state, the bottom status bar at all (there
+was no "Status bar" heading anywhere in the guide), the live speed-test
+gauge popup, or the floating web "AI Query" button that now sits on every
+web-served page.
+
+**What changed, `UserGuideWindow.CONTENT`:**
+- `dashboard` section: the "Top bar" paragraph now mentions the BLOOM
+  toggle and the DB READ ERROR badge state; a new "BLOOM button (top bar)"
+  heading explains what it does and that it works with every theme; a new
+  "Status bar" heading documents the four dots (speedtest.exe / tshark /
+  web / SQLite), what green/red means for each, and the build-ID + "Next
+  test in..." countdown next to them.
+- `speedtest` section: the "Manual test" heading now describes the
+  Ookla-style live gauge popup that opens when you click RUN — the needle
+  dial, the phase label, and that it's driven by real sampled network
+  throughput rather than a simulated animation.
+- `charts` section: new "BLOOM toggle" heading explaining the button's
+  effect across all six chart panels; the "Live network traffic" paragraph
+  no longer states its glow is unconditional — now correctly says it
+  follows the BLOOM toggle like every other panel.
+- `webviews` section: new "AI Query (every web page)" heading describing
+  the floating "✦ AI QUERY" button + modal now on every web page, and
+  explicitly distinguishing it from the separate, pre-existing desktop AI
+  Query feature in the Wireshark capture window (that one analyses a
+  packet capture, not a web page).
+
+**Verified:**
+- Every `UserGuideWindow.CONTENT` tuple across every section is a
+  well-formed `(tag, text)` pair with a recognized tag — checked
+  programmatically, not just proofread.
+- A new test (`test_guide_update.py`) drives the REAL desktop guide window:
+  builds it, clicks through all 30 sections in `SECTIONS` (proving nothing
+  in any section, old or new, breaks rendering), then specifically checks
+  the dashboard/speedtest/charts/webviews sections contain the new text.
+- Same test also starts a REAL `_ThreeDServer` and fetches `/guide` over
+  real HTTP, confirming the same new text appears there too — since both
+  surfaces render the identical `CONTENT` dict, this proves the desktop
+  guide and the web page didn't drift apart.
+- `python3 -m py_compile` clean on the exact synced build.
+- Full `selftest.py` (36 checks): the `/guide` route legitimately changed
+  bytes (77418 → 80174) since its content changed on purpose — everything
+  else (all other routes, APIs, JS syntax, desktop window, honeypot radar)
+  came back byte-identical. Re-baselined with `selftest.py --update-ok`
+  and confirmed clean (35/1-skip/0-fail) against the new baseline.
+
+**Not verified:** haven't seen the updated guide rendered on your actual
+screen — should be straightforward to eyeball once you rebuild: open
+? GUIDE and check the Dashboard and Charts & Views and Running Speed Tests
+and Web Flow Views pages for the new text, and open any web page (e.g.
+/sankey) to see the AI Query button described there for yourself.
 
 ## BLOOM button — glow effect on every dashboard chart, next to Pen Test
 

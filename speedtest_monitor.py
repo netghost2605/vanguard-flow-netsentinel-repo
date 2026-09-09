@@ -2569,7 +2569,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-5aeafa1d'
+_NM_BUILD_ID = 'b-c5d3c0c0'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -19334,8 +19334,23 @@ class UserGuideWindow:
             ('h2', 'Top bar'),
             ('p',  'Shows the app name, three navigation shortcuts (Dashboard, System, and Pen Test — the '
                    'Agents/Wireshark/Topology shortcuts that used to sit here were dropped for duplicating the '
-                   'sidebar buttons that open those same windows), a LIVE badge that switches to amber TESTING '
-                   'or DNS CHECK while a check is running, and a live clock.'),
+                   'sidebar buttons that open those same windows), a ✦ BLOOM toggle, a LIVE badge that switches '
+                   'to amber TESTING or DNS CHECK while a check is running (or to red DB READ ERROR if the '
+                   'database can\'t be read), and a live clock.'),
+            ('h2', 'BLOOM button (top bar)'),
+            ('p',  'A toggle next to Pen Test that turns a soft glow effect on or off for every chart on the '
+                   'main dashboard — the gauge-strip sparklines, the four main charts, the DNS chart and the '
+                   'Live network traffic panel. It\'s on by default. Each line always glows in its own series '
+                   'colour, so it looks right no matter which colour theme you\'re using — nothing to configure '
+                   'per theme. Turning it off draws plain, crisp lines instead, which can be easier to read on '
+                   'some monitors or when recording the screen.'),
+            ('h2', 'Status bar'),
+            ('p',  'A thin strip along the bottom of the window shows four coloured dots with labels: '
+                   'speedtest.exe, tshark, web, and SQLite (or JSON, if you\'re not using the database backend). '
+                   'Each dot is green when that part is healthy and red when it isn\'t — the web dot checks '
+                   'that something is actually listening on the configured web-server port, and the SQLite '
+                   'dot checks that the last database read succeeded. The strip also shows the current build ID '
+                   'and a "Next test in..." countdown to the next automatic speed test.'),
             ('h2', 'System button (top bar)'),
             ('p',  'Opens Task Manager TMOG, this app\'s bundled system monitor — see the '
                    '"System (Task Manager TMOG)" page in this guide for what it shows and a screenshot.'),
@@ -19472,15 +19487,20 @@ class UserGuideWindow:
             ('p',  'These three line charts plot readings for whichever window the view bar has selected '
                    '(Today, This Week, This Month, All Time, or a specific day via the ◄ / ► history navigator). '
                    'Each is a filled line chart with the metric’s theme colour.'),
+            ('h2', 'BLOOM toggle'),
+            ('p',  'The ✦ BLOOM button in the top bar (next to Pen Test) turns a soft glow effect on or off for '
+                   'all six panels in this grid, plus the gauge-strip sparklines. Each series keeps its own '
+                   'theme colour whether bloom is on or off, so the effect looks right in every colour theme. '
+                   'It\'s on by default; turn it off for plain, crisp lines instead.'),
             ('h2', 'Live network traffic (bottom-left)'),
             ('p',  'A rolling, real-time chart of actual TX/RX throughput on the machine, sampled continuously '
                    'via psutil (not the recorded speed-test history). Shows the last 120 samples. Styled like a '
-                   'hardware-monitor overlay — glowing RX/TX lines on a dark panel with a bright green frame, a '
-                   'colour-coded "● RX / ● TX" readout up top, and a small triangle marker pinned to each line’s '
-                   'current value at the right edge. It refreshes on its own faster timer (every 400ms) '
-                   'independent of the rest of the dashboard, so it visibly animates in real time rather than only '
-                   'moving in step with the other panels. If psutil is not installed this panel simply stays '
-                   'empty — nothing else on the dashboard depends on it.'),
+                   'hardware-monitor overlay — RX/TX lines (glowing when BLOOM is on) on a dark panel with a '
+                   'bright green frame, a colour-coded "● RX / ● TX" readout up top, and a small triangle marker '
+                   'pinned to each line’s current value at the right edge. It refreshes on its own faster timer '
+                   '(every 400ms) independent of the rest of the dashboard, so it visibly animates in real time '
+                   'rather than only moving in step with the other panels. If psutil is not installed this panel '
+                   'simply stays empty — nothing else on the dashboard depends on it.'),
             ('h2', 'DNS history (bottom-centre)'),
             ('p',  'Plots the last 80 DNS check results as a filled line chart in amber.'),
             ('h2', 'Statistics (bottom-right)'),
@@ -19498,6 +19518,13 @@ class UserGuideWindow:
             ('h2', 'Manual test'),
             ('p',  'Click ▶ RUN in the sidebar to trigger an immediate test. The LIVE badge in the top bar '
                    'switches to amber TESTING while it runs, and reverts to green LIVE when the result lands.'),
+            ('p',  'A live gauge popup opens automatically alongside it — an Ookla-style needle dial with a '
+                   'phase label (Ping / Download / Upload). The needle is driven by real, live-sampled network '
+                   'throughput on your machine (read every 150ms while the test runs), not a simulated '
+                   'animation, so what you see is genuinely what\'s moving on the line at that instant. The '
+                   'active phase (ping/download/upload) is inferred the same way, by watching which direction '
+                   'currently has real traffic on it. Close the popup any time — the test keeps running and the '
+                   'gauges/charts still update normally when the result lands.'),
             ('h2', 'How the test works'),
             ('p',  'The monitor tries three methods in order:'),
             ('bullet', 'JSON mode: speedtest.exe --format=json — most reliable, parses bandwidth in bps'),
@@ -20155,6 +20182,14 @@ class UserGuideWindow:
                        'the bottom control cluster'),
             ('h2', 'The /honeypot page'),
             ('bullet', 'Live honeypot hits \u2014 see the Honeypot section'),
+            ('h2', 'AI Query (every web page)'),
+            ('p',  'A floating \u2726 AI QUERY button sits in the corner of every page the web server '
+                   'serves (bottom-right on most pages, middle-right on /3d where the bottom row is already '
+                   'full). Click it, type a question, and it asks the same local AI model configured in '
+                   'Prefs about whatever is currently on screen on that page \u2014 it reads the page\'s own '
+                   'visible text, so no extra setup is needed per page. This is separate from the desktop '
+                   'app\'s AI Query feature in the Wireshark capture window, which analyses a packet capture '
+                   'rather than a web page.'),
             ('tip', 'All web pages adapt to tablets and phones and can be added to the home '
                     'screen as an app (Share \u2192 Add to Home Screen on iPad).'),
         ],
