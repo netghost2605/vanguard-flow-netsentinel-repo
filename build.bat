@@ -61,6 +61,27 @@ for /f "tokens=*" %%v in ('!PYTHON! --version 2^>^&1') do set PY_VER=%%v
 echo [OK] %PY_VER%  at  %PYTHON%
 echo.
 
+:: ── Check / bootstrap pip ────────────────────────────────────────────────
+:: Some Python installs have no "pip" module at all (a minimal install, or
+:: one where pip got removed) -- "%PYTHON% -m pip install X" then fails
+:: immediately with "No module named pip". This is the SAME python found
+:: above, so it's not the separate "pip.exe on PATH points somewhere else"
+:: problem -- this one just doesn't have pip. ensurepip bootstraps it from
+:: what the standard library already ships, no network needed.
+%PYTHON% -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] pip missing for this Python - bootstrapping via ensurepip...
+    %PYTHON% -m ensurepip --upgrade
+    %PYTHON% -m pip --version >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Still no pip after ensurepip for !PYTHON!.
+        echo         Reinstall that Python from python.org with "pip" checked.
+        pause & exit /b 1
+    )
+)
+echo [OK] pip ready.
+echo.
+
 :: ── Optional file warnings ────────────────────────────────────────────────
 if not exist "speedtest.exe" (
     echo [WARNING] speedtest.exe not found - speed tests will not work.
@@ -78,6 +99,29 @@ echo.
 if errorlevel 1 ( echo [ERROR] pip upgrade failed. & pause & exit /b 1 )
 %PYTHON% -m pip install pyinstaller numpy matplotlib mplcursors pillow --upgrade --quiet
 if errorlevel 1 ( echo [ERROR] pip install failed. Check internet connection. & pause & exit /b 1 )
+:: paramiko (SSH) + pywinrm (PowerShell Remoting) power the Push Agent
+:: button's Linux/Windows deploy paths -- must be installed BEFORE
+:: PyInstaller runs below, or it has nothing to bundle and the built exe
+:: fails at runtime with "isn't installed in this build".
+%PYTHON% -m pip install paramiko pywinrm --upgrade --quiet
+if errorlevel 1 ( echo [ERROR] pip install failed. Check internet connection. & pause & exit /b 1 )
+:: Verify they actually landed where THIS %PYTHON% can see them, rather than
+:: trusting a silent pip "success" -- a pip that quietly resolved to a
+:: different interpreter than the one about to run PyInstaller below is
+:: exactly how you get an exe that builds clean but fails at runtime with
+:: "paramiko isn't installed in this build".
+%PYTHON% -c "import paramiko, winrm" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo [ERROR] paramiko/pywinrm installed but !PYTHON! still can't import them.
+    echo         That means pip and !PYTHON! are pointing at two different
+    echo         Python installs. Run this line by itself and check the path:
+    echo             !PYTHON! -c "import sys; print(sys.executable)"
+    echo         then:  !PYTHON! -m pip install paramiko pywinrm
+    echo         using that SAME !PYTHON! spelled out explicitly.
+    pause
+    exit /b 1
+)
 echo       Done.
 echo.
 

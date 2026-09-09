@@ -60,17 +60,51 @@ if errorlevel 1 (
 )
 echo  [OK] Python found.
 
+:: ── Check / bootstrap pip ─────────────────────────────────────────────────────
+:: Some Python installs (a minimal/custom install, or one where pip got
+:: removed) have no "pip" module at all -- "python -m pip install X" then
+:: fails immediately with "No module named pip", before it ever gets a
+:: chance to install anything. This is a real, seen-in-the-wild failure
+:: mode (not the PATH-mismatch one above -- this is the SAME python that
+:: PyInstaller will use, it just plain doesn't have pip). ensurepip
+:: bootstraps pip from the copy the Python standard library already
+:: ships, no network needed for this step.
+python -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo  [INFO] pip missing for this Python -- bootstrapping via ensurepip...
+    python -m ensurepip --upgrade
+    python -m pip --version >nul 2>&1
+    if errorlevel 1 (
+        echo  [ERROR] Still no pip after ensurepip. Find out which Python is
+        echo          really on PATH and reinstall/repair it:
+        echo              python -c "import sys; print(sys.executable)"
+        echo          then reinstall that Python from python.org with
+        echo          "pip" checked during setup.
+        pause & exit /b 1
+    )
+)
+echo  [OK] pip ready.
+
 :: ── Check / install PyInstaller ───────────────────────────────────────────────
+:: Everything below uses "python -m pip" / "python -m PyInstaller" rather than
+:: bare "pip" / "pyinstaller" commands. On a machine with more than one Python
+:: on PATH, bare "pip" and bare "pyinstaller" are separate .exe shims that can
+:: silently resolve to a DIFFERENT install than bare "python" -- which is
+:: exactly how you get pip reporting a clean install while the exe that
+:: PyInstaller builds a moment later has never heard of the package: it was
+:: installed into one Python's site-packages while PyInstaller ran out of
+:: another's. Routing everything through the one "python" already checked
+:: above removes that whole class of bug.
 python -c "import PyInstaller" >nul 2>&1
 if errorlevel 1 (
     echo  Installing PyInstaller...
-    pip install pyinstaller --quiet
+    python -m pip install pyinstaller --quiet
 )
 echo  [OK] PyInstaller ready.
 
 :: ── Check / install Python dependencies ──────────────────────────────────────
 echo  Installing Python dependencies...
-pip install numpy matplotlib mplcursors Pillow --quiet
+python -m pip install numpy matplotlib mplcursors Pillow --quiet
 :: nvidia-ml-py (imported as "pynvml") gives the System Monitor real NVIDIA
 :: GPU readings — name, utilization, memory, power, temperature, clock — via
 :: NVML. It is pure Python (no compiled extension), so bundling it here means
@@ -80,14 +114,30 @@ pip install numpy matplotlib mplcursors Pillow --quiet
 :: catches that ImportError/NVMLError itself and shows "Unavailable" with the
 :: real reason, never a fabricated reading. Installed here (build time) so it
 :: ships INSIDE the exe; end users never need to pip install anything.
-pip install nvidia-ml-py --quiet
+python -m pip install nvidia-ml-py --quiet
 :: paramiko (SSH) + pywinrm (PowerShell Remoting) power the Push Agent
 :: feature — deploying speedtest_agent onto a remote Windows/Linux box.
 :: Both are pure Python plus small compiled deps PyInstaller already knows
 :: how to bundle (cryptography for paramiko), so this is the same
 :: "installed at build time, ships inside the exe" pattern as everything
 :: else in this block.
-pip install paramiko pywinrm --quiet
+python -m pip install paramiko pywinrm --quiet
+:: Verify THIS python (the one about to run PyInstaller below) can actually
+:: import them, instead of trusting a silent pip "success" -- catches the
+:: exact "installed but into the wrong Python" failure mode described above
+:: before it wastes another build+test cycle.
+python -c "import paramiko, winrm" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo  [ERROR] paramiko/pywinrm did not install where "python" can see them.
+    echo          Find out which Python is actually on PATH and use it explicitly:
+    echo              python -c "import sys; print(sys.executable)"
+    echo              python -m pip install paramiko pywinrm
+    echo          Push Agent's build will fail to include them until this
+    echo          import succeeds under the same "python" used below.
+    pause
+    exit /b 1
+)
 echo  [OK] Python dependencies installed (including nvidia-ml-py for GPU readings,
 echo       paramiko + pywinrm for Push Agent).
 
@@ -292,7 +342,7 @@ if exist "dist\SpeedtestMonitor.exe" (
 )
 if exist "build\SpeedtestMonitor" rmdir /s /q "build\SpeedtestMonitor" >nul 2>&1
 
-pyinstaller speedtest_monitor.spec --noconfirm
+python -m PyInstaller speedtest_monitor.spec --noconfirm
 
 if errorlevel 1 (
     echo.
@@ -333,9 +383,9 @@ if exist "nm_client.py" (
     if exist "build\NetworkMonitorClient" rmdir /s /q "build\NetworkMonitorClient" >nul 2>&1
 
     if exist "icon.ico" (
-        pyinstaller --onefile --windowed --name NetworkMonitorClient --icon icon.ico nm_client.py --clean --noconfirm
+        python -m PyInstaller --onefile --windowed --name NetworkMonitorClient --icon icon.ico nm_client.py --clean --noconfirm
     ) else (
-        pyinstaller --onefile --windowed --name NetworkMonitorClient nm_client.py --clean --noconfirm
+        python -m PyInstaller --onefile --windowed --name NetworkMonitorClient nm_client.py --clean --noconfirm
     )
 
     :: Trust PyInstaller's exit code - NOT the mere presence of an exe, which was
@@ -383,9 +433,9 @@ if exist "speedtest_agent.py" (
     if exist "build\speedtest_agent" rmdir /s /q "build\speedtest_agent" >nul 2>&1
 
     if exist "speedtest_agent.spec" (
-        pyinstaller speedtest_agent.spec --noconfirm
+        python -m PyInstaller speedtest_agent.spec --noconfirm
     ) else (
-        pyinstaller --onefile --console --name SpeedtestAgent speedtest_agent.py --clean --noconfirm
+        python -m PyInstaller --onefile --console --name SpeedtestAgent speedtest_agent.py --clean --noconfirm
     )
 
     if errorlevel 1 (

@@ -439,6 +439,24 @@ through (e.g., file copied but the scheduled task registration fails) —
 you'd need to re-run the push, which is safe to do (it overwrites in
 place) but won't clean up a half-installed state on its own.
 
+**Follow-up bug, found by you on a real rebuild:** first real-world use hit
+"paramiko isn't installed in this build" even after rebuilding. Cause: there
+are two build scripts in this project — `build_installer.bat` (builds the
+full NSIS installer, got `pip install paramiko pywinrm` added above) and a
+separate, simpler `build.bat` (builds just the exe via
+`speedtest_monitor.spec`, used directly rather than through the installer
+build). I only patched the installer script; `build.bat` still only
+installed `pyinstaller numpy matplotlib mplcursors pillow`, so paramiko was
+never in the environment PyInstaller was bundling from — `hiddenimports`
+in the .spec can't bundle a package that was never `pip install`ed.
+`speedtest_agent.spec` was already handled correctly since it's new. Fixed
+by adding the same `pip install paramiko pywinrm --upgrade --quiet` step to
+`build.bat`, right after its existing dependency install, before
+PyInstaller runs. No app code changed, so the build ID stays `b-bf352903`.
+**Not verified:** haven't seen you rebuild with the fixed `build.bat` yet —
+next rebuild should pick up paramiko/pywinrm cleanly; if it doesn't, tell
+me the exact new error.
+
 ## Embedded guide updated to cover everything new this session
 
 **What you asked:** "update the embedded guide with everthing thats new."
