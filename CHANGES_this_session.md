@@ -1,6 +1,6 @@
-# Changes this session — build `b-8854f5c0`
+# Changes this session — build `b-5aeafa1d`
 
-Seventy-four things this session. Build IDs for reference:
+Seventy-six things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -275,10 +275,131 @@ Seventy-four things this session. Build IDs for reference:
     the most plausible cause found at the time (see the section below —
     this turned out not to be the actual cause, but the hardening is
     harmless and stays in).
-74. `b-8854f5c0` (current) — found and fixed the REAL cause of the above:
-    the automatic scheduled speed test and a manually-triggered one could
-    run at the same time, each corrupting the other's reading. See the
-    section below.
+74. `b-8854f5c0` — found and fixed the REAL cause of the above: the
+    automatic scheduled speed test and a manually-triggered one could run
+    at the same time, each corrupting the other's reading. Confirmed fixed
+    on your machine.
+75. `b-8cef6209` — the "web" and "SQLite" status-bar dots at the bottom of
+    the dashboard were stuck on the same dim grey they're created with,
+    forever, regardless of whether the web server or database were actually
+    up. See the section below.
+76. `b-5aeafa1d` (current) — added a BLOOM button next to Pen Test that
+    turns a glow/bloom effect on and off for every chart on the main
+    dashboard. See the section below.
+
+## BLOOM button — glow effect on every dashboard chart, next to Pen Test
+
+**What you asked:** a button next to Pen Test that applies a bloom effect
+to all the graphs on the main dashboard, working with every theme.
+
+**What was already there:** the "Live traffic" panel (bottom-left of the
+dashboard) has always drawn its RX/TX lines with a glow technique
+(`_glow_line` — three progressively wider, fainter copies of the line
+behind a crisp top line, which reads as a soft neon bloom at matplotlib's
+normal anti-aliased rendering, no image filters or extra dependencies).
+The other five panels — Download, Upload, Latency, DNS history, and the
+Statistics table — never used it; they drew a single plain line each.
+
+**What changed:**
+- A new "✦ BLOOM" button sits right after Pen Test in the top bar, styled
+  the same way the Dashboard/System/Pen Test buttons already indicate
+  active state (lit up in the accent color when on, dim when off). Clicking
+  it flips the effect on or off for every chart at once and redraws
+  immediately rather than waiting out the next 2-second refresh.
+- Download, Upload, Latency, and DNS history now use the exact same
+  `_glow_line` technique the Live traffic panel already had, when the
+  toggle is on; when it's off, they draw the same single plain line as
+  before the button existed.
+- The Live traffic panel's own bloom (previously always on, unconditionally)
+  now also respects this same toggle, so all six panels move together as
+  one "bloom on / bloom off" state instead of one of them being stuck on
+  regardless of the button.
+- Starts ON by default, so nothing changes visually the moment you launch —
+  Live traffic already looked like this, the other five panels just now
+  match it. Click BLOOM to turn it off if you'd rather have the plain look.
+- Works with every theme with no extra per-theme code, because it was never
+  hardcoded to begin with: each chart's glow reuses that exact same
+  series' own theme color (Download's glow is whatever color Download's
+  line already is under the active theme, and so on for Upload/Ping/DNS).
+  Switching themes in Settings already recomputes those colors on the next
+  refresh; bloom just rides along with whatever color comes out of that.
+
+**Verified:**
+- A new test builds the REAL dashboard UI and drives the REAL
+  `_do_refresh()`/`_toggle_bloom()` (not a reimplementation) against a real
+  `SpeedTestMonitor` with real seeded readings. Confirmed: the button
+  exists, starts lit in the accent color; with bloom on, the Download chart
+  has exactly 4 line artists (3 glow-halo copies + 1 crisp line, matching
+  `_glow_line`'s own construction); toggling off via the real button
+  handler drops that to exactly 1 plain line and un-lights the button; the
+  glow's actual rendered color was checked against 5 different themes
+  (Ocean, Sunset, Neon, Hacker, Ice) and matched that theme's own Download
+  color exactly in every case.
+- Full `selftest.py` (36 checks) — 35/1-skip/0-fail, no web route changed
+  (desktop-only feature).
+- `python3 -m py_compile` clean on the exact synced build.
+
+**Not verified:** haven't seen it rendered on your actual screen — should
+be straightforward to eyeball once you rebuild: BLOOM should sit lit up
+next to Pen Test, and clicking it should visibly soften/sharpen the glow on
+all six chart panels together, in whatever theme you're using.
+
+## Status bar: "web" and "SQLite" dots were never actually wired up
+
+**What you asked:** why the web and SQLite dots at the bottom of the
+dashboard show as offline (dim grey, same as an unknown/not-yet-checked
+state) even though the web server and database are both clearly working
+(the build ID next to the SQLite dot only shows up because SQLite IS
+working, and the web server was actively logging requests).
+
+**What was actually there:** `_build_statusbar()` creates all four status
+dots — speedtest.exe, tshark, web, SQLite — with the same neutral grey
+(`#2a4060`), meant to be recolored green/red once real status is known.
+`_do_refresh()`'s status-dot loop, right below it, only ever did that for
+two of the four: `speedtest.exe` and `tshark` get `itemconfig(1,
+fill=...)` called on every refresh based on whether their .exe actually
+exists. The `web` and `db` dots only ever got their *text* updated
+(`wv.set(...)`, `dv2.set(...)`) — nothing ever touched their dot color, so
+they sat at that same "unknown" grey for the lifetime of the app. It reads
+as "offline" because that's what an unlit/neutral dot looks like next to
+two lit-up green ones, but it was never actually reporting anything — it
+just never got wired up in the first place.
+
+**What changed:**
+- `web` dot: `_do_refresh()` now does a real (if trivially cheap) check —
+  a plain TCP connect attempt to `127.0.0.1:<web_port>` — and colors the
+  dot green if something answers, red if not. On localhost this resolves
+  in well under a millisecond either way, so doing it every 2-second
+  refresh is not a meaningful cost; it's a handshake, not a request.
+- `db` dot: now reflects real state too — green when a DB connection
+  exists and the most recent read from it succeeded, red otherwise. This
+  reuses the `_db_load_ok` flag added for the dashboard's "DB READ ERROR"
+  badge a couple of builds back, so the two indicators now agree with each
+  other instead of one (the badge) being able to show an error while the
+  other (this dot) stays permanently green regardless.
+
+**Verified:**
+- A new test builds the REAL `ModernWindow` UI (`_build_ui()`, no mock) and
+  drives the REAL `_do_refresh()` against a real `SpeedTestMonitor` and a
+  real temp SQLite database — no reimplementation of the logic being
+  tested. It checks all four combinations: nothing listening on the web
+  port → red; a real listener bound on it → green; a healthy DB → green; a
+  DB whose reads are actually failing → red. All four came back exactly as
+  expected.
+- Re-ran the two most recent fixes' own tests (DB retry/badge, and the
+  automatic-vs-manual speed test guard) against this exact build — both
+  still pass.
+- Full `selftest.py` (36 checks) — 35/1-skip/0-fail, no web route changed
+  (this is desktop-only).
+- `python3 -m py_compile` clean on the exact synced build.
+
+**Not verified:** same limitation as always with a UI change — I can see
+the dot colors update correctly in a real (if headless) Tkinter session,
+but haven't seen it rendered on your actual screen. Should be
+straightforward to eyeball once you rebuild: the web and SQLite dots
+should now sit green next to the other two whenever things are actually
+working, and go red if either one genuinely drops (server not listening,
+or DB reads failing).
 
 ## The real cause: automatic and manual speed tests could run at the same time
 

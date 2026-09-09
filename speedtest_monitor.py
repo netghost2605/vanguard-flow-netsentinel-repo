@@ -2569,7 +2569,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-8854f5c0'
+_NM_BUILD_ID = 'b-5aeafa1d'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -35449,6 +35449,12 @@ class ModernWindow:
         self._mpl_fig     = None
         self._view_mode   = 'today'   # today | week | month | all | history
         self._hist_offset = 0         # days back from today
+        # Bloom/glow toggle for the dashboard's charts -- see _glow_line and
+        # the BLOOM button in _build_topbar. Starts on: the "Live traffic"
+        # panel has always drawn its lines with this same glow technique
+        # unconditionally, so defaulting to on means nothing changes visually
+        # on first launch -- the other five panels just now match it.
+        self._bloom_enabled = True
 
         self.root = tk.Tk()
         _nm_pick_mono(self.root)   # resolve the monospace family for this system
@@ -35525,6 +35531,19 @@ class ModernWindow:
                          command=cmd if cmd else lambda: None)
             b.pack(side='left', pady=0, ipady=14)
             self._nav_btns[label] = b
+        tk.Frame(top, bg=self.SPIN, width=1, height=28).pack(side='left', padx=6)
+        # BLOOM toggle -- glow/bloom effect on every chart on the main
+        # dashboard (Download, Upload, Latency, DNS history, Live traffic).
+        # Reuses each series' own theme color for its glow (see _glow_line),
+        # so it looks right under all eleven themes with no per-theme code:
+        # whatever color a line already is, that's the color it blooms in.
+        self._bloom_btn = tk.Button(
+            top, text='✦ BLOOM', bg=self.PANEL2,
+            fg=self.ACC if self._bloom_enabled else '#2a4a6a',
+            activebackground='#0a1828', activeforeground=self.ACC,
+            relief='flat', font=(_NM_MONO, 8), padx=10, cursor='hand2',
+            command=self._toggle_bloom)
+        self._bloom_btn.pack(side='left', pady=0, ipady=14)
         tk.Frame(top, bg=self.PANEL2).pack(side='left', fill='x', expand=True)
         self._live_var = tk.StringVar(value='LIVE')
         self._live_lbl = tk.Label(top, textvariable=self._live_var,
@@ -35535,6 +35554,18 @@ class ModernWindow:
         tk.Label(top, textvariable=self._clock_var, bg=self.PANEL2,
                  fg='#2a4060', font=(_NM_MONO, 8)).pack(side='right', padx=4)
         tk.Frame(r, bg=self.SPIN, height=1).pack(fill='x')
+
+    def _toggle_bloom(self):
+        self._bloom_enabled = not self._bloom_enabled
+        self._bloom_btn.config(fg=self.ACC if self._bloom_enabled else '#2a4a6a')
+        # Redraw immediately rather than waiting out the next 2-second
+        # refresh tick, so the toggle feels instant. _do_refresh() is
+        # already what runs on every tick, so this is the same cost the app
+        # already pays every 2s, just triggered once on demand.
+        try:
+            self._do_refresh()
+        except Exception:
+            _exc('_toggle_bloom')
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     def _build_sidebar(self):
@@ -35979,9 +36010,39 @@ class ModernWindow:
             dot.itemconfig(1, fill='#2ea043' if ok else '#ff6b6b')
             v.set(f'{label} {"✓" if ok else "✗"}')
         port = self._monitor.config.get('web_port', 8765)
-        _, wv = self._status_dots['web']
+        wd, wv = self._status_dots['web']
         wv.set(f'web :{port}')
-        _, dv2 = self._status_dots['db']
+        # This dot was created with the same dim "not yet known" grey as
+        # every other status dot (_build_statusbar), but -- unlike
+        # speedtest/tshark just above -- nothing ever recolored it, so it
+        # stayed that dim grey forever regardless of whether the embedded
+        # web server was actually up. A real (if cheap) check: try an
+        # immediate local connect to the port the server is supposed to be
+        # listening on. On localhost this resolves in well under a
+        # millisecond whichever way it goes, so doing it every 2s here is
+        # safe -- it's a plain TCP handshake, not a request, and never
+        # blocks the noticeable amount of time a full HTTP round-trip would.
+        try:
+            import socket as _sk2
+            with _sk2.socket(_sk2.AF_INET, _sk2.SOCK_STREAM) as _s2:
+                _s2.settimeout(0.3)
+                web_ok = _s2.connect_ex(('127.0.0.1', int(port))) == 0
+        except Exception:
+            web_ok = False
+        wd.itemconfig(1, fill='#2ea043' if web_ok else '#ff6b6b')
+
+        dd, dv2 = self._status_dots['db']
+        # Same story for this dot: it never got recolored either. Now it
+        # reflects real state -- whether a DB connection actually exists,
+        # and (via the _db_load_ok flag _load_data() sets) whether the most
+        # recent read from it actually succeeded, same signal the "DB READ
+        # ERROR" live-badge state uses.
+        if USE_DB:
+            db_ok = (getattr(self._monitor, '_db', None) is not None and
+                     getattr(self._monitor, '_db_load_ok', True))
+        else:
+            db_ok = True   # JSON mode has no "connection" to lose
+        dd.itemconfig(1, fill='#2ea043' if db_ok else '#ff6b6b')
         dv2.set(('SQLite \u2713' if USE_DB else 'JSON') + '  \u00b7  ' + _NM_BUILD_ID)
         # Next test countdown
         iv_s = self._monitor._interval_minutes * 60
@@ -36024,8 +36085,15 @@ class ModernWindow:
         def line(ax, xs, ys, col, title, unit=''):
             style(ax)
             if xs and ys:
-                ax.plot(xs, ys, color=col, linewidth=1.4, alpha=0.95)
+                # Fill first, then the line on top -- same order the "Live
+                # traffic" panel already uses, so the glow (drawn last) sits
+                # bright on top of the translucent area fill instead of
+                # being muted underneath it.
                 ax.fill_between(xs, 0, ys, color=col, alpha=0.12)
+                if self._bloom_enabled:
+                    self._glow_line(ax, xs, ys, col, lw=1.4)
+                else:
+                    ax.plot(xs, ys, color=col, linewidth=1.4, alpha=0.95)
                 ax.xaxis.set_major_formatter(DateFormatter('%H:%M'))
                 plt.setp(ax.get_xticklabels(), rotation=30, ha='right',
                         color=self.TICK, fontsize=6)
@@ -36065,8 +36133,11 @@ class ModernWindow:
             try:
                 dt = [datetime.fromisoformat(t) for t in dns_ts[-80:]]
                 dv = [v or 0 for v in dv_all[-80:]]
-                ax_dns.plot(dt, dv, color=dns_c, linewidth=1.4)
                 ax_dns.fill_between(dt, 0, dv, color=dns_c, alpha=0.12)
+                if self._bloom_enabled:
+                    self._glow_line(ax_dns, dt, dv, dns_c, lw=1.4)
+                else:
+                    ax_dns.plot(dt, dv, color=dns_c, linewidth=1.4)
                 ax_dns.xaxis.set_major_formatter(DateFormatter('%H:%M'))
                 plt.setp(ax_dns.get_xticklabels(), rotation=30, ha='right',
                         color=self.TICK, fontsize=6)
@@ -36190,8 +36261,14 @@ class ModernWindow:
                 xs2 = list(range(len(tx)))
                 ax.fill_between(xs2, rx, alpha=0.10, color=dl_c)
                 ax.fill_between(xs2, tx, alpha=0.08, color=ul_c)
-                self._glow_line(ax, xs2, rx, dl_c, lw=1.5)
-                self._glow_line(ax, xs2, tx, ul_c, lw=1.3)
+                if self._bloom_enabled:
+                    self._glow_line(ax, xs2, rx, dl_c, lw=1.5)
+                    self._glow_line(ax, xs2, tx, ul_c, lw=1.3)
+                else:
+                    ax.plot(xs2, rx, color=dl_c, linewidth=1.5, alpha=0.95,
+                            solid_capstyle='round', solid_joinstyle='round')
+                    ax.plot(xs2, tx, color=ul_c, linewidth=1.3, alpha=0.95,
+                            solid_capstyle='round', solid_joinstyle='round')
                 ax.set_xlim(0, 120); ax.set_xticks([])
                 pk = max(max(tx), max(rx), 0.1)
                 ax.set_ylim(0, pk * 1.3)
