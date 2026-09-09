@@ -2,3 +2,5 @@ numpy>=1.24
 matplotlib>=3.7
 mplcursors>=0.5
 pyinstaller>=6.0
+paramiko>=3.4
+pywinrm>=0.4

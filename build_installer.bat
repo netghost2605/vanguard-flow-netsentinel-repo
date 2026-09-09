@@ -81,7 +81,15 @@ pip install numpy matplotlib mplcursors Pillow --quiet
 :: real reason, never a fabricated reading. Installed here (build time) so it
 :: ships INSIDE the exe; end users never need to pip install anything.
 pip install nvidia-ml-py --quiet
-echo  [OK] Python dependencies installed (including nvidia-ml-py for GPU readings).
+:: paramiko (SSH) + pywinrm (PowerShell Remoting) power the Push Agent
+:: feature — deploying speedtest_agent onto a remote Windows/Linux box.
+:: Both are pure Python plus small compiled deps PyInstaller already knows
+:: how to bundle (cryptography for paramiko), so this is the same
+:: "installed at build time, ships inside the exe" pattern as everything
+:: else in this block.
+pip install paramiko pywinrm --quiet
+echo  [OK] Python dependencies installed (including nvidia-ml-py for GPU readings,
+echo       paramiko + pywinrm for Push Agent).
 
 :: ── Check / install Ollama (local AI engine) ─────────────────────────────────
 ::    The app runs its AI locally via Ollama (no API key). Make sure it's present
@@ -346,6 +354,56 @@ if exist "nm_client.py" (
     )
 ) else (
     echo  [INFO] nm_client.py not found - skipping the optional client build.
+)
+
+:: -- Step 1c: Build the headless agent exe (for Push Agent's Windows path) --
+:: This is a plain onefile build via speedtest_agent.spec (pure stdlib, no
+:: heavy deps) rather than nm_client's --onefile CLI invocation above, since
+:: a .spec keeps it consistent with speedtest_monitor.spec's own style and
+:: makes future tweaks (icon, hidden imports) a one-file edit if ever needed.
+:: Push Agent's LINUX path does not need this exe at all: it pushes
+:: speedtest_agent.py itself and runs it with the target's own python3,
+:: because PyInstaller cannot cross-compile a Linux binary from Windows.
+if exist "speedtest_agent.py" (
+    echo.
+    echo  +-----------------------------------------+
+    echo  ^|  Step 1c: Building SpeedtestAgent.exe   ^|
+    echo  +-----------------------------------------+
+    echo.
+
+    if exist "dist\SpeedtestAgent.exe" (
+        del /f /q "dist\SpeedtestAgent.exe" >nul 2>&1
+        if exist "dist\SpeedtestAgent.exe" (
+            echo  [ERROR] Cannot delete dist\SpeedtestAgent.exe - it is locked.
+            echo          Close anything running it and re-run this script.
+            pause
+            exit /b 1
+        )
+    )
+    if exist "build\speedtest_agent" rmdir /s /q "build\speedtest_agent" >nul 2>&1
+
+    if exist "speedtest_agent.spec" (
+        pyinstaller speedtest_agent.spec --noconfirm
+    ) else (
+        pyinstaller --onefile --console --name SpeedtestAgent speedtest_agent.py --clean --noconfirm
+    )
+
+    if errorlevel 1 (
+        echo  [ERROR] PyInstaller failed to build the agent - see output above.
+        echo          Push Agent's Windows path will have nothing to deploy
+        echo          until this is fixed.
+        pause
+        exit /b 1
+    )
+    if exist "dist\SpeedtestAgent.exe" (
+        echo  [OK] SpeedtestAgent.exe rebuilt fresh from speedtest_agent.py.
+    ) else (
+        echo  [WARN] Build reported success but produced no exe; Push Agent's
+        echo         Windows path will have nothing to deploy.
+    )
+) else (
+    echo  [INFO] speedtest_agent.py not found - skipping the agent build.
+    echo         Push Agent will have nothing to deploy to either platform.
 )
 
 :: ── Step 2: Build NSIS installer ─────────────────────────────────────────────

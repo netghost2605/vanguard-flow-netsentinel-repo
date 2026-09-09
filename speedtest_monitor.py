@@ -2569,7 +2569,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-c5d3c0c0'
+_NM_BUILD_ID = 'b-bf352903'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -19257,6 +19257,874 @@ class AgentsWindow:
             _exc('_update_agent_detail')
 
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Push Agent — deploy speedtest_agent to a remote Windows/Linux box, make
+#  it run now, and register it to auto-start on every future reboot
+# ═════════════════════════════════════════════════════════════════════════════
+class PushAgentError(RuntimeError):
+    """Raised with a clear, user-facing message at any failed deploy step."""
+    pass
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Shared: verify the agent is actually up, by asking it directly
+# ─────────────────────────────────────────────────────────────────────────
+def _pa_verify_agent_health(host, agent_port, attempts=8, delay=2.0, log=print):
+    url = f'http://{host}:{agent_port}/health'
+    last_err = None
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=4) as r:
+                body = json.loads(r.read().decode())
+                if body.get('ok'):
+                    log(f'  ✓ Agent responded healthy at {url}')
+                    return True
+        except Exception as e:
+            last_err = e
+        if i < attempts - 1:
+            time.sleep(delay)
+    raise PushAgentError(
+        f"Deployed, but the agent never answered {url} after "
+        f"{attempts * delay:.0f}s ({last_err}). It may still be starting, "
+        f"blocked by a firewall on port {agent_port}, or failed to launch — "
+        f"check the target machine directly.")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Linux — SSH (paramiko)
+# ─────────────────────────────────────────────────────────────────────────
+def _pa_deploy_linux(host, ssh_port, username, password, install_dir,
+                      local_agent_path, local_speedtest_path,
+                      agent_port, interval_min, token,
+                      service_name='netsentinel-agent', log=print,
+                      connect_timeout=12,
+                      _skip_systemd=False):
+    """Deploy speedtest_agent to a remote Linux box over SSH:
+    - SFTP the agent binary (+ optional speedtest CLI) to install_dir
+    - Register + enable + start a systemd service so it runs now AND on
+      every future boot, with no one logged in
+    Requires: sshd reachable, and the account can either log in as root or
+    use sudo (passworded or passwordless) — this is checked and reported
+    clearly, not assumed.
+    """
+    import posixpath
+    try:
+        import paramiko
+    except ImportError:
+        raise PushAgentError(
+            "paramiko isn't installed in this build. Add 'paramiko' to "
+            "requirements.txt and rebuild.")
+
+    if not os.path.isfile(local_agent_path):
+        raise PushAgentError(f"Agent file not found at {local_agent_path} "
+                              "— it should be bundled next to this app.")
+
+    log(f'Connecting to {host}:{ssh_port} as {username}…')
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(host, port=ssh_port, username=username,
+                        password=password, timeout=connect_timeout,
+                        banner_timeout=connect_timeout,
+                        auth_timeout=connect_timeout)
+    except paramiko.AuthenticationException:
+        raise PushAgentError(
+            f"Login rejected for {username}@{host}:{ssh_port} — check the "
+            "username and password.")
+    except Exception as e:
+        raise PushAgentError(
+            f"Couldn't reach {host}:{ssh_port} over SSH: {e}. Is SSH running "
+            "and reachable, and is the port right?")
+
+    try:
+        is_root = (username == 'root')
+        # Set once, below, by the sudo sanity check — determines whether
+        # sudo calls need the password piped in at all. Getting this wrong
+        # is not cosmetic: piping a password into stdin that sudo isn't
+        # actually going to consume (because NOPASSWD is configured) means
+        # that password text is instead handed straight through as the
+        # first line of whatever the *command itself* reads from stdin —
+        # e.g. it would land inside a file written via `tee`. So the two
+        # cases (needs a password / doesn't) use genuinely different
+        # command forms below, not just an optional extra write.
+        needs_sudo_password = None
+
+        def _run(cmd, sudo=False, input_bytes=None, check=True):
+            """Run one command over SSH.
+            sudo=False: run as-is.
+            sudo=True, is_root: no sudo needed, run as-is.
+            sudo=True, passwordless sudo confirmed: `sudo -n <cmd>` — never
+              touches stdin for a password, so input_bytes (if any) reaches
+              the command's own stdin untouched.
+            sudo=True, password required: `sudo -S -p '' <cmd>` with the
+              password written first, THEN input_bytes — never in argv, so
+              it never shows up in a `ps` listing on the target.
+            """
+            real_cmd = cmd
+            send_password = False
+            if sudo and not is_root:
+                if needs_sudo_password:
+                    real_cmd = f"sudo -S -p '' {cmd}"
+                    send_password = True
+                else:
+                    real_cmd = f"sudo -n {cmd}"
+            stdin, stdout, stderr = client.exec_command(real_cmd, timeout=60)
+            if send_password:
+                stdin.write(password + '\n')
+                stdin.flush()
+            if input_bytes is not None:
+                stdin.write(input_bytes)
+            stdin.channel.shutdown_write()
+            out = stdout.read().decode(errors='replace')
+            err = stderr.read().decode(errors='replace')
+            rc = stdout.channel.recv_exit_status()
+            if check and rc != 0:
+                raise PushAgentError(
+                    f"Command failed on {host} (exit {rc}): {cmd}\n{err or out}")
+            return rc, out, err
+
+        # ── sudo sanity check (skip entirely if logging in as root) ────────
+        if not is_root:
+            log('Checking sudo access…')
+            # `sudo -n true` never touches stdin. Its result tells us which
+            # command form every later sudo call needs to use — checked
+            # once here rather than guessed per-call.
+            _, out_ch, err_ch = client.exec_command('sudo -n true', timeout=15)
+            err_text = err_ch.read().decode(errors='replace')
+            rc = out_ch.channel.recv_exit_status()
+            if rc == 0:
+                needs_sudo_password = False
+                log('  ✓ sudo OK (passwordless / NOPASSWD configured)')
+            elif 'password is required' in err_text.lower():
+                # `sudo -n` can't tell "needs a password" apart from "isn't
+                # a sudoer at all" without actually trying one — both give
+                # this same message. So actually try the given password
+                # next; ITS error message (if any) is the trustworthy one.
+                needs_sudo_password = True
+                rc2, out2, err2 = _run('true', sudo=True, check=False)
+                if rc2 != 0:
+                    raise PushAgentError(
+                        f"{username}@{host} failed the sudo check "
+                        f"({err2.strip() or 'denied'}) — check the password "
+                        "and that the account actually has sudo rights.")
+                log('  ✓ sudo OK (password required, verified)')
+            else:
+                raise PushAgentError(
+                    f"{username}@{host} can't sudo "
+                    f"({err_text.strip() or 'denied'}). The account needs "
+                    "sudo rights to install a systemd service — use a "
+                    "different account or grant sudo first.")
+
+        # ── the agent ships as a raw .py script for Linux (there's no
+        #    Linux build of it on a Windows dev machine — PyInstaller
+        #    doesn't cross-compile — and python3 is close to universal on
+        #    Linux anyway), or a real compiled binary if one was pointed
+        #    at explicitly. Only the .py case needs python3 on the target. ─
+        is_script = local_agent_path.endswith('.py')
+        if is_script:
+            log('Checking for python3 on the target…')
+            rc, out, err = _run('command -v python3', check=False)
+            if rc != 0:
+                raise PushAgentError(
+                    f"{host} has no python3 on its PATH, and the agent is "
+                    "being pushed as a .py script that needs it. Either "
+                    "install python3 on the target, or point this deploy "
+                    "at a pre-built agent binary instead (Settings > "
+                    "Push Agent, if you've built one for Linux yourself).")
+            log(f'  ✓ python3 found ({out.strip()})')
+
+        # ── install dir ─────────────────────────────────────────────────
+        log(f'Creating {install_dir}…')
+        _run(f'mkdir -p {install_dir}', sudo=True)
+        _run(f'chown {username}:{username} {install_dir}'
+             if not is_root else f'true', sudo=True, check=False)
+
+        # ── copy the agent binary via SFTP to a temp path the login user
+        #    can write directly, then move it into place with sudo — a
+        #    normal SSH login usually can't SFTP straight into a root-
+        #    owned system directory. ─────────────────────────────────────
+        sftp = client.open_sftp()
+        remote_tmp = posixpath.join('/tmp', f'nm_agent_push_{os.getpid()}')
+        _run(f'mkdir -p {remote_tmp}')
+        agent_name = os.path.basename(local_agent_path)
+        tmp_agent_path = posixpath.join(remote_tmp, agent_name)
+        log(f'Copying {agent_name}…')
+        sftp.put(local_agent_path, tmp_agent_path)
+        final_agent_path = posixpath.join(install_dir, agent_name)
+        _run(f'mv {tmp_agent_path} {final_agent_path}', sudo=True)
+        _run(f'chmod 755 {final_agent_path}', sudo=True)
+
+        if local_speedtest_path and os.path.isfile(local_speedtest_path):
+            st_name = os.path.basename(local_speedtest_path)
+            log(f'Copying {st_name}…')
+            tmp_st_path = posixpath.join(remote_tmp, st_name)
+            sftp.put(local_speedtest_path, tmp_st_path)
+            final_st_path = posixpath.join(install_dir, st_name)
+            _run(f'mv {tmp_st_path} {final_st_path}', sudo=True)
+            _run(f'chmod 755 {final_st_path}', sudo=True)
+
+        _run(f'rmdir {remote_tmp}', check=False)
+        sftp.close()
+
+        # ── systemd unit: runs now (--now) and on every future boot
+        #    (enable), as root, restarting itself if it ever dies ────────
+        args = f'--port {agent_port} --interval {interval_min} --host 0.0.0.0'
+        if token:
+            # POSIX single-quote escaping for the systemd ExecStart line:
+            # close the quote, emit an escaped literal quote, reopen it.
+            esc_token = token.replace("'", "'\\''")
+            args += f" --token '{esc_token}'"
+        exec_start = (f'/usr/bin/env python3 {final_agent_path} {args}'
+                      if is_script else f'{final_agent_path} {args}')
+        unit = f"""[Unit]
+Description=Vanguard Flow NetSentinel Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={exec_start}
+WorkingDirectory={install_dir}
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+"""
+        log('Installing systemd service…')
+        unit_path = f'/etc/systemd/system/{service_name}.service'
+        _run(f'tee {unit_path} > /dev/null', sudo=True,
+             input_bytes=unit.encode())
+
+        if not _skip_systemd:
+            log('Enabling + starting the service (runs now, and on every reboot)…')
+            _run('systemctl daemon-reload', sudo=True)
+            _run(f'systemctl enable --now {service_name}', sudo=True)
+        else:
+            # Test-only fallback for sandboxes with no running init system —
+            # never used by the real shipped deploy path. Must launch it the
+            # same way the unit file's ExecStart does (python3 in front for
+            # a .py script — it likely has no #! shebang to exec directly).
+            log('[test mode] systemd unavailable here — starting directly instead')
+            _run(f'nohup {exec_start} '
+                 f'> /tmp/nm_agent_test.log 2>&1 & disown', check=False)
+
+        log(f'✓ Linux deploy complete: {final_agent_path}')
+        return {'install_path': final_agent_path, 'service_name': service_name}
+    finally:
+        client.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Windows — WinRM (PowerShell Remoting)
+# ─────────────────────────────────────────────────────────────────────────
+_WINRM_CHUNK_BYTES = 300_000   # keep each base64'd PS command under WinRM's
+                                # default ~500KB envelope limit
+
+
+def _pa_ps_quote(s):
+    """Single-quote a string for embedding in a PowerShell command,
+    doubling any embedded single quotes — the standard PS escaping rule."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def _pa_win_quote_arg(s):
+    """Quote one value for a Windows command line (the CreateProcess argv
+    rules the agent's own argparse will see) — NOT the same thing as
+    PowerShell string quoting. Windows argv escaping only cares about
+    double quotes and backslashes-before-a-quote; a literal single quote
+    needs no escaping at all there. This is applied to individual argument
+    VALUES (like the bearer token); the whole resulting argument string is
+    then wrapped in _pa_ps_quote() exactly once, separately, when it's
+    embedded into the PowerShell script as -Argument's string literal."""
+    s = str(s)
+    if s and not re.search(r'[\s"]', s):
+        return s
+    out = []
+    i = 0
+    while i < len(s):
+        n_back = 0
+        while i < len(s) and s[i] == '\\':
+            n_back += 1
+            i += 1
+        if i == len(s):
+            out.append('\\' * (n_back * 2))
+            break
+        elif s[i] == '"':
+            out.append('\\' * (n_back * 2 + 1) + '"')
+            i += 1
+        else:
+            out.append('\\' * n_back + s[i])
+            i += 1
+    return '"' + ''.join(out) + '"'
+
+
+def _pa_deploy_windows(host, username, password, install_dir,
+                        local_agent_path, local_speedtest_path,
+                        agent_port, interval_min, token,
+                        task_name='VanguardFlowNetSentinelAgent',
+                        use_https=False, log=print, connect_timeout=15):
+    """Deploy speedtest_agent to a remote Windows box over WinRM
+    (PowerShell Remoting):
+    - copies the agent exe (+ optional speedtest CLI) by streaming it as
+      base64 through PowerShell (WinRM has no native file-copy primitive)
+    - registers a Scheduled Task with an AtStartup trigger running as
+      SYSTEM (so it starts on every future reboot with nobody logged in),
+      then starts it immediately
+    Requires: WinRM enabled on the target (`winrm quickconfig` once, as
+    admin) — this is checked and reported clearly, not assumed.
+    """
+    import base64
+    try:
+        import winrm
+    except ImportError:
+        raise PushAgentError(
+            "pywinrm isn't installed in this build. Add 'pywinrm' to "
+            "requirements.txt and rebuild.")
+
+    if not os.path.isfile(local_agent_path):
+        raise PushAgentError(f"Agent file not found at {local_agent_path} "
+                              "— it should be bundled next to this app.")
+
+    scheme = 'https' if use_https else 'http'
+    port = 5986 if use_https else 5985
+    endpoint = f'{scheme}://{host}:{port}/wsman'
+    transport = 'ssl' if use_https else 'ntlm'
+    log(f'Connecting to {endpoint} ({transport})…')
+    session = winrm.Session(endpoint, auth=(username, password),
+                             transport=transport,
+                             server_cert_validation='ignore',
+                             operation_timeout_sec=connect_timeout + 10,
+                             read_timeout_sec=connect_timeout + 15)
+
+    def _ps(script, what):
+        try:
+            r = session.run_ps(script)
+        except Exception as e:
+            raise PushAgentError(
+                f"Couldn't reach {host} over WinRM: {e}. Is WinRM enabled on "
+                f"the target ('winrm quickconfig' as admin), and is it "
+                f"reachable on port {port}?")
+        if r.status_code != 0:
+            raise PushAgentError(
+                f"{what} failed on {host} (exit {r.status_code}):\n"
+                f"{r.std_err.decode(errors='replace')}")
+        return r.std_out.decode(errors='replace')
+
+    # ── connectivity + credential check ────────────────────────────────
+    log('Checking connection and credentials…')
+    _ps('hostname', 'Connectivity check')
+    log('  ✓ connected')
+
+    # ── install dir ─────────────────────────────────────────────────────
+    log(f'Creating {install_dir}…')
+    _ps(f'New-Item -ItemType Directory -Force -Path {_pa_ps_quote(install_dir)} '
+        '| Out-Null', 'Creating install directory')
+
+    def _push_file(local_path, remote_path):
+        name = os.path.basename(local_path)
+        log(f'Copying {name}…')
+        size = os.path.getsize(local_path)
+        sent = 0
+        with open(local_path, 'rb') as f:
+            first = True
+            while True:
+                chunk = f.read(_WINRM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                b64 = base64.b64encode(chunk).decode()
+                mode = "'Create'" if first else "'Append'"
+                script = (
+                    f"$fs = [System.IO.File]::Open({_pa_ps_quote(remote_path)}, "
+                    f"{mode}, 'Write'); "
+                    f"$b = [Convert]::FromBase64String('{b64}'); "
+                    f"$fs.Write($b, 0, $b.Length); $fs.Close()"
+                )
+                _ps(script, f'Copying {name}')
+                first = False
+                sent += len(chunk)
+        # Sanity check: confirm the remote file actually landed at the
+        # right size, rather than trusting each chunk write "said" OK.
+        out = _ps(f'(Get-Item {_pa_ps_quote(remote_path)}).Length',
+                   f'Verifying {name}')
+        try:
+            remote_size = int(out.strip())
+        except ValueError:
+            remote_size = -1
+        if remote_size != size:
+            raise PushAgentError(
+                f"{name} copied but ended up {remote_size} bytes on "
+                f"{host}, expected {size} — copy is corrupt, aborting "
+                "rather than registering a task against a bad exe.")
+        log(f'  ✓ {name} ({size:,} bytes) verified on target')
+
+    agent_name = os.path.basename(local_agent_path)
+    remote_agent_path = f'{install_dir}\\{agent_name}'
+    _push_file(local_agent_path, remote_agent_path)
+
+    if local_speedtest_path and os.path.isfile(local_speedtest_path):
+        st_name = os.path.basename(local_speedtest_path)
+        _push_file(local_speedtest_path, f'{install_dir}\\{st_name}')
+
+    # ── scheduled task: AtStartup + SYSTEM = runs on every future boot
+    #    with nobody logged in; Start-ScheduledTask = runs right now too ──
+    # arg_str is the literal command-line text the exe's own argparse will
+    # see, so the token (the one piece of user-supplied free text here)
+    # gets WINDOWS argv quoting if it needs it. _pa_ps_quote is applied
+    # exactly once, below, to arg_str as a whole — applying it here too
+    # would double-escape any quote characters.
+    arg_str = f'--port {agent_port} --interval {interval_min} --host 0.0.0.0'
+    if token:
+        arg_str += f' --token {_pa_win_quote_arg(token)}'
+    log('Registering scheduled task (runs now, and on every reboot)…')
+    script = f"""
+$action = New-ScheduledTaskAction -Execute {_pa_ps_quote(remote_agent_path)} `
+    -Argument {_pa_ps_quote(arg_str)} -WorkingDirectory {_pa_ps_quote(install_dir)}
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName {_pa_ps_quote(task_name)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+Start-ScheduledTask -TaskName {_pa_ps_quote(task_name)}
+"""
+    _ps(script, 'Registering scheduled task')
+    log(f'✓ Windows deploy complete: {remote_agent_path}')
+    return {'install_path': remote_agent_path, 'task_name': task_name}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Defaults + locating the agent files bundled next to this app
+# ─────────────────────────────────────────────────────────────────────────
+PA_DEFAULT_WINDOWS_DIR = r'C:\ProgramData\NetSentinelAgent'
+PA_DEFAULT_LINUX_DIR   = '/opt/netsentinel-agent'
+PA_DEFAULT_AGENT_PORT  = 7331
+PA_DEFAULT_INTERVAL    = 5
+PA_DEFAULT_TASK_NAME   = 'VanguardFlowNetSentinelAgent'
+PA_DEFAULT_SERVICE_NAME = 'netsentinel-agent'
+
+
+def _pa_local_agent_path(os_kind):
+    """Locate the agent file bundled next to this running app, for the
+    chosen TARGET os_kind -- 'windows' or 'linux'. This has nothing to do
+    with what OS *this* app is currently running on.
+
+    - Windows target: installer.nsi always ships SpeedtestAgent.exe in the
+      same folder as the main exe (a real PyInstaller build, since Windows
+      targets can't be relied on to have Python).
+    - Linux target: speedtest_agent.py itself, shipped next to the main
+      exe/script the same way nm_client.py already is. Pushed as a raw
+      script and run via the target's own python3 (see _pa_deploy_linux)
+      rather than a cross-compiled binary, because PyInstaller can't
+      cross-compile a Linux ELF from a Windows build machine.
+    """
+    base = _app_dir()
+    if os_kind == 'windows':
+        return str(base / 'SpeedtestAgent.exe')
+    return str(base / 'speedtest_agent.py')
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Push Agent — GUI
+# ─────────────────────────────────────────────────────────────────────────
+class PushAgentWindow:
+    """Deploy speedtest_agent onto another Windows or Linux machine: copies
+    it over, starts it running immediately, and registers it to start
+    automatically on every future reboot (nobody needs to be logged in for
+    it to come back up). Once deployed it shows up under ⊞ AGENTS on its
+    own, polled the same way as any other remote agent.
+
+    Windows uses WinRM (PowerShell Remoting) — standard Windows remote
+    management, not SMB/PsExec-style code execution. Linux uses SSH. Either
+    way, the login you type in is used once, for this one deploy, over an
+    authenticated connection, and is never written to disk.
+    """
+    _BG    = '#050d1a'
+    _PANEL = '#081426'
+    _ACC   = '#39ff14'
+    _TEXT  = '#c8dff0'
+    _TICK  = '#6a9ab8'
+    _ENT   = '#0d2235'
+    _DIM   = '#2a4a6a'
+
+    def __init__(self, monitor: SpeedTestMonitor):
+        _nm_pick_mono()
+        import tkinter as tk
+        from tkinter import ttk, filedialog, messagebox
+        self._tk = tk
+        self._ttk = ttk
+        self._filedialog = filedialog
+        self._messagebox = messagebox
+        self._monitor = monitor
+        self._closed = False
+        self._deploying = False
+
+        self.root = tk.Toplevel()
+        self.root.title('Push Agent')
+        self.root.configure(bg=self._BG)
+        self.root.geometry('760x820')
+        self.root.minsize(680, 640)
+        self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+        self._os_var = tk.StringVar(value='windows')
+        self._build_ui()
+        self._apply_os_defaults()
+        self.root.update_idletasks()
+        self.root.lift()
+        self.root.focus_force()
+        if _MODERN_MODE:
+            self.root.after(50, lambda: _apply_modern_style(self.root))
+
+    def _on_close(self):
+        if self._deploying:
+            if not self._messagebox.askyesno(
+                    'Deploy in progress',
+                    'A deploy is still running. Close anyway?\n\n'
+                    "(It keeps running on the target either way — this "
+                    "just stops watching it here.)", parent=self.root):
+                return
+        self._closed = True
+        self.root.destroy()
+
+    # ── UI ───────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        tk = self._tk
+        r = self.root
+
+        _make_header(r, tk, '⇪  PUSH AGENT',
+                     'Deploy the monitoring agent onto another machine',
+                     accent=self._ACC)
+
+        # ── explanation panel — this is the "explains it here too" text,
+        #    not just the guide ──────────────────────────────────────────
+        exp = tk.Frame(r, bg=self._PANEL, highlightthickness=1,
+                        highlightbackground='#1a3050')
+        exp.pack(fill='x', padx=10, pady=(10, 6))
+        exp_text = (
+            "What this does: copies the monitoring agent onto the machine "
+            "below, using the login you give it, starts it running right "
+            "now, and sets it to start automatically on every future "
+            "reboot — nobody has to be logged in for it to come back up. "
+            "Once it's running it shows up under ⊙ AGENTS on its own.\n\n"
+            "Your password is used once for this deploy, over an "
+            "authenticated connection, and is never written to disk.\n\n"
+            "Before you start:\n"
+            "  • Windows target: needs WinRM turned on once. On the "
+            "TARGET machine, an admin PowerShell:  winrm quickconfig -q\n"
+            "  • Linux target: needs SSH running, and the account must "
+            "be root or able to sudo."
+        )
+        tk.Label(exp, text=exp_text, bg=self._PANEL, fg=self._TEXT,
+                 font=(_NM_MONO, 9), justify='left', wraplength=700,
+                 anchor='w').pack(fill='x', padx=12, pady=10)
+
+        # ── OS toggle ────────────────────────────────────────────────────
+        osf = tk.Frame(r, bg=self._BG)
+        osf.pack(fill='x', padx=10, pady=(0, 6))
+        tk.Label(osf, text='Target OS', bg=self._BG, fg=self._TICK,
+                 font=(_NM_MONO, 9)).pack(side='left', padx=(2, 10))
+
+        def _os_btn(text, val):
+            b = tk.Button(osf, text=text, bg=self._ENT, relief='flat',
+                          font=(_NM_MONO, 9, 'bold'), cursor='hand2',
+                          padx=14, pady=4,
+                          command=lambda: self._set_os(val))
+            b.pack(side='left', padx=4)
+            return b
+        self._win_btn = _os_btn('\U0001F5A5  Windows', 'windows')
+        self._lin_btn = _os_btn('\U0001F427  Linux',   'linux')
+        self._refresh_os_buttons()
+
+        # ── form ─────────────────────────────────────────────────────────
+        form = tk.Frame(r, bg=self._BG)
+        form.pack(fill='x', padx=10, pady=(4, 4))
+        form.columnconfigure(1, weight=1)
+
+        def entry(show=None, width=None):
+            e = tk.Entry(form, bg=self._ENT, fg=self._TEXT,
+                        insertbackground=self._TEXT, relief='flat',
+                        font=(_NM_MONO, 9), show=show,
+                        highlightthickness=1, highlightcolor=self._ACC,
+                        highlightbackground='#1a3050')
+            if width:
+                e.config(width=width)
+            return e
+
+        def lbl(text, row, hint=None):
+            tk.Label(form, text=text, bg=self._BG, fg=self._TEXT,
+                     font=(_NM_MONO, 9)).grid(row=row, column=0, sticky='w',
+                                               padx=(2, 8), pady=3)
+
+        row = 0
+        lbl('Host / IP', row)
+        self._host_e = entry()
+        self._host_e.grid(row=row, column=1, columnspan=3, sticky='ew', pady=3)
+        row += 1
+
+        lbl('Username', row)
+        self._user_e = entry()
+        self._user_e.grid(row=row, column=1, sticky='ew', pady=3, padx=(0, 8))
+        lbl2 = tk.Label(form, text='Password', bg=self._BG, fg=self._TEXT,
+                        font=(_NM_MONO, 9))
+        lbl2.grid(row=row, column=2, sticky='w', padx=(0, 8))
+        self._pass_e = entry(show='•')
+        self._pass_e.grid(row=row, column=3, sticky='ew', pady=3)
+        row += 1
+
+        lbl('Port', row)
+        self._port_e = entry(width=10)
+        self._port_e.grid(row=row, column=1, sticky='w', pady=3)
+        self._https_var = tk.BooleanVar(value=False)
+        self._https_chk = tk.Checkbutton(
+            form, text='Use HTTPS (5986)', variable=self._https_var,
+            bg=self._BG, fg=self._TEXT, selectcolor=self._ENT,
+            activebackground=self._BG, font=(_NM_MONO, 8),
+            command=self._on_https_toggle)
+        self._https_chk.grid(row=row, column=2, columnspan=2, sticky='w')
+        row += 1
+
+        tk.Frame(form, bg='#1a3050', height=1).grid(
+            row=row, column=0, columnspan=4, sticky='ew', pady=8)
+        row += 1
+
+        lbl('Install directory', row)
+        self._dir_e = entry()
+        self._dir_e.grid(row=row, column=1, columnspan=3, sticky='ew', pady=3)
+        row += 1
+
+        lbl('Agent port', row)
+        self._agent_port_e = entry(width=10)
+        self._agent_port_e.insert(0, str(PA_DEFAULT_AGENT_PORT))
+        self._agent_port_e.grid(row=row, column=1, sticky='w', pady=3)
+        tk.Label(form, text='Test interval (min)', bg=self._BG, fg=self._TEXT,
+                 font=(_NM_MONO, 9)).grid(row=row, column=2, sticky='w')
+        self._interval_e = entry(width=10)
+        self._interval_e.insert(0, str(PA_DEFAULT_INTERVAL))
+        self._interval_e.grid(row=row, column=3, sticky='w', pady=3)
+        row += 1
+
+        lbl('Bearer token', row)
+        self._token_e = entry()
+        self._token_e.grid(row=row, column=1, columnspan=2, sticky='ew', pady=3)
+        tk.Button(form, text='Regenerate', bg=self._ENT, fg=self._ACC,
+                  relief='flat', font=(_NM_MONO, 8), cursor='hand2',
+                  command=self._regen_token).grid(row=row, column=3, sticky='w', padx=(6, 0))
+        self._regen_token()
+        row += 1
+
+        self._st_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(form, text='Also copy a local speed-test CLI to the target',
+                       variable=self._st_var, bg=self._BG, fg=self._TEXT,
+                       selectcolor=self._ENT, activebackground=self._BG,
+                       font=(_NM_MONO, 8),
+                       command=self._on_st_toggle).grid(
+            row=row, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        row += 1
+        self._st_e = entry()
+        self._st_e.grid(row=row, column=0, columnspan=3, sticky='ew', padx=(2, 0))
+        self._st_browse_btn = tk.Button(
+            form, text='Browse…', bg=self._ENT, fg=self._ACC, relief='flat',
+            font=(_NM_MONO, 8), cursor='hand2', command=self._browse_speedtest)
+        self._st_browse_btn.grid(row=row, column=3, sticky='w', padx=(6, 0))
+        self._st_e.config(state='disabled')
+        self._st_browse_btn.config(state='disabled')
+        row += 1
+
+        # ── deploy button + status ──────────────────────────────────────
+        bar = tk.Frame(r, bg=self._BG)
+        bar.pack(fill='x', padx=10, pady=(8, 4))
+        self._deploy_btn = tk.Button(
+            bar, text='↑  Deploy', bg='#062a1a', fg=self._ACC,
+            activebackground='#0a4028', activeforeground=self._ACC,
+            relief='flat', font=(_NM_MONO, 10, 'bold'), cursor='hand2',
+            padx=14, pady=6, command=self._start_deploy)
+        self._deploy_btn.pack(side='left')
+        self._status_var = tk.StringVar(value='Ready')
+        tk.Label(bar, textvariable=self._status_var, bg=self._BG,
+                 fg=self._TICK, font=(_NM_MONO, 9)).pack(side='left', padx=12)
+
+        # ── log ──────────────────────────────────────────────────────────
+        logf = tk.Frame(r, bg=self._BG)
+        logf.pack(fill='both', expand=True, padx=10, pady=(4, 10))
+        self._log_txt = tk.Text(logf, bg='#04070d', fg='#9fd8ff',
+                                font=(_NM_MONO, 9), relief='flat',
+                                state='disabled', wrap='word')
+        vsb = self._ttk.Scrollbar(logf, orient='vertical',
+                                   command=self._log_txt.yview)
+        self._log_txt.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        self._log_txt.pack(side='left', fill='both', expand=True)
+
+    # ── OS toggle handling ──────────────────────────────────────────────
+    def _refresh_os_buttons(self):
+        win_on = self._os_var.get() == 'windows'
+        self._win_btn.config(fg=self._ACC if win_on else self._DIM)
+        self._lin_btn.config(fg=self._ACC if not win_on else self._DIM)
+
+    def _set_os(self, val):
+        self._os_var.set(val)
+        self._refresh_os_buttons()
+        self._apply_os_defaults()
+
+    def _apply_os_defaults(self):
+        is_win = self._os_var.get() == 'windows'
+        self._dir_e.delete(0, 'end')
+        self._dir_e.insert(0, PA_DEFAULT_WINDOWS_DIR if is_win else PA_DEFAULT_LINUX_DIR)
+        self._port_e.delete(0, 'end')
+        if is_win:
+            self._port_e.insert(0, '5986' if self._https_var.get() else '5985')
+            self._https_chk.grid()
+        else:
+            self._port_e.insert(0, '22')
+            self._https_chk.grid_remove()
+        # Prefill the speedtest-CLI path only when it makes sense: a local
+        # Windows speedtest.exe configured in Settings, offered only for a
+        # Windows target (pushing it to Linux wouldn't run there).
+        st_path = self._monitor.config.get('speedtest_path', '') if is_win else ''
+        self._st_e.config(state='normal')
+        self._st_e.delete(0, 'end')
+        if st_path:
+            self._st_e.insert(0, st_path)
+        self._st_e.config(state='normal' if self._st_var.get() else 'disabled')
+
+    def _on_https_toggle(self):
+        cur = self._port_e.get().strip()
+        if cur in ('5985', '5986'):
+            self._port_e.delete(0, 'end')
+            self._port_e.insert(0, '5986' if self._https_var.get() else '5985')
+
+    def _on_st_toggle(self):
+        on = self._st_var.get()
+        self._st_e.config(state='normal' if on else 'disabled')
+        self._st_browse_btn.config(state='normal' if on else 'disabled')
+
+    def _browse_speedtest(self):
+        p = self._filedialog.askopenfilename(
+            parent=self.root, title='Locate a speed-test CLI for the target')
+        if p:
+            self._st_e.delete(0, 'end')
+            self._st_e.insert(0, p)
+
+    def _regen_token(self):
+        import secrets as _sec
+        self._token_e.delete(0, 'end')
+        self._token_e.insert(0, _sec.token_hex(16))
+
+    # ── logging (thread-safe: always marshalled via .after(0, ...)) ─────
+    def _log(self, msg):
+        self.root.after(0, lambda: self._append_log(msg))
+
+    def _append_log(self, msg):
+        if self._closed:
+            return
+        self._log_txt.config(state='normal')
+        self._log_txt.insert('end', msg + '\n')
+        self._log_txt.see('end')
+        self._log_txt.config(state='disabled')
+
+    # ── deploy ───────────────────────────────────────────────────────────
+    def _start_deploy(self):
+        if self._deploying:
+            return
+        host = self._host_e.get().strip()
+        user = self._user_e.get().strip()
+        password = self._pass_e.get()
+        install_dir = self._dir_e.get().strip()
+        token = self._token_e.get().strip()
+
+        if not host or not user:
+            self._messagebox.showerror('Push Agent', 'Host and username are required.',
+                                       parent=self.root)
+            return
+        try:
+            agent_port = int(self._agent_port_e.get().strip())
+            interval_min = int(self._interval_e.get().strip())
+            conn_port = int(self._port_e.get().strip())
+        except ValueError:
+            self._messagebox.showerror('Push Agent',
+                                       'Port and interval fields must be numbers.',
+                                       parent=self.root)
+            return
+
+        os_kind = self._os_var.get()
+        speedtest_path = self._st_e.get().strip() if self._st_var.get() else None
+        use_https = self._https_var.get()
+
+        self._deploying = True
+        self._deploy_btn.config(state='disabled')
+        self._status_var.set('Deploying…')
+        self._log_txt.config(state='normal')
+        self._log_txt.delete('1.0', 'end')
+        self._log_txt.config(state='disabled')
+        self._log(f'Starting deploy to {host} ({os_kind})…')
+
+        threading.Thread(
+            target=self._do_deploy,
+            args=(os_kind, host, conn_port, user, password, install_dir,
+                  agent_port, interval_min, token, speedtest_path, use_https),
+            daemon=True).start()
+
+    def _do_deploy(self, os_kind, host, conn_port, user, password, install_dir,
+                    agent_port, interval_min, token, speedtest_path, use_https):
+        try:
+            local_agent = _pa_local_agent_path(os_kind)
+            if os_kind == 'windows':
+                info = _pa_deploy_windows(
+                    host=host, username=user, password=password,
+                    install_dir=install_dir, local_agent_path=local_agent,
+                    local_speedtest_path=speedtest_path, agent_port=agent_port,
+                    interval_min=interval_min, token=token,
+                    task_name=PA_DEFAULT_TASK_NAME, use_https=use_https,
+                    log=self._log)
+            else:
+                info = _pa_deploy_linux(
+                    host=host, ssh_port=conn_port, username=user,
+                    password=password, install_dir=install_dir,
+                    local_agent_path=local_agent,
+                    local_speedtest_path=speedtest_path, agent_port=agent_port,
+                    interval_min=interval_min, token=token,
+                    service_name=PA_DEFAULT_SERVICE_NAME, log=self._log)
+
+            self._log('Verifying the agent is actually up…')
+            _pa_verify_agent_health(host, agent_port, log=self._log)
+
+            self._add_agent_entry(host, agent_port, token)
+            self.root.after(0, lambda: self._finish_deploy(True, host, agent_port))
+        except PushAgentError as e:
+            self._log(f'✗ {e}')
+            self.root.after(0, lambda: self._finish_deploy(False, host, agent_port))
+        except Exception as e:
+            _exc('PushAgentWindow._do_deploy')
+            self._log(f'✗ Unexpected error: {e}')
+            self.root.after(0, lambda: self._finish_deploy(False, host, agent_port))
+
+    def _add_agent_entry(self, host, agent_port, token):
+        """Register the freshly-deployed agent the same way AgentsWindow
+        itself saves one, so it shows up under ⊙ AGENTS immediately —
+        same file, same schema, no separate bookkeeping to keep in sync."""
+        try:
+            url = f'http://{host}:{agent_port}'
+            agents_file = AgentsWindow.AGENTS_FILE
+            saved = []
+            if Path(agents_file).exists():
+                with open(agents_file) as f:
+                    saved = json.load(f)
+            if not any(a.get('url') == url for a in saved):
+                saved.append({'url': url, 'token': token, 'label': host})
+                with open(agents_file, 'w') as f:
+                    json.dump(saved, f, indent=2)
+            self._log(f'✓ Added to ⊙ AGENTS as {host}')
+        except Exception:
+            _exc('PushAgentWindow._add_agent_entry')
+            self._log('(deployed OK, but could not add it to ⊙ AGENTS automatically — add it there by hand)')
+
+    def _finish_deploy(self, ok, host, agent_port):
+        self._deploying = False
+        self._deploy_btn.config(state='normal')
+        if ok:
+            self._status_var.set(f'✓ Deployed and verified at {host}:{agent_port}')
+        else:
+            self._status_var.set('✗ Deploy failed — see log above')
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  User Guide Window
 # ─────────────────────────────────────────────────────────────────────────────
@@ -19297,6 +20165,7 @@ class UserGuideWindow:
         ('  World View',             'world'),
         ('Attack Drill',             'attack'),
         ('Remote Agents',            'agents'),
+        ('Push Agent',               'push_agent'),
         ('Web Flow Views',           'webviews'),
         ('Running on Linux',         'linux'),
         ('Settings',                 'settings'),
@@ -19361,6 +20230,7 @@ class UserGuideWindow:
             ('bullet', 'WS CAPTURE — open the Wireshark packet capture window'),
             ('bullet', '◎ TOPOLOGY — open the network topology visualiser (EtherApe)'),
             ('bullet', '⊞ AGENTS — manage and view remote agents'),
+            ('bullet', '⇪ PUSH — deploy the agent onto another machine over the network'),
             ('bullet', '◱ MONITOR — live interface/process monitor'),
             ('bullet', '▦ HEATMAP — speed by hour of the week'),
             ('bullet', '⚠ OUTAGES — every recorded loss of service'),
@@ -20134,6 +21004,9 @@ class UserGuideWindow:
              '  ○ Offline  Remote VPS      http://vps.example.com:7331\n'
              '            Connection refused'),
             ('h2', 'Deploying an agent'),
+            ('tip', 'The steps below are the manual way. ⇪ PUSH in the sidebar does all of '
+                    'this for you over the network, given a login for the target machine — see '
+                    'the "Push Agent" page in this guide.'),
             ('step', '1|Copy speedtest_agent.py to the remote machine.'),
             ('step', '2|Run:  python speedtest_agent.py'),
             ('step', '3|The agent prints its IP and port on startup (default port 7331).'),
@@ -20160,6 +21033,74 @@ class UserGuideWindow:
             ('bullet', 'GET  /health — liveness probe (no auth required)'),
             ('warn', 'By default agents are open with no authentication. On untrusted networks '
                      'always set --token and firewall the port to trusted IPs only.'),
+        ],
+
+        'push_agent': [
+            ('h1', 'Push Agent'),
+            ('p',  '⇪ PUSH in the sidebar deploys the agent onto another machine over the '
+                   'network instead of you doing it by hand: it copies the agent onto the '
+                   'target, starts it running immediately, and sets it to start automatically '
+                   'on every future reboot — with nobody needing to be logged in on that '
+                   'machine for it to come back up. Once it answers, it is added to '
+                   '⊞ AGENTS automatically.'),
+            ('warn', 'You need working admin/root login credentials for the target machine. '
+                     'Only use this against machines you actually manage.'),
+            ('h2', 'What it actually does, no-bullshit version'),
+            ('bullet', 'Windows target: connects over WinRM (PowerShell Remoting — standard '
+                       'Windows remote management, the same mechanism tools like Ansible use — '
+                       'not SMB/PsExec-style code execution). Copies SpeedtestAgent.exe onto the '
+                       'target, registers a Scheduled Task with an "At startup" trigger running '
+                       'as SYSTEM, then starts it right away.'),
+            ('bullet', 'Linux target: connects over SSH. Copies speedtest_agent.py onto the '
+                       'target and runs it with the target\'s own python3. Installs it as a '
+                       'systemd service (enabled + started), so it restarts itself if it ever '
+                       'dies and comes back on every reboot.'),
+            ('bullet', 'Either way, your password is used once, for that one connection, and is '
+                       'never written to disk anywhere.'),
+            ('bullet', 'After copying, it actually asks the deployed agent\'s own /health '
+                       'endpoint over the network to confirm it is really up — a "Deployed" '
+                       'result means it was genuinely checked, not just assumed.'),
+            ('h2', 'Before you start — Windows targets'),
+            ('p',  'WinRM has to be turned on. On the TARGET machine, once, in an admin '
+                   'PowerShell window:'),
+            ('step', '1|winrm quickconfig -q'),
+            ('step', '2|Confirm it says WinRM is now set up to receive requests.'),
+            ('warn', 'This is off by default on a plain home Windows PC and usually already on '
+                     'in a managed business/domain network. If Push Agent can\'t connect, this '
+                     'is the first thing to check.'),
+            ('h2', 'Before you start — Linux targets'),
+            ('bullet', 'SSH must be running and reachable on the target (most Linux boxes have '
+                       'this already; check with:  systemctl status ssh)'),
+            ('bullet', 'The account you log in with must either be root, or able to sudo '
+                       '(password-required sudo is fine — Push Agent handles the prompt)'),
+            ('bullet', 'python3 must be on the target\'s PATH — nearly universal on Linux, but '
+                       'checked up front regardless, with a clear error if it\'s missing'),
+            ('h2', 'Using it'),
+            ('step', '1|Click ⇪ PUSH in the sidebar.'),
+            ('step', '2|Pick Windows or Linux — the defaults below (install folder, port) '
+                     'change to match.'),
+            ('step', '3|Enter the host/IP, username and password for the target.'),
+            ('step', '4|Leave the bearer token as generated, or set your own — it\'s what '
+                     'keeps the deployed agent\'s API from being wide open to anyone on the '
+                     'network.'),
+            ('step', '5|Optionally tick "Also copy a local speed-test CLI" if the target '
+                     'doesn\'t already have one — without it the agent runs fine but every '
+                     'speed test it tries will fail with a clear "not found" error.'),
+            ('step', '6|Click Deploy and watch the log. It ends with a verified "Deployed" '
+                     'status once the agent has actually answered back over the network.'),
+            ('h2', 'If it fails'),
+            ('bullet', 'Login rejected — wrong username/password for that machine'),
+            ('bullet', "Couldn't reach ... over WinRM — WinRM isn't enabled on the target, or "
+                       'a firewall is blocking port 5985/5986'),
+            ('bullet', "Couldn't reach ... over SSH — SSH isn't running on the target, or the "
+                       'port/firewall is wrong'),
+            ('bullet', "can't sudo — the account has no sudo rights; use a different account or "
+                       'grant it sudo first'),
+            ('bullet', 'has no python3 on its PATH — install python3 on the target, or push a '
+                       'pre-built agent binary instead if you have one for that platform'),
+            ('bullet', "the agent never answered .../health — it copied and (apparently) "
+                       'started, but isn\'t responding; check a firewall isn\'t blocking the '
+                       'agent\'s own port on the target, or look at the target directly'),
         ],
 
         'webviews': [
@@ -35630,6 +36571,7 @@ class ModernWindow:
         btn('WS', 'CAPTURE',  self._open_wireshark, '#39ff14')
         btn('◎', 'TOPOLOGY', self._open_etherape,  '#a371f7')
         btn('⊞', 'AGENTS',   self._open_agents,    '#39ff14')
+        btn('⇪', 'PUSH',     self._open_push_agent, '#38f0a8')
         btn('◱', 'MONITOR', self._open_monitor, '#38b8f0')
         div()
         btn('▦', 'HEATMAP',  self._open_heatmap,   '#f7cc73')
@@ -36424,6 +37366,9 @@ class ModernWindow:
 
     def _open_agents(self):
         AgentsWindow(self._monitor)
+
+    def _open_push_agent(self):
+        PushAgentWindow(self._monitor)
 
     def _open_system_monitor(self):
         # The "System" button now launches the real Task Manager TMOG app

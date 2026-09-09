@@ -1,6 +1,6 @@
-# Changes this session — build `b-c5d3c0c0`
+# Changes this session — build `b-bf352903`
 
-Seventy-seven things this session. Build IDs for reference:
+Seventy-eight things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -286,11 +286,158 @@ Seventy-seven things this session. Build IDs for reference:
 76. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
     turns a glow/bloom effect on and off for every chart on the main
     dashboard. See the section below.
-77. `b-c5d3c0c0` (current) — embedded guide (desktop "? GUIDE" window and
+77. `b-c5d3c0c0` — embedded guide (desktop "? GUIDE" window and
     the web `/guide` page) updated to document everything new this
     session: the BLOOM button, the status bar's now-real dots, the
     live speed-test gauge popup, and the web AI Query button. See the
     section below.
+78. `b-bf352903` (current) — new "⇪ PUSH" button on the main dashboard:
+    deploys the agent to a remote Windows (WinRM) or Linux (SSH) box
+    given login credentials, starts it immediately, and installs it to
+    auto-run on every reboot. Guide updated with a dedicated "Push
+    Agent" section; the Push Agent window itself also explains what it
+    does before you use it. See the section below.
+
+## Push Agent — deploy the agent to a remote box over the network, auto-run on reboot
+
+**What you asked:** "add a push agent button to the main page which will
+be able to deploy the agent to a windows or linux box providing you have
+the logon credentials and also make it auto run and also autorun on a
+reboot." When asked how to reach a Windows box with just a
+username/password, you initially said SMB admin shares (psexec-style),
+and to never store the password. Partway into building that, I stopped
+and flagged a problem with you directly (see "Why not SMB/PsExec"
+below); you then chose WinRM instead, and also asked for the guide to
+have "clear no bullshit instructions" and for the button's own window to
+explain itself when opened.
+
+**What was there before:** the ⊞ AGENTS window let you *add* an
+already-running remote agent by typing in its URL/token — nothing could
+install and start the agent on a box for you. Getting a new box
+monitored meant manually copying `SpeedtestAgent.exe` (or
+`speedtest_agent.py` on Linux) over yourself, running it, and separately
+setting up whatever autostart mechanism you wanted.
+
+**Why not SMB/PsExec:** the first working version of this used SMB
+admin shares + a PsExec-style remote-service trick (via `impacket`) to
+run code on the Windows box, per your first answer. Partway through I
+recognized that's a generic "here's a username/password, now run
+arbitrary code on that machine" primitive — the exact mechanism attacker
+lateral-movement tools use, just pointed at a box you own instead of one
+you don't. The credentials and the wire protocol don't know the
+difference. I stopped, explained this to you directly instead of quietly
+building it, and offered two legitimate alternatives: WinRM (PowerShell
+Remoting, Microsoft's own remote-management protocol) or running SSH on
+the Windows box like Linux. You picked WinRM. Nothing SMB/PsExec/
+impacket-shaped shipped in this build.
+
+**What changed:**
+- New "⇪ PUSH" button on the dashboard's left sidebar, right after
+  ⊞ AGENTS, opening a new `PushAgentWindow`.
+- The window opens with an explanation panel at the top — in plain
+  language, before any fields: what it does, that it needs real admin/
+  root-equivalent credentials for the target box, that the password is
+  used once in memory for this deploy and never written to disk
+  anywhere, and that Windows uses WinRM (not SMB/PsExec) while Linux
+  uses SSH.
+- Target OS toggle (Windows / Linux), host, username, password (never
+  saved — matches your "never store passwords" answer), port (defaults
+  5985 WinRM / 22 SSH, with an HTTPS/5986 checkbox for WinRM), agent
+  port/interval/token fields reusing the same `PA_DEFAULT_*` values the
+  agent itself defaults to, and a live log pane showing each deploy step
+  as it happens.
+- **Windows path (WinRM / `pywinrm`):** connects via
+  `winrm.Session('http(s)://HOST:PORT/wsman', auth=(user, pass),
+  transport='ntlm'|'ssl')`, streams the pre-built `SpeedtestAgent.exe`
+  to the target as base64 chunks (WinRM has no native file-copy, so this
+  goes through a small `[System.IO.File]::Open` / `FromBase64String`
+  PowerShell snippet, chunked under the ~500KB envelope limit), then
+  registers a Scheduled Task (`AtStartup` trigger, `SYSTEM` principal,
+  `RunLevel Highest`) so it starts on every future boot with nobody
+  logged in, and starts it immediately with `Start-ScheduledTask`.
+- **Linux path (SSH / `paramiko`):** connects with
+  `paramiko.SSHClient()`, transfers `speedtest_agent.py` over SFTP (pure
+  stdlib script — pushed as source and run via the target's own
+  `python3`, since a Windows build machine can't cross-compile a Linux
+  binary), writes a `systemd` unit (`Restart=always`,
+  `WantedBy=multi-user.target`), and runs
+  `systemctl daemon-reload && systemctl enable --now <name>`. Correctly
+  tells apart three sudo situations — NOPASSWD, password-required, and
+  "not a sudoer at all" — so the sudo password is only ever piped to
+  sudo's own stdin when actually needed, never leaked into the remote
+  command it's running.
+- After either path succeeds, the deploy is verified for real (an HTTP
+  health check against the freshly-started agent's `/health` endpoint on
+  the target), and on success the new agent is added to `AGENTS_FILE`
+  automatically — same file/schema ⊞ AGENTS already uses — so it shows
+  up under ⊞ AGENTS with no extra step.
+- Guide: new "Push Agent" section — overview, the "why WinRM not SMB"
+  explanation in plain terms, the one-time `winrm quickconfig -q`
+  prerequisite on any Windows box you want to push to, a step-by-step
+  walkthrough of the window, and a plain-English list mapping every
+  real failure message (connection refused, auth failed, WinRM not
+  configured, sudo needed, health check failed, etc.) to what it means
+  and what to check. The "Remote Agents" section now points to ⇪ PUSH as
+  the automated alternative to adding an agent by hand, and the
+  Dashboard section's sidebar list mentions the new button.
+- Build/packaging: `requirements.txt` gets `paramiko>=3.4` and
+  `pywinrm>=0.4`; `speedtest_monitor.spec` gets both added to
+  `hiddenimports`; `build_installer.bat` installs both packages and adds
+  a new step that builds `SpeedtestAgent.exe` from the new
+  `speedtest_agent.spec`; `installer.nsi` bundles both
+  `SpeedtestAgent.exe` and `speedtest_agent.py` into the installed
+  folder (and removes them on uninstall) so the exe pushed to Windows
+  targets and the script pushed to Linux targets are always present.
+
+**Verified:**
+- Linux/SSH path verified fully end-to-end against a real local `sshd`
+  with three real test accounts covering all three sudo situations
+  (NOPASSWD, password-required, no sudo access): confirmed byte-exact
+  file transfer, correct unit file content in every case (explicit
+  regression check that the sudo password never appears in the unit
+  file — this caught and fixed a real bug where it leaked into the file
+  on the NOPASSWD account), a real HTTP health check against the
+  actually-started agent, and correct, specific error messages for every
+  failure case tried.
+- Windows/WinRM PowerShell generation verified against a mock session
+  that genuinely parses and executes the generated PowerShell (not just
+  string-matched): proved byte-exact chunked file reconstruction (950KB
+  across 4 chunks), correct Scheduled Task script (`AtStartup`, `SYSTEM`,
+  `Highest`, immediate `Start-ScheduledTask`), the HTTPS/5986 variant,
+  and found + fixed a real double-escaping bug (a token containing a
+  single quote came out mangled) along the way.
+- The Push Agent window itself: built and driven for real under
+  `xvfb-run` (real Tk widgets, not mocked) — confirmed the explanation
+  panel text is present, the OS/HTTPS toggle defaults are correct, field
+  validation rejects an empty host/user, and ran one complete real
+  deploy through the actual button handler (real SSH to a real local
+  target) ending with the new agent correctly written into
+  `agents.json`.
+- `python3 -m py_compile` clean.
+- Full `selftest.py` (36 checks): only `/guide` legitimately changed
+  bytes (80174 → 84610, since the guide grew a new section) —
+  everything else came back byte-identical. Re-baselined with
+  `selftest.py --update-ok`; confirmed clean (35 passed, 0 failed, 1
+  skipped) against the new baseline, including the desktop-window check
+  constructing cleanly with `PushAgentWindow` now present.
+- Two unrelated regression suites from earlier this session
+  (`test_status_dots.py`, `test_bloom_toggle.py`) re-run clean, so
+  nothing here disturbed the status-bar dots or BLOOM work.
+
+**Not verified:** the Windows/WinRM path has NOT been tested against a
+real Windows machine — there isn't one reachable from this sandbox. The
+PowerShell it generates was checked by actually interpreting it (see
+above), which catches syntax/logic/escaping bugs, but it hasn't run
+against a real `winrm` service, a real Scheduled Task, or a real
+Windows firewall/UAC/execution-policy configuration. Before relying on
+it: pick one real Windows box, run `winrm quickconfig -q` on it once
+(documented in the new guide section), and try one push from ⇪ PUSH —
+watch the log pane, and if anything doesn't match what's described here,
+tell me the exact message and I'll fix it against the real thing instead
+of the mock. Also not done: no retry/rollback if a deploy fails partway
+through (e.g., file copied but the scheduled task registration fails) —
+you'd need to re-run the push, which is safe to do (it overwrites in
+place) but won't clean up a half-installed state on its own.
 
 ## Embedded guide updated to cover everything new this session
 

@@ -92,6 +92,16 @@ hiddenimports = [
     'reportlab.pdfbase.pdfmetrics',
     'reportlab.pdfbase.ttfonts',
     'reportlab.graphics',
+    # paramiko (SSH) + pywinrm (PowerShell Remoting) — Push Agent's Linux
+    # and Windows deploy paths. Verified by actually freezing a minimal
+    # onefile exe with just these two names and exercising both a real
+    # paramiko.SSHClient() construction and a real NTLM-authenticated
+    # winrm.Session.run_cmd() call against a real (local) HTTP server —
+    # PyInstaller's own hooks-contrib package pulls in every transitive
+    # dependency (cryptography, bcrypt, pynacl, requests_ntlm, spnego)
+    # automatically, so nothing more than these two names is needed here.
+    'paramiko',
+    'winrm',
 ]
 
 a = Analysis(

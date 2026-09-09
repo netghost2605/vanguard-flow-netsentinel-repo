@@ -148,6 +148,18 @@ Section "Vanguard Flow NetSentinel (monitor app)" SecMain
     ; installed (librespeed-cli, speedtest-cli or Ookla) at runtime.
     File /nonfatal "LICENSE.txt"
     File /nonfatal "README.txt"
+    ; Push Agent's payload — always installed alongside the main app (not
+    ; optional like the remote client below), since Push Agent looks for
+    ; these right next to itself with no separate install step of their
+    ; own. SpeedtestAgent.exe is what gets copied to a WINDOWS target;
+    ; speedtest_agent.py is what gets copied to a LINUX target (and run
+    ; there with the target's own python3 — PyInstaller can't cross-build
+    ; a Linux binary from this Windows build). /nonfatal so a build run
+    ; without either file still produces a working installer; Push Agent
+    ; itself reports a clear "agent file not found" error rather than
+    ; failing silently if one is missing at deploy time.
+    File /nonfatal "dist\SpeedtestAgent.exe"
+    File /nonfatal "speedtest_agent.py"
 SectionEnd
 
 ; ── Task Manager TMOG (the real system-monitor app, bundled + auto-installed) ──
@@ -623,6 +635,8 @@ Section "Uninstall"
     Delete "$INSTDIR\bg.jpg"
     Delete "$INSTDIR\speedtest.exe"
     Delete "$INSTDIR\librespeed-cli.exe"
+    Delete "$INSTDIR\SpeedtestAgent.exe"
+    Delete "$INSTDIR\speedtest_agent.py"
     Delete "$INSTDIR\LICENSE.txt"
     Delete "$INSTDIR\README.txt"
     Delete "$INSTDIR\Uninstall.exe"
