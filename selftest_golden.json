@@ -25,11 +25,14 @@
       "keys": [
         "backend",
         "blocked",
+        "build",
         "count",
         "elevated",
+        "elevated_check_error",
         "killswitch",
         "logging",
         "names",
+        "pid",
         "recent",
         "rules"
       ],

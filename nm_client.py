@@ -48,11 +48,14 @@ LINE    = "#1a3050"   # borders
 INK     = "#c8dff0"   # primary text
 MUTED   = "#6a9ab8"   # secondary text
 FAINT   = "#2a4060"   # hints / dividers
-CYAN    = "#38b8f0"   # primary accent
-MINT    = "#38f0a8"   # ok / download
-AMBER   = "#ff9f43"   # warning
-VIOLET  = "#a371f7"   # upload / secondary
-RED     = "#ff4444"   # error / blocked
+CYAN    = "#38b8f0"   # the one decorative accent — chrome, buttons, plain
+                       # metric readouts. Not a state colour: see MINT/AMBER/RED.
+MINT    = "#38f0a8"   # semantic: good / ok / online / success
+AMBER   = "#ff9f43"   # semantic: warning / degraded / attention
+VIOLET  = "#a371f7"   # unused as decoration (single-accent rule) — kept only
+                       # so external code/config referencing it doesn't break
+RED     = "#ff4444"   # semantic: error / critical / blocked
+ACCENT  = CYAN         # alias read at call sites that are purely decorative
 
 
 # Protocol colours, copied verbatim from PROTO_COLORS in the main app so a flow
@@ -264,6 +267,38 @@ def fmt(v, dp=1):
         return ("%%.%df" % dp) % float(v)
     except Exception:
         return "-"
+
+
+_MPL_CHECKED = {"ok": None, "reason": ""}
+
+
+def _mpl_probe():
+    """Try the real matplotlib import once and remember the result.
+
+    Charts used to fail silently: a bare `except Exception: return False`
+    around the import meant a build that bundled matplotlib itself but not
+    its data directory (mpl-data — fonts, style sheets, the backend
+    registry) would blow up on the SECOND import statement, get swallowed,
+    and quietly show a text table forever with no way to tell why. This
+    keeps the same graceful fallback but prints the real exception once
+    (visible in the console window, since the client builds with
+    console=True) so a future bundling regression is diagnosable instead
+    of just "no charts".
+    """
+    if _MPL_CHECKED["ok"] is not None:
+        return _MPL_CHECKED["ok"]
+    try:
+        import matplotlib
+        matplotlib.use("TkAgg")
+        from matplotlib.figure import Figure          # noqa: F401
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # noqa: F401
+        _MPL_CHECKED["ok"] = True
+    except Exception as e:
+        _MPL_CHECKED["ok"] = False
+        _MPL_CHECKED["reason"] = "%s: %s" % (type(e).__name__, e)
+        print("[charts] matplotlib unavailable, falling back to text tables: %s"
+              % _MPL_CHECKED["reason"], file=sys.stderr)
+    return _MPL_CHECKED["ok"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -569,10 +604,10 @@ class ClientApp:
         cards = self.tk.Frame(f, bg=BG)
         cards.pack(fill="x", padx=4, pady=(6, 2))
         for label, val, unit, col, key in [
-                ("DOWNLOAD", fmt(c.get("download")), "Mbps", CYAN, "download"),
-                ("UPLOAD", fmt(c.get("upload")), "Mbps", VIOLET, "upload"),
-                ("PING", fmt(c.get("ping"), 1), "ms", AMBER, "ping"),
-                ("DNS", fmt(c.get("dns"), 1), "ms", MINT, "dns")]:
+                ("DOWNLOAD", fmt(c.get("download")), "Mbps", ACCENT, "download"),
+                ("UPLOAD", fmt(c.get("upload")), "Mbps", ACCENT, "upload"),
+                ("PING", fmt(c.get("ping"), 1), "ms", ACCENT, "ping"),
+                ("DNS", fmt(c.get("dns"), 1), "ms", ACCENT, "dns")]:
             card = self.tk.Frame(cards, bg=SURFACE, highlightthickness=1,
                                  highlightbackground=LINE)
             card.pack(side="left", expand=True, fill="both", padx=4)
@@ -613,10 +648,10 @@ class ClientApp:
         body = self.tk.Frame(f, bg=BG)
         body.pack(fill="both", expand=True, padx=4, pady=(6, 4))
         ok = self._multi_chart(body, [
-            ((h or {}).get("download") or [], "Download  Mbps", CYAN),
-            ((h or {}).get("upload") or [], "Upload  Mbps", VIOLET),
-            ((h or {}).get("ping") or [], "Latency  ms", AMBER),
-            ((h or {}).get("dns") or [], "DNS  ms", MINT)])
+            ((h or {}).get("download") or [], "Download  Mbps", ACCENT),
+            ((h or {}).get("upload") or [], "Upload  Mbps", ACCENT),
+            ((h or {}).get("ping") or [], "Latency  ms", ACCENT),
+            ((h or {}).get("dns") or [], "DNS  ms", ACCENT)])
         if not ok:
             self._stats_table(body, st)
         else:
@@ -662,8 +697,8 @@ class ClientApp:
             self.tk.Label(box, text=htxt.upper(), bg=SURFACE, fg=FAINT,
                           font=("Consolas", 8), anchor="w").grid(
                               row=0, column=j, sticky="ew", padx=12, pady=(7, 3))
-        rows = [("Download", "download", CYAN), ("Upload", "upload", VIOLET),
-                ("Ping", "ping", AMBER), ("DNS", "dns", MINT)]
+        rows = [("Download", "download", ACCENT), ("Upload", "upload", ACCENT),
+                ("Ping", "ping", ACCENT), ("DNS", "dns", ACCENT)]
         for i, (label, key, col) in enumerate(rows, start=1):
             d = st.get(key, {}) or {}
             for j, val in enumerate([label, fmt(d.get("avg")), fmt(d.get("max")),
@@ -678,13 +713,10 @@ class ClientApp:
 
     def _multi_chart(self, parent, panels):
         """Grid of charts mirroring the desktop layout. False if no matplotlib."""
-        try:
-            import matplotlib
-            matplotlib.use("TkAgg")
-            from matplotlib.figure import Figure
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        except Exception:
+        if not _mpl_probe():
             return False
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         fig = Figure(figsize=(12, 5.2), dpi=96, facecolor=BG)
         for i, (series, title, colour) in enumerate(panels):
             ax = fig.add_subplot(2, 2, i + 1, facecolor=SURFACE)
@@ -712,13 +744,10 @@ class ClientApp:
             self.tk.Label(parent, text="No data for this range", bg=BG,
                           fg=FAINT, font=MONO_S).pack(pady=18)
             return True
-        try:
-            import matplotlib
-            matplotlib.use("TkAgg")
-            from matplotlib.figure import Figure
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        except Exception:
+        if not _mpl_probe():
             return False
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         fig = Figure(figsize=(9, 3.3), dpi=96, facecolor=BG)
         ax = fig.add_subplot(111, facecolor=SURFACE)
         y = [v for v in series if isinstance(v, (int, float))]
@@ -927,16 +956,29 @@ class ClientApp:
         tv.tag_configure("warn", foreground=AMBER)
         tv.tag_configure("bad", foreground=RED)
 
-        # trend for the busiest target, if the server sent series data
+        # trend charts — the worst-RTT targets, not just whichever sorts
+        # first alphabetically (the old behaviour could chart a quiet
+        # target while the actually-slow one never got a graph at all).
         series = d.get("series", {}) or {}
         if series:
-            first = sorted(series.keys())[0]
-            pts = [p.get("rtt") for p in series[first]
-                   if isinstance(p.get("rtt"), (int, float))]
-            if pts:
-                body = self.tk.Frame(f, bg=BG)
-                body.pack(fill="both", expand=True, pady=(8, 0))
-                self._chart(body, pts, "RTT (ms) — %s" % first, CYAN)
+            worst_first = sorted(
+                (t for t in series if t in latest),
+                key=lambda t: -(latest[t].get("rtt") or 0))
+            colours = [ACCENT]   # single accent — panels are told apart by
+                                 # their own titles, not by a rainbow of hues
+            panels = []
+            for i, target in enumerate(worst_first[:4]):
+                pts = [p.get("rtt") for p in series[target]
+                       if isinstance(p.get("rtt"), (int, float))]
+                if pts:
+                    panels.append((pts, "RTT ms — %s" % target,
+                                  colours[i % len(colours)]))
+            body = self.tk.Frame(f, bg=BG)
+            body.pack(fill="both", expand=True, pady=(8, 0))
+            if len(panels) > 1:
+                self._multi_chart(body, panels)
+            elif panels:
+                self._chart(body, panels[0][0], panels[0][1], panels[0][2])
         self.q.put(("status", "%d latency target(s)" % len(rows)))
 
     # ── Quality ───────────────────────────────────────────────────────────
@@ -970,9 +1012,20 @@ class ClientApp:
         hist = d.get("history", [])
         body = self.tk.Frame(f, bg=BG)
         body.pack(fill="both", expand=True, padx=4, pady=(8, 0))
-        series = [r.get("bloat_ms") for r in hist
-                  if isinstance(r.get("bloat_ms"), (int, float))]
-        if not self._chart(body, series, "Bufferbloat (ms added under load)", AMBER):
+        bloat = [r.get("bloat_ms") for r in hist
+                 if isinstance(r.get("bloat_ms"), (int, float))]
+        jitter = [r.get("jitter") for r in hist
+                  if isinstance(r.get("jitter"), (int, float))]
+        loss = [r.get("loss_pct") for r in hist
+                if isinstance(r.get("loss_pct"), (int, float))]
+        panels = [(bloat, "Bufferbloat  ms added under load", AMBER)]
+        if jitter:
+            panels.append((jitter, "Jitter  ms", CYAN))
+        if loss:
+            panels.append((loss, "Loss  %", RED))
+        drew = (self._multi_chart(body, panels) if len(panels) > 1
+                else self._chart(body, bloat, panels[0][1], AMBER))
+        if not drew:
             tv = self._table(body, ("when", "bloat ms", "jitter", "loss %"),
                              (200, 130, 120, 120), height=14)
             for r in hist[-300:]:
@@ -1169,20 +1222,22 @@ class ClientApp:
             self._empty(f, "Analytics unavailable")
             return
         sp = a.get("speed", {}) or {}
+        _up = a.get("uptime_pct")
         self._stat_row(f, [
-            ("Avg download", fmt(sp.get("avg_download"), 0), CYAN),
-            ("Avg upload", fmt(sp.get("avg_upload"), 0), MINT),
-            ("Avg ping", fmt(sp.get("avg_ping"), 0), AMBER),
-            ("Uptime %", fmt(a.get("uptime_pct"), 2), MINT)])
+            ("Avg download", fmt(sp.get("avg_download"), 0), ACCENT),
+            ("Avg upload", fmt(sp.get("avg_upload"), 0), ACCENT),
+            ("Avg ping", fmt(sp.get("avg_ping"), 0), ACCENT),
+            ("Uptime %", fmt(_up, 2),
+             MINT if (_up or 0) > 99.5 else AMBER)])
 
         bar = self.tk.Frame(f, bg=BG)
         bar.pack(fill="x", padx=6, pady=(2, 6))
         self.tk.Label(bar, text="AI briefing", bg=BG, fg=MUTED,
                       font=MONO_B).pack(side="left")
-        self._brief_btn = self._btn(bar, "Generate now", self._briefing_now, VIOLET)
+        self._brief_btn = self._btn(bar, "Generate now", self._briefing_now, ACCENT)
         self._brief_btn.pack(side="right")
 
-        txt = self.tk.Text(f, bg=SURFACE, fg="#d9c7ff", font=SANS, wrap="word",
+        txt = self.tk.Text(f, bg=SURFACE, fg=INK, font=MONO, wrap="word",
                            relief="flat", height=10, insertbackground=INK)
         txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         # /api/briefing returns {"ok":True,"briefing":{"ts":..,"text":..}} — the
@@ -1375,10 +1430,10 @@ class ClientApp:
                   bd=0, highlightthickness=1, highlightbackground=CYAN,
                   command=open_web_sankey).pack(side="right", padx=(0, 6))
 
-        tk.Button(head, text="\u25c9 PI-HOLE", bg=RAISE, fg=MINT,
+        tk.Button(head, text="\u25c9 PI-HOLE", bg=RAISE, fg=CYAN,
                   activebackground=LINE, activeforeground="white", relief="flat",
                   font=("Consolas", 8, "bold"), cursor="hand2", padx=9, pady=2,
-                  bd=0, highlightthickness=1, highlightbackground=MINT,
+                  bd=0, highlightthickness=1, highlightbackground=CYAN,
                   command=open_pihole).pack(side="right")
         tk.Label(head, text="  %d flows  \u00b7  %d internal  \u00b7  %d external"
                  % (len(pairs), len(left), len(right)),
@@ -1465,7 +1520,7 @@ class ClientApp:
             atxt.configure(state="disabled")
 
         for _txt, _kind, _col in (("\u26a0 BEHAV", "behav", AMBER),
-                                  ("\u25ce TRAFFIC", "traffic", VIOLET),
+                                  ("\u25ce TRAFFIC", "traffic", CYAN),
                                   ("\u2691 IDS", "ids", RED)):
             tk.Button(abar, text=_txt, bg=RAISE, fg=_col,
                       activebackground=LINE, activeforeground="white",
@@ -1637,7 +1692,7 @@ class ClientApp:
         counts = {ip: n for ip, n in top}
 
         head = tk.Frame(f, bg=BG); head.pack(fill="x", padx=12, pady=(10, 4))
-        tk.Label(head, text="\U0001f36f HONEYPOT", bg=BG, fg=MINT,
+        tk.Label(head, text="\U0001f36f HONEYPOT", bg=BG, fg=CYAN,
                  font=MONO_B).pack(side="left")
         _run = d.get("running")
         tk.Label(head, text="   %s  \u00b7  %d hits from %d source(s)"
@@ -1707,7 +1762,7 @@ class ClientApp:
         blocked = d.get("blocked") or []
 
         head = tk.Frame(f, bg=BG); head.pack(fill="x", padx=12, pady=(10, 4))
-        tk.Label(head, text="\u26d4 FIREWALL RULES", bg=BG, fg=AMBER,
+        tk.Label(head, text="\u26d4 FIREWALL RULES", bg=BG, fg=CYAN,
                  font=MONO_B).pack(side="left")
         tk.Label(head, text="   %s  \u00b7  %d blocked  \u00b7  kill switch %s"
                  % (d.get("backend") or "no backend", d.get("count", 0),
@@ -1718,9 +1773,77 @@ class ClientApp:
             warn = tk.Frame(f, bg="#2a1a0a", highlightthickness=1,
                             highlightbackground=AMBER)
             warn.pack(fill="x", padx=12, pady=(0, 8))
-            tk.Label(warn, text="\u26a0  The monitored machine is not running "
-                                "elevated \u2014 new blocks there will fail until it "
-                                "is restarted as Administrator (or root).",
+            # This is the PID of whichever process actually answered this
+            # HTTP request -- compare it against the PID shown next to the
+            # monitored machine's own "⚡ ELEVATED" status-bar tag. If they
+            # don't match, a second (older, non-elevated) instance is still
+            # bound to that port and answering instead of the one you're
+            # looking at -- that's the bug, not the account/process
+            # explanation below. Older servers won't send this field yet.
+            # Build ID of whatever server code is actually answering. This
+            # settles, with no guesswork, whether a rebuild/reinstall on the
+            # monitored machine actually reached the process serving this
+            # data: if it's missing entirely, or doesn't match the build ID
+            # you just built, the fix hasn't reached that process yet --
+            # wrong machine, wrong install path, or an old process that
+            # never got replaced -- and nothing about the elevation logic
+            # below is worth chasing until that's true.
+            _build = d.get("build")
+            build_line = (("Server build: %s\n" % _build) if _build
+                          else "Server build: unknown (this server predates "
+                               "the build-ID field entirely -- it is "
+                               "definitely not running current code).\n")
+            _pid = d.get("pid")
+            pid_line = (("Reporting process PID: %s  —  check this "
+                         "against the PID shown next to ⚡ ELEVATED in "
+                         "the monitored machine's own status bar. Different "
+                         "numbers = a second, stale, non-elevated instance "
+                         "is answering instead of the one you're looking "
+                         "at.\n" % _pid) if _pid is not None else "")
+            check_err = d.get("elevated_check_error") or ""
+            if check_err:
+                # The server's own elevation check hit a real exception and
+                # fell back to a plain False rather than staying silent about
+                # it (see _NM_ADMIN_CHECK_ERROR / _nm_is_admin server-side) --
+                # if you're SURE the monitored machine's app is elevated and
+                # still see this, this line is why, and is the thing to fix
+                # or report, not the process/account explanation below.
+                msg1 = ("\u26a0  The monitored machine reports it is NOT "
+                        "elevated, but its own elevation check hit an error "
+                        "rather than a clean answer:\n    %s\n"
+                        "If that app really is running elevated, this check "
+                        "itself is the bug \u2014 tell me the exact text above.\n"
+                        % check_err)
+            else:
+                # This checks whether the app's own PROCESS is holding an
+                # elevated token right now (Windows: reads the process
+                # token's TokenElevation field; POSIX: uid 0) \u2014 not
+                # whether the account it's running under is a member of
+                # Administrators. Those are different things under UAC: an
+                # admin account that just double-clicks the app, or that
+                # autostarts it from a normal Startup-folder shortcut, still
+                # launches it WITHOUT the elevated token. If you're certain
+                # the monitored machine's app really is running elevated and
+                # still see this warning, say so \u2014 that means the check
+                # itself is wrong on that machine, not the account/process
+                # distinction below.
+                msg1 = ("\u26a0  The monitored machine's app is not "
+                        "running with an elevated (Administrator/root) "
+                        "token \u2014 new firewall blocks there will fail.\n"
+                        "This is usually about the PROCESS, not the "
+                        "account: being logged in as an admin is not "
+                        "automatically the same as this app having been "
+                        "launched elevated. A plain restart of the same "
+                        "shortcut will not fix that case.\n")
+            tk.Label(warn, text=build_line + pid_line + msg1 +
+                                "Fix if it's not actually elevated yet: "
+                                "right-click the app (or its shortcut) and "
+                                "choose \u201cRun as administrator\u201d, or if "
+                                "it autostarts, set that up via Task "
+                                "Scheduler with \u201cRun with highest "
+                                "privileges\u201d checked \u2014 not the Startup "
+                                "folder, which never elevates. On Linux, run "
+                                "it with sudo or as root.",
                      bg="#2a1a0a", fg=AMBER, font=MONO_S, justify="left",
                      wraplength=1000).pack(anchor="w", padx=10, pady=6)
 
@@ -1749,15 +1872,35 @@ class ClientApp:
         d = self.api.get("/api/agents")
         self.q.put((lambda _d: self._draw_agents(_d), d))
 
+    def _agent_action(self, url, action, label):
+        """Run/DNS/Refresh \u2014 the same three actions the desktop AgentsWindow
+        offers, now reachable here via POST /api/agent_action."""
+        self._sticky("%s: %s\u2026" % (label, action), 15)
+        def work():
+            r = self.api.post("/api/agent_action", {"url": url, "action": action})
+            ok = bool(r and r.get("ok"))
+            msg = (r or {}).get("message") or (r or {}).get("error") \
+                or self.api.last_error or "no response"
+            self.q.put((lambda _: self._sticky("%s: %s" % (label, msg), 10), None))
+            self._hashes = getattr(self, "_hashes", {})
+            self._hashes.pop("agents", None)
+            # Give a triggered test/DNS check a moment before polling \u2014 an
+            # immediate refresh would just show the same "not run yet" state.
+            delay = 200 if action == "refresh" else 2500
+            self.q.put((lambda _: self.root.after(delay, lambda: self.bg(self._load_agents)), None))
+        self.bg(work)
+
     def _draw_agents(self, d):
+        if self._unchanged("agents", d):
+            return
         f = self.tabs["agents"]
         self._clear(f)
         tk = self.tk
         agents = (d or {}).get("agents") or []
         if not agents:
             tk.Label(f, text="No remote agents configured.\n\n"
-                             "Add them in the desktop app (Agents window); they will "
-                             "appear here automatically.",
+                             "Add them in the desktop app (Agents window), or push one "
+                             "from \u2b06 PUSH; they will appear here automatically.",
                      bg=BG, fg=MUTED, font=MONO, justify="left").pack(
                          anchor="w", padx=16, pady=16)
             return
@@ -1768,18 +1911,39 @@ class ClientApp:
         tk.Label(head, text="   %d configured  \u00b7  %d online" % (len(agents), online),
                  bg=BG, fg=MUTED, font=MONO_S).pack(side="left")
 
-        wrap = tk.Frame(f, bg=BG); wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        canvas = tk.Canvas(f, bg=BG, highlightthickness=0)
+        vsb = self.ttk.Scrollbar(f, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y", padx=(0, 12))
+        canvas.pack(side="left", fill="both", expand=True, padx=12, pady=(0, 12))
+        wrap = tk.Frame(canvas, bg=BG)
+        win = canvas.create_window((0, 0), window=wrap, anchor="nw")
+        wrap.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+
+        def num(v, unit="", dp=1):
+            if v is None:
+                return "\u2014"
+            try:
+                return ("%.*f%s" % (dp, float(v), unit))
+            except Exception:
+                return str(v)
+
         for i, a in enumerate(agents):
             ok = a.get("online")
+            url = a.get("url") or ""
+            label = a.get("label") or url or "agent"
             card = tk.Frame(wrap, bg=SURFACE, highlightthickness=1,
                             highlightbackground=MINT if ok else RED)
-            card.pack(fill="x", pady=(0, 8))
+            card.pack(fill="x", pady=(0, 10))
+
+            # \u2500\u2500 header row: status dot, label, host, actions \u2500\u2500
             top = tk.Frame(card, bg=SURFACE); top.pack(fill="x", padx=10, pady=(7, 2))
             tk.Label(top, text="\u25cf", bg=SURFACE, fg=MINT if ok else RED,
                      font=MONO_S).pack(side="left")
-            tk.Label(top, text=" " + str(a.get("label") or a.get("url") or "agent"),
-                     bg=SURFACE, fg=INK, font=("Consolas", 10, "bold")).pack(side="left")
-            sub = "%s  \u00b7  %s" % (a.get("hostname") or "?", a.get("ip") or a.get("url") or "")
+            tk.Label(top, text=" " + str(label), bg=SURFACE, fg=INK,
+                     font=("Consolas", 10, "bold")).pack(side="left")
+            sub = "%s  \u00b7  %s" % (a.get("hostname") or "?", a.get("ip") or url or "")
             tk.Label(top, text="   " + sub, bg=SURFACE, fg=MUTED,
                      font=MONO_S).pack(side="left")
             if a.get("running_test"):
@@ -1789,36 +1953,105 @@ class ClientApp:
                 tk.Label(top, text="   " + str(a["error"])[:60], bg=SURFACE, fg=RED,
                          font=MONO_S).pack(side="left")
 
-            row = tk.Frame(card, bg=SURFACE); row.pack(fill="x", padx=10, pady=(2, 8))
-            def cell(parent, label, value, colour):
-                c = tk.Frame(parent, bg=SURFACE); c.pack(side="left", padx=(0, 22))
-                tk.Label(c, text=label, bg=SURFACE, fg=MUTED,
-                         font=("Consolas", 7)).pack(anchor="w")
-                tk.Label(c, text=value, bg=SURFACE, fg=colour,
-                         font=("Consolas", 12, "bold")).pack(anchor="w")
-            def num(v, unit="", dp=1):
-                if v is None:
-                    return "\u2014"
-                try:
-                    return ("%.*f%s" % (dp, float(v), unit))
-                except Exception:
-                    return str(v)
-            cell(row, "DOWNLOAD", num(a.get("download"), " Mbps"), MINT)
-            cell(row, "UPLOAD", num(a.get("upload"), " Mbps"), VIOLET)
-            cell(row, "PING", num(a.get("ping"), " ms", 0), AMBER)
-            cell(row, "DNS", num(a.get("dns"), " ms", 0), CYAN)
-            for lbl, key, unit in (("CPU", "cpu_percent", "%"),
-                                   ("MEM", "mem_percent", "%"),
-                                   ("DISK", "disk_percent", "%"),
-                                   ("TEMP", "temp_c", "\u00b0C")):
-                if a.get(key) is not None:
-                    v = float(a[key])
-                    col = RED if v >= 90 else (AMBER if v >= 75 else MUTED)
-                    cell(row, lbl, num(v, unit), col)
+            actions = tk.Frame(top, bg=SURFACE); actions.pack(side="right")
+            for text, act, col in (("\u25b6 Run Speed Test", "run", CYAN),
+                                   ("\u2299 Run DNS Check", "dns", CYAN),
+                                   ("\u21ba Refresh Now", "refresh", CYAN)):
+                tk.Button(actions, text=text, bg=RAISE, fg=col,
+                         activebackground=LINE, activeforeground=INK,
+                         relief="flat", font=("Consolas", 8, "bold"),
+                         cursor="hand2", padx=8, pady=2, borderwidth=0,
+                         command=(lambda u=url, a_=act, l=label:
+                                  self._agent_action(u, a_, l))
+                         ).pack(side="left", padx=(4, 0))
 
-            hist = a.get("history") or []
-            if len(hist) > 1:
-                self._spark(card, hist, MINT, h=34)
+            # \u2500\u2500 Identity / Link / Latest \u2014 same sections the desktop
+            #    AgentsWindow's detail panel shows, from the fields the
+            #    server's /api/agents now carries \u2500\u2500
+            def dur(sec):
+                try:
+                    sec = int(sec or 0)
+                except Exception:
+                    return "\u2014"
+                d_, r = divmod(sec, 86400); h_, r = divmod(r, 3600); m_ = r // 60
+                if d_: return "%dd %dh %dm" % (d_, h_, m_)
+                if h_: return "%dh %dm" % (h_, m_)
+                return "%dm" % m_
+
+            sect = tk.Frame(card, bg=SURFACE); sect.pack(fill="x", padx=10, pady=(4, 4))
+
+            def box(title):
+                b = tk.Frame(sect, bg=SURFACE); b.pack(side="left", anchor="n", padx=(0, 22))
+                tk.Label(b, text=title, fg=CYAN, bg=SURFACE,
+                         font=("Consolas", 7, "bold")).pack(anchor="w")
+                return b
+
+            def row2(parent, label_, value, colour=INK):
+                r = tk.Frame(parent, bg=SURFACE); r.pack(fill="x", anchor="w")
+                tk.Label(r, text=label_, fg=MUTED, bg=SURFACE, width=15, anchor="w",
+                         font=("Consolas", 7)).pack(side="left")
+                tk.Label(r, text=str(value), fg=colour, bg=SURFACE, anchor="w",
+                         font=("Consolas", 8, "bold")).pack(side="left")
+
+            ident = box("Identity")
+            row2(ident, "Platform", a.get("platform") or "\u2014")
+            row2(ident, "Python", a.get("python") or "\u2014")
+            row2(ident, "Agent ver", a.get("version") or "\u2014")
+            row2(ident, "Uptime", dur(a.get("uptime_seconds")))
+            row2(ident, "Test every", "%s min" % a.get("interval_minutes", "?"))
+            row2(ident, "Auth", "token" if a.get("has_token") else "none",
+                colour=INK if a.get("has_token") else AMBER)
+
+            link = box("Link")
+            fails = a.get("fail_count", 0)
+            row2(link, "Reachable", "no" if a.get("error") else "yes",
+                colour=RED if a.get("error") else MINT)
+            timing = a.get("timing") or {}
+            for ep, k in (("status", "status_ms"), ("info", "info_ms"), ("data", "data_ms")):
+                ms = timing.get(k)
+                col = MUTED if ms is None else (
+                    MINT if ms < 400 else (AMBER if ms < 1500 else RED))
+                row2(link, "GET /%s" % ep, "\u2014" if ms is None else "%d ms" % ms, col)
+            row2(link, "Last success",
+                (a.get("last_ok") or "\u2014")[:19].replace("T", " "))
+            row2(link, "Consec. fails", str(fails), RED if fails else MINT)
+
+            latest = box("Latest reading")
+            row2(latest, "Download", num(a.get("download"), " Mbps"), CYAN)
+            row2(latest, "Upload", num(a.get("upload"), " Mbps"), CYAN)
+            row2(latest, "Ping", num(a.get("ping"), " ms", 0), CYAN)
+            row2(latest, "DNS", num(a.get("dns"), " ms", 0), CYAN)
+            row2(latest, "Server", a.get("server") or "\u2014")
+            row2(latest, "ISP", a.get("isp") or "\u2014")
+
+            sysbox = None
+            sys_keys = [("CPU", "cpu_percent", "%"), ("MEM", "mem_percent", "%"),
+                       ("DISK", "disk_percent", "%"), ("TEMP", "temp_c", "\u00b0C")]
+            if any(a.get(k) is not None for _, k, _ in sys_keys):
+                sysbox = box("System")
+                for lbl, key, unit in sys_keys:
+                    if a.get(key) is not None:
+                        v = float(a[key])
+                        col = RED if v >= 90 else (AMBER if v >= 75 else MUTED)
+                        row2(sysbox, lbl, num(v, unit), col)
+
+            # \u2500\u2500 history charts: download / upload / ping, like the desktop
+            #    AgentsWindow's three-panel history plot \u2500\u2500
+            panels = []
+            for key, title, col in (("hist_download", "Download Mbps", CYAN),
+                                    ("hist_upload", "Upload Mbps", CYAN),
+                                    ("hist_ping", "Ping ms", CYAN)):
+                series = a.get(key) or []
+                if len(series) > 1:
+                    panels.append((series, title, col))
+            if panels:
+                chart_frame = tk.Frame(card, bg=SURFACE)
+                chart_frame.pack(fill="x", padx=10, pady=(2, 4))
+                if not self._multi_chart(chart_frame, panels):
+                    hist = a.get("history") or []
+                    if len(hist) > 1:
+                        self._spark(card, hist, CYAN, h=34)
+
             foot = tk.Frame(card, bg=SURFACE); foot.pack(fill="x", padx=10, pady=(0, 7))
             bits = []
             if a.get("last_test"):
@@ -1850,10 +2083,10 @@ class ClientApp:
         grid = self.tk.Frame(f, bg=BG)
         grid.pack(fill="x", padx=8)
         views = [("3D topology", "/3d", CYAN),
-                 ("Flow map (Sankey)", "/sankey", MINT),
+                 ("Flow map (Sankey)", "/sankey", CYAN),
                  ("Alerts & devices (web)", "/monitor", CYAN),
-                 ("Analytics & AI", "/analytics", VIOLET),
-                 ("VDI sessions", "/vdi", AMBER),
+                 ("Analytics & AI", "/analytics", CYAN),
+                 ("VDI sessions", "/vdi", CYAN),
                  ("Full HTML report", "/api/report", INK),
                  ("User guide", "/guide", MUTED)]
         for i, (label, path, col) in enumerate(views):
@@ -1877,13 +2110,13 @@ class ClientApp:
                 ("Run speed test", lambda: self._action("/api/run_test",
                                                         "Speed test started"), CYAN),
                 ("Run DNS check", lambda: self._action("/api/run_dns",
-                                                       "DNS check started"), MINT),
+                                                       "DNS check started"), CYAN),
                 ("Download CSV", lambda: self._download("/api/export?fmt=csv",
                                                         "network-history.csv"), INK),
                 ("Download JSON", lambda: self._download("/api/export?fmt=json",
                                                          "network-history.json"), INK),
                 ("ISP evidence PDF", lambda: self._download(
-                    "/api/evidence?days=30", "isp-evidence-pack.pdf"), AMBER)]:
+                    "/api/evidence?days=30", "isp-evidence-pack.pdf"), CYAN)]:
             self._btn(act, label, fn, col).pack(side="left", padx=4, pady=3)
 
         self.tk.Label(f, text="Server: %s" % base, bg=BG, fg=FAINT,

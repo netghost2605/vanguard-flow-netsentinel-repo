@@ -952,15 +952,186 @@ def _nm_run(cmd, timeout=90):
         return 1, str(e)
 
 
+_NM_ADMIN_CHECK_ERROR = ''  # last exception from the Windows elevation check,
+                            # if any -- so a wrong answer is diagnosable
+                            # instead of silently swallowed (see _nm_is_admin)
+
+
+def _nm_prep_token_ctypes(ctypes_mod, advapi32, kernel32):
+    """Declare real argtypes/restype for the raw WinAPI calls used to read
+    process token elevation, instead of letting ctypes guess.
+
+    Root cause of a real bug hit in the field: left undeclared, ctypes
+    assumes every return value is a 32-bit c_int and guesses argument types
+    from whatever Python values are passed in. GetCurrentProcess() actually
+    returns a pointer-sized pseudo-HANDLE (0xFFFFFFFFFFFFFFFF / -1 as a
+    64-bit value on 64-bit Windows); without an explicit restype, ctypes
+    truncates/misreads that as a 32-bit int, and the corrupted value then
+    gets passed into OpenProcessToken. On a real 64-bit Windows machine this
+    produced a consistent "OSError: [WinError 6] The handle is invalid"
+    inside the token check -- silently falling back to the less reliable
+    IsUserAnAdmin() every single time -- even though the exact same code
+    "worked" fine against this project's mocked ctypes.windll in sandbox
+    tests, since mocks never exercise the real Win32 ABI/marshaling. Setting
+    these signatures explicitly fixes it. Safe to call repeatedly -- ctypes
+    function pointers are cached per-library, so this just re-asserts the
+    same signatures each time.
+    """
+    kernel32.GetCurrentProcess.restype = ctypes_mod.c_void_p
+    kernel32.GetCurrentProcess.argtypes = []
+    advapi32.OpenProcessToken.restype = ctypes_mod.c_int
+    advapi32.OpenProcessToken.argtypes = [
+        ctypes_mod.c_void_p, ctypes_mod.c_ulong,
+        ctypes_mod.POINTER(ctypes_mod.c_void_p)]
+    advapi32.GetTokenInformation.restype = ctypes_mod.c_int
+    advapi32.GetTokenInformation.argtypes = [
+        ctypes_mod.c_void_p, ctypes_mod.c_int, ctypes_mod.c_void_p,
+        ctypes_mod.c_ulong, ctypes_mod.POINTER(ctypes_mod.c_ulong)]
+    kernel32.CloseHandle.restype = ctypes_mod.c_int
+    kernel32.CloseHandle.argtypes = [ctypes_mod.c_void_p]
+
+
 def _nm_is_admin():
+    """True if THIS PROCESS currently holds an elevated token.
+
+    Windows: shell32.IsUserAnAdmin() is the commonly-used one-liner for this,
+    but Microsoft's own docs call it out as unreliable for actually detecting
+    elevation -- it was written before UAC existed and really answers "is
+    this token a member of the Administrators group", which does not always
+    line up with "is this token elevated right now" on every Windows build/
+    config. The documented, elevation-specific way is to read the process
+    token's TokenElevation field directly via GetTokenInformation, so that's
+    tried first; IsUserAnAdmin is kept only as a fallback if that lower-level
+    call itself fails for some reason, and any failure is recorded in
+    _NM_ADMIN_CHECK_ERROR instead of being swallowed into a bare False the
+    way this used to work, since a silent wrong answer here is exactly the
+    "matplotlib bundling" mistake repeated -- an exception nobody can see.
+
+    Field-confirmed bug fixed in b-9c41e7d0: the TokenElevation path was
+    calling GetCurrentProcess/OpenProcessToken/GetTokenInformation/
+    CloseHandle without declaring real ctypes argtypes/restype, which on a
+    real 64-bit Windows machine consistently corrupted the HANDLE and
+    produced "OSError: [WinError 6] The handle is invalid" -- silently
+    falling back to IsUserAnAdmin() on every single call. See
+    _nm_prep_token_ctypes for the fix and the full explanation.
+    """
+    global _NM_ADMIN_CHECK_ERROR
     import os
-    try:
-        if os.name != 'nt':
+    if os.name != 'nt':
+        try:
             return os.geteuid() == 0
-        import ctypes
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception as e:
+            _NM_ADMIN_CHECK_ERROR = '%s: %s' % (type(e).__name__, e)
+            return False
+    import ctypes
+    TOKEN_QUERY = 0x0008
+    TokenElevation = 20
+    htoken = ctypes.c_void_p()
+    advapi32 = ctypes.windll.advapi32
+    kernel32 = ctypes.windll.kernel32
+    try:
+        _nm_prep_token_ctypes(ctypes, advapi32, kernel32)
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(),
+                                          TOKEN_QUERY, ctypes.byref(htoken)):
+            raise ctypes.WinError()
+        elevation = ctypes.c_ulong()
+        ret_size = ctypes.c_ulong()
+        ok = advapi32.GetTokenInformation(
+            htoken, TokenElevation, ctypes.byref(elevation),
+            ctypes.sizeof(elevation), ctypes.byref(ret_size))
+        if not ok:
+            raise ctypes.WinError()
+        _NM_ADMIN_CHECK_ERROR = ''
+        return bool(elevation.value)
+    except Exception as e:
+        _NM_ADMIN_CHECK_ERROR = 'TokenElevation check failed (%s: %s); fell back to IsUserAnAdmin' % (
+            type(e).__name__, e)
+        try:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception as e2:
+            _NM_ADMIN_CHECK_ERROR += '; IsUserAnAdmin also failed: %s: %s' % (
+                type(e2).__name__, e2)
+            return False
+    finally:
+        if htoken.value:
+            try:
+                kernel32.CloseHandle(htoken)
+            except Exception:
+                pass
+
+
+def _nm_admin_debug():
+    """Extra facts about elevation state, for when _nm_is_admin()'s plain
+    True/False doesn't match what you can see with your own eyes (e.g. you
+    know the app is elevated and it still says no). Never trust one signal
+    for this -- PID/parent tell you whether the process ANSWERING the API
+    request is even the one you elevated (a stale autostarted copy still
+    holding the port would answer honestly as "not elevated" and look
+    identical from the warning message alone); TokenElevationType tells you
+    WHY a token reads as elevated or not (Full = went through a real UAC
+    prompt, Limited = the standard half of a split admin token that never
+    elevated, Default = no UAC split token in play at all, e.g. UAC off or
+    the built-in Administrator account) instead of just a bare yes/no.
+    """
+    import os
+    out = {'pid': os.getpid(), 'is_admin': _nm_is_admin(),
+           'is_user_an_admin_raw': None, 'token_elevation_raw': None,
+           'token_elevation_type': None, 'parent_pid': None,
+           'parent_name': None, 'exe_path': None}
+    try:
+        out['exe_path'] = sys.executable
     except Exception:
-        return False
+        pass
+    try:
+        import psutil
+        p = psutil.Process(os.getpid())
+        out['parent_pid'] = p.ppid()
+        try:
+            out['parent_name'] = psutil.Process(p.ppid()).name()
+        except Exception:
+            out['parent_name'] = '(gone or inaccessible)'
+    except Exception as e:
+        out['parent_name'] = 'psutil unavailable: %s' % e
+    if os.name == 'nt':
+        try:
+            import ctypes
+            out['is_user_an_admin_raw'] = int(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception as e:
+            out['is_user_an_admin_raw'] = 'error: %s' % e
+        TOKEN_QUERY = 0x0008
+        TokenElevation = 20
+        TokenElevationType = 18
+        htoken = ctypes.c_void_p()
+        advapi32 = ctypes.windll.advapi32
+        kernel32 = ctypes.windll.kernel32
+        try:
+            _nm_prep_token_ctypes(ctypes, advapi32, kernel32)
+            if advapi32.OpenProcessToken(kernel32.GetCurrentProcess(),
+                                          TOKEN_QUERY, ctypes.byref(htoken)):
+                elevation = ctypes.c_ulong()
+                ret_size = ctypes.c_ulong()
+                if advapi32.GetTokenInformation(
+                        htoken, TokenElevation, ctypes.byref(elevation),
+                        ctypes.sizeof(elevation), ctypes.byref(ret_size)):
+                    out['token_elevation_raw'] = elevation.value
+                etype = ctypes.c_ulong()
+                if advapi32.GetTokenInformation(
+                        htoken, TokenElevationType, ctypes.byref(etype),
+                        ctypes.sizeof(etype), ctypes.byref(ret_size)):
+                    out['token_elevation_type'] = {
+                        1: 'Default (no UAC split token in play)',
+                        2: 'Full (elevated via UAC)',
+                        3: 'Limited (standard half of a split admin token)',
+                    }.get(etype.value, 'unknown (%r)' % etype.value)
+        except Exception as e:
+            out['token_elevation_type'] = 'error: %s' % e
+        finally:
+            if htoken.value:
+                try:
+                    kernel32.CloseHandle(htoken)
+                except Exception:
+                    pass
+    return out
 
 
 # winget returns these when the package is already present. They are success
@@ -2569,7 +2740,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-bf352903'
+_NM_BUILD_ID = 'b-71c4a08e'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -2832,18 +3003,31 @@ def _nm_agent_report(ag):
     return out
 
 
+_NM_AGENT_STATE = {}                        # url -> {fail_count, last_ok}
+_NM_AGENT_STATE_LOCK = threading.Lock()
+
+
 def _nm_poll_agents():
     """Poll remote agents defined in agents.json and return status list.
     Relocated from the (removed) WebServer._get_agents so reports stay self-
     contained. Searches several candidate paths, polls /status /info /data on
-    each agent concurrently, and returns a list of result dicts."""
+    each agent concurrently, and returns a list of result dicts.
+
+    Also times each endpoint and tracks fail_count/last_ok per agent across
+    calls (in _NM_AGENT_STATE) — the same link-health detail the desktop
+    AgentsWindow has always shown, now surfaced through the API too so the
+    remote client (nm_client.py) can show it instead of a bare 4-number
+    summary.
+    """
     import urllib.request as _ur, threading as _th
     TIMEOUT = 5  # seconds per agent
     def _get(base, path, hdrs, out, key):
+        t0 = time.time()
         try:
             req = _ur.Request(base.rstrip('/') + path, headers=hdrs)
             with _ur.urlopen(req, timeout=TIMEOUT) as r:
                 out[key] = json.loads(r.read().decode())
+            out[key + '_ms'] = int((time.time() - t0) * 1000)
         except Exception as e:
             out[key + '_err'] = str(e)
     _candidates = [
@@ -2902,6 +3086,21 @@ def _nm_poll_agents():
                 else: err = msg[:80]
             elif not out.get('status'):
                 err = 'No response'
+
+            # Persist fail_count/last_ok across calls (this function is
+            # stateless per-call otherwise) — same bookkeeping the desktop
+            # AgentsWindow keeps for the life of its own window, now kept at
+            # module level so the API can report it too even when no
+            # AgentsWindow is open.
+            with _NM_AGENT_STATE_LOCK:
+                st = _NM_AGENT_STATE.setdefault(base, {'fail_count': 0, 'last_ok': None})
+                if err:
+                    st['fail_count'] = st.get('fail_count', 0) + 1
+                else:
+                    st['fail_count'] = 0
+                    st['last_ok'] = datetime.now().isoformat()
+                fail_count, last_ok = st['fail_count'], st['last_ok']
+
             results.append({
                 'url':    base,
                 'label':  ag.get('label', base),
@@ -2909,6 +3108,11 @@ def _nm_poll_agents():
                 'info':   out.get('info') or {},
                 'data':   out.get('data'),
                 'error':  err,
+                'has_token':  bool(tok),
+                'fail_count': fail_count,
+                'last_ok':    last_ok,
+                'timing': {k: out[k] for k in ('status_ms', 'info_ms', 'data_ms')
+                          if k in out},
             })
         return results
     except Exception:
@@ -3858,24 +4062,33 @@ def _nm_agents_cached(max_age=12.0):
 
 
 def _nm_agents_summary():
-    """Flatten agent poll results into something a UI can render directly."""
+    """Flatten agent poll results into something a UI can render directly.
+
+    Originally just the five live-reading fields plus a download sparkline.
+    Now also carries the same identity/link-health/history detail the
+    desktop AgentsWindow's report panel shows (_nm_agent_report), so a
+    remote client (nm_client.py) talking only to this one API endpoint can
+    build an equally detailed view instead of a stripped-down one.
+    """
     out = []
     for ag in (_nm_agents_cached() or []):
         st = ag.get('status') or {}
         info = ag.get('info') or {}
         data = ag.get('data') or {}
-        hist = []
-        try:
-            dl = [x for x in (data.get('download') or []) if x is not None]
-            hist = [round(float(x), 1) for x in dl[-40:]]
-        except Exception:
-            hist = []
+        def _series(key, n=40):
+            try:
+                vals = [x for x in (data.get(key) or []) if x is not None]
+                return [round(float(x), 2) for x in vals[-n:]]
+            except Exception:
+                return []
+        hist = _series('download')
         online = not ag.get('error') and bool(st)
         out.append({
             'label': ag.get('label'), 'url': ag.get('url'),
             'online': online, 'error': ag.get('error') or '',
             'hostname': info.get('hostname', ''), 'ip': info.get('ip', ''),
             'version': info.get('version', ''),
+            'python': info.get('python') or info.get('python_version') or '',
             'platform': info.get('platform') or info.get('os') or '',
             'uptime_seconds': info.get('uptime_seconds'),
             'interval_minutes': info.get('interval_minutes'),
@@ -3885,12 +4098,73 @@ def _nm_agents_summary():
             'temp_c': info.get('temp_c'),
             'download': st.get('download'), 'upload': st.get('upload'),
             'ping': st.get('ping'), 'dns': st.get('dns'),
+            'server': st.get('server') or st.get('server_name') or '',
+            'isp': st.get('isp') or info.get('isp') or '',
             'last_test': st.get('last_test') or st.get('timestamp'),
             'running_test': bool(st.get('running_test')),
             'samples': len(data.get('timestamps') or []),
             'history': hist,
+            'hist_download': hist,
+            'hist_upload': _series('upload'),
+            'hist_ping': _series('ping'),
+            'hist_timestamps': (data.get('timestamps') or [])[-40:],
+            # Link health, mirroring _nm_agent_report's "Link" section.
+            'has_token': bool(ag.get('has_token')),
+            'fail_count': ag.get('fail_count', 0),
+            'last_ok': ag.get('last_ok'),
+            'timing': ag.get('timing') or {},
         })
     return out
+
+
+def _nm_agent_action(url, action):
+    """Trigger a run/dns/refresh on one already-configured remote agent.
+
+    Powers the client's Run Speed Test / Run DNS Check / Refresh Now
+    buttons (POST /api/agent_action) — the same three actions the desktop
+    AgentsWindow's detail panel has always offered, now reachable remotely.
+    Looks the agent's token up from agents.json by url rather than trusting
+    one from the caller, so a client can't use this to hit an arbitrary
+    third-party URL with a token it supplies itself.
+    """
+    import urllib.request as _ur
+    if action not in ('run', 'dns', 'refresh'):
+        return {'ok': False, 'error': 'unknown action %r' % action}
+    target = (url or '').rstrip('/')
+    # Always read agents.json directly for the token rather than trusting
+    # the cached poll results — those only carry has_token (a bool, for the
+    # summary endpoint), never the token itself, so looking it up from the
+    # cache would silently send an unauthenticated request to an agent that
+    # actually needs a bearer token.
+    tok = ''
+    found = False
+    for _p in (_app_dir() / 'agents.json', Path.cwd() / 'agents.json'):
+        try:
+            if _p.exists():
+                for a in json.loads(_p.read_text(encoding='utf-8')):
+                    if isinstance(a, dict) and a.get('url', '').rstrip('/') == target:
+                        tok = a.get('token', ''); found = True; break
+        except Exception:
+            pass
+        if found:
+            break
+    if not found:
+        return {'ok': False, 'error': 'no configured agent with that url'}
+    if action == 'refresh':
+        # No remote call needed — just drop the cache so the next
+        # /api/agents poll is fresh instead of waiting out max_age.
+        with _NM_AGENT_CACHE['lock']:
+            _NM_AGENT_CACHE['at'] = 0.0
+        return {'ok': True, 'message': 'refresh queued'}
+    path = '/run' if action == 'run' else '/dns'
+    headers = {'Authorization': 'Bearer %s' % tok} if tok else {}
+    try:
+        req = _ur.Request(target + path, data=b'', method='POST', headers=headers)
+        with _ur.urlopen(req, timeout=8) as r:
+            body = json.loads(r.read().decode() or '{}')
+        return {'ok': True, 'message': body.get('message', 'queued')}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
 
 
 def generate_report(monitor, report_types, period_hours, custom_start=None, custom_end=None, saved_key='', open_browser=True):
@@ -7632,12 +7906,51 @@ class SpeedTestMonitor:
         # disagree, because they can end up showing two different finished
         # tests rather than the same one.
         self._running_auto   = False
+        # The four call sites above all used to do their own plain
+        # "if self._test_busy(): return" then "self._running_x = True" --
+        # two separate statements, not one atomic operation. Two threads
+        # (e.g. run_continuous's scheduler and a remote client's
+        # /api/run_test request, or that same request landing right as a
+        # manual click fires) can both evaluate _test_busy() as False in
+        # the same instant and both then claim their own flag, launching
+        # two speedtest/librespeed processes at once anyway -- the exact
+        # "dashboard and console show two different finished tests"
+        # symptom the flags above were meant to prevent, just from a
+        # narrower race than the one they already close. Two independently
+        # -scheduled loops with different periods (this app's own
+        # interval, a remote client's own refresh cadence, a manual click)
+        # will eventually land in the same instant no matter how unlikely
+        # any single tick is -- which is exactly why this only shows up
+        # "after the app has been running for a while", not right away.
+        # _try_start_test() below makes the check-and-claim one atomic
+        # operation under this lock instead.
+        self._test_lock = threading.Lock()
 
     def _test_busy(self):
         """True if a speed test -- manual (any of the three UI/API entry
         points) or automatic (run_continuous) -- is already in progress."""
         return bool(getattr(self, '_running_manual', False) or
                     getattr(self, '_running_auto', False))
+
+    def _try_start_test(self, auto=False):
+        """Atomically check-and-claim the single test slot.
+
+        Returns True if this caller may proceed (having claimed
+        _running_auto or _running_manual), False if a test -- either kind
+        -- is already in flight. Replaces the old "if self._test_busy():
+        return" followed by a separate "self._running_x = True" at every
+        call site, which left a real gap between the check and the claim
+        for another thread to slip through (see the comment on
+        _running_auto above).
+        """
+        with self._test_lock:
+            if self._running_manual or self._running_auto:
+                return False
+            if auto:
+                self._running_auto = True
+            else:
+                self._running_manual = True
+            return True
 
     # ── Config / data persistence ──────────────────────────────────────────────
     def _load_config(self):
@@ -9339,10 +9652,9 @@ class SpeedTestMonitor:
             # finished tests instead of one. If a manual test is already
             # running, skip this cycle entirely rather than queueing or
             # blocking -- the next interval will try again.
-            if getattr(self, '_running_manual', False):
-                log.info('run_continuous: skipping this cycle, a manual test is already running')
+            if not self._try_start_test(auto=True):
+                log.info('run_continuous: skipping this cycle, a test is already running')
             else:
-                self._running_auto = True
                 try:
                     self.run_speedtest()
                 finally:
@@ -26572,10 +26884,9 @@ class SystemMonitorWindow:
                  command=self._start_internet_benchmark).pack(pady=10)
 
     def _start_internet_benchmark(self):
-        if self._monitor._test_busy():
+        if not self._monitor._try_start_test():
             self._bench_status_var.set('A speed test is already running…')
             return
-        self._monitor._running_manual = True
         self._bench_status_var.set('Running (this is the app\'s real speed test — can take a minute)…')
 
         def _w():
@@ -27045,11 +27356,10 @@ class _ThreeDServer:
         mon = getattr(self, '_monitor', None)
         if mon is None:
             handler._json(200, {'ok': False, 'error': 'no monitor'}); return
-        if mon._test_busy():
+        if not mon._try_start_test():
             handler._json(200, {'ok': True, 'running': True, 'note': 'already running'}); return
         import threading
         def _w():
-            mon._running_manual = True
             try: mon.run_speedtest()
             except Exception: _exc('web run_test')
             finally: mon._running_manual = False
@@ -34885,9 +35195,38 @@ ol.steps li{margin:6px 0}
                             _db = getattr(_db, '_db', None)
                             _name_ips = list(dict.fromkeys(
                                 _ips + [e.get('ip', '') for e in _recent if e.get('ip')]))
+                            _elevated = _nm_is_admin()
                             self._json(200, {
+                                # Build ID of the server code actually
+                                # answering this request. Compare this
+                                # against the build ID shown in the app's
+                                # own status bar -- if they differ (or this
+                                # field is missing entirely, on an older
+                                # server), the rebuild/reinstall did not
+                                # actually reach the process answering here,
+                                # and that's the thing to fix, not the
+                                # elevation logic itself.
+                                'build': _NM_BUILD_ID,
                                 'backend': _be or '',
-                                'elevated': _nm_is_admin(),
+                                'elevated': _elevated,
+                                # Diagnostic only, non-empty only when the
+                                # elevation check itself hit a real exception
+                                # (see _nm_is_admin) -- lets a wrong reading
+                                # be debugged from the raw JSON instead of
+                                # guessed at a second time.
+                                'elevated_check_error': _NM_ADMIN_CHECK_ERROR,
+                                # PID of the process that actually answered
+                                # this request. The status bar's ELEVATED tag
+                                # is read from _nm_is_admin() in the GUI
+                                # process; this is the same call made in
+                                # whichever process is serving HTTP. If the
+                                # two disagree, compare this PID against the
+                                # GUI's PID (now shown next to its own
+                                # ELEVATED tag) -- a mismatch means a second,
+                                # stale, non-elevated process is still bound
+                                # to this port and answering instead of the
+                                # one you're looking at.
+                                'pid': os.getpid(),
                                 'blocked': _ips,
                                 'count': len(_ips),
                                 'killswitch': _nm_killswitch_active(),
@@ -35005,9 +35344,26 @@ ol.steps li{margin:6px 0}
                         server_self._serve_export(self, _ef)
                     else:
                         self._json(404, {'error': 'not found'})
+                except (ConnectionAbortedError, ConnectionResetError,
+                        BrokenPipeError):
+                    # The client end of the socket is already gone - a
+                    # closed browser tab, a client that timed out and moved
+                    # on, a mobile device that slept mid-request, or (very
+                    # commonly on Windows) AV/firewall software resetting
+                    # the connection. There is nothing to send a response
+                    # to any more, so the old code's "except Exception, then
+                    # try to _json(500, ...) anyway" made things worse: that
+                    # second write hit the same dead socket, raised the same
+                    # family of error again, and printed TWO chained
+                    # tracebacks for a single harmless disconnect. Just note
+                    # it quietly and move on.
+                    pass
                 except Exception as _e:
                     log.error(f'[3D handler] {path} raised: {_e}', exc_info=True)
                     try: self._json(500, {'error': str(_e)})
+                    except (ConnectionAbortedError, ConnectionResetError,
+                            BrokenPipeError):
+                        pass
                     except Exception: _exc_debug('do_GET')
 
             def do_OPTIONS(self):
@@ -35113,6 +35469,20 @@ ol.steps li{margin:6px 0}
                         self._json(200, {'ok': ok, 'error': err})
                     elif path == '/api/briefing_now':
                         server_self._serve_briefing_now(self)
+                    elif path == '/api/agent_action':
+                        # Powers the client's Run Speed Test / Run DNS Check /
+                        # Refresh Now buttons on a remote agent — the same
+                        # three actions the desktop AgentsWindow's detail
+                        # panel already offers, reachable through the API so
+                        # a client that only talks HTTP (nm_client.py) has
+                        # parity with it instead of being read-only.
+                        n = int(self.headers.get('Content-Length', 0) or 0)
+                        try: req = json.loads(self.rfile.read(n).decode() or '{}')
+                        except Exception: req = {}
+                        result = _nm_agent_action(
+                            (req.get('url') or '').strip(),
+                            (req.get('action') or '').strip())
+                        self._json(200 if result.get('ok') else 400, result)
                     elif path in ('/api/block', '/api/unblock'):
                         n = int(self.headers.get('Content-Length', 0) or 0)
                         try: req = json.loads(self.rfile.read(n).decode() or '{}')
@@ -35144,9 +35514,19 @@ ol.steps li{margin:6px 0}
                                          'active': want if ok else _nm_killswitch_active()})
                     else:
                         self._json(404, {'error': 'not found'})
+                except (ConnectionAbortedError, ConnectionResetError,
+                        BrokenPipeError):
+                    # Same benign disconnect case as do_GET below - the
+                    # client is already gone, so don't try to write a
+                    # response to it and don't log it as an application
+                    # error.
+                    pass
                 except Exception as _e:
                     log.error(f'[3D handler] POST {path} raised: {_e}', exc_info=True)
                     try: self._json(500, {'error': str(_e)})
+                    except (ConnectionAbortedError, ConnectionResetError,
+                            BrokenPipeError):
+                        pass
                     except Exception: _exc_debug('do_POST')
 
         try:
@@ -37020,7 +37400,18 @@ class ModernWindow:
         else:
             db_ok = True   # JSON mode has no "connection" to lose
         dd.itemconfig(1, fill='#2ea043' if db_ok else '#ff6b6b')
-        dv2.set(('SQLite \u2713' if USE_DB else 'JSON') + '  \u00b7  ' + _NM_BUILD_ID)
+        # Straight from _nm_is_admin() -- the same check the firewall tab's
+        # "not elevated" warning uses -- shown right in the status bar so
+        # elevation is something you can just look at instead of having to
+        # take my word (or the warning message's word) for it.
+        # PID is included so it can be compared directly against the 'pid'
+        # field the /api/firewall response now carries -- if the firewall
+        # tab's warning shows a different PID than this status bar, a
+        # second (stale, non-elevated) process is answering HTTP requests
+        # instead of this one, and that's the bug to chase, not the
+        # elevation check itself.
+        _elev_tag = ('  \u00b7  \u26a1 ELEVATED (pid %d)' % os.getpid()) if _nm_is_admin() else ''
+        dv2.set(('SQLite \u2713' if USE_DB else 'JSON') + '  \u00b7  ' + _NM_BUILD_ID + _elev_tag)
         # Next test countdown
         iv_s = self._monitor._interval_minutes * 60
         if ts_all:
@@ -37290,8 +37681,7 @@ class ModernWindow:
 
     # ── Button actions ────────────────────────────────────────────────────────
     def _run_test(self):
-        if self._monitor._test_busy(): return
-        self._monitor._running_manual = True
+        if not self._monitor._try_start_test(): return
         import threading
 
         # The live gauge Trevor asked for -- see _NmSpeedGaugeWindow's own

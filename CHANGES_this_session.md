@@ -1,6 +1,6 @@
-# Changes this session — build `b-bf352903`
+# Changes this session — build `b-71c4a08e`
 
-Seventy-eight things this session. Build IDs for reference:
+Eighty-four things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -291,12 +291,380 @@ Seventy-eight things this session. Build IDs for reference:
     session: the BLOOM button, the status bar's now-real dots, the
     live speed-test gauge popup, and the web AI Query button. See the
     section below.
-78. `b-bf352903` (current) — new "⇪ PUSH" button on the main dashboard:
+78. `b-bf352903` — new "⇪ PUSH" button on the main dashboard:
     deploys the agent to a remote Windows (WinRM) or Linux (SSH) box
     given login credentials, starts it immediately, and installs it to
     auto-run on every reboot. Guide updated with a dedicated "Push
     Agent" section; the Push Agent window itself also explains what it
     does before you use it. See the section below.
+79. (no build ID — build scripts only) — real-world Push Agent deploy hit
+    "paramiko isn't installed in this build" even after the #78 fix; root
+    cause was two layers deeper than the first patch (see the follow-up
+    under the Push Agent section below) — `build.bat`/`build_installer.bat`
+    now resolve one Python consistently and self-heal a missing `pip` via
+    `ensurepip`. Confirmed working by you on the Linux deploy path.
+80. `b-5385a8bb` (current) — client (`nm_client.py`) rework: dashboard,
+    Latency and Quality tabs now actually draw graphs (a matplotlib
+    packaging bug was silently killing every chart in the built .exe);
+    Agents tab rebuilt to match the desktop app's own agent detail;
+    firewall "not elevated" message rewritten to explain the real UAC
+    cause; look-and-feel restyled (Command Deck discipline + single
+    accent colour). See the section below.
+81. `b-7a2f19cc` — proof the elevation disagreement is a real
+    bug, not you: the status bar's own "⚡ ELEVATED" tag now also shows
+    its PID, and `/api/firewall` now returns the PID of whichever process
+    actually answered the request, shown right in the firewall tab's
+    warning — so a mismatched PID (a stale second instance still bound
+    to the port) is directly visible instead of argued about. See the
+    section below.
+82. `b-9c41e7d0` — the actual root cause, found from the PID/
+    error-message data you sent back: the "improved" `TokenElevation`
+    check was failing on your real machine every single time with
+    `OSError: [WinError 6] The handle is invalid`, silently falling back
+    to `IsUserAnAdmin()` — meaning it had never once actually worked, it
+    just happened to fall back to the right answer. Cause was a bug on my
+    end (missing ctypes type declarations, not a UAC/account issue), now
+    fixed. See the section below.
+83. `b-2f8e6a51` — after that fix, the client showed the exact
+    same warning again post-rebuild. Added a `build` field to
+    `/api/firewall` and to the firewall tab's warning so this stops being
+    guesswork: the raw response now proves whether the machine actually
+    answering that request is running current code at all, instead of
+    theorizing about it. See the section below.
+84. `b-71c4a08e` (current) — "the real cause" above came back: dashboard
+    vs. console mismatch again, mostly after the app's been running a
+    while. The `_running_manual`/`_running_auto` guard from `b-8854f5c0`
+    was real and did help, but it was a plain check-then-set with a gap
+    two of the four start points could still both slip through in the
+    same instant — closed that gap with an actual lock. See the section
+    below.
+
+## Client rework — real graphs, agent detail, firewall messaging, single-accent restyle
+
+**What you asked:** "dashboard page should replicate the dashboard in the
+main app. i want graphs in the latency tab and the quality tab. the
+firewall tab says the monitored machine needs to be elevated which it
+allready is. i want the agents tab to show the same level of detail as the
+main app. the general look and feel is also not very good show me
+options" — then, after seeing three mocked-up directions: "Command Deck's
+discipline with NOC Glass's single-accent rule."
+
+**Charts (Dashboard/Latency/Quality), `nm_client.py` + `build_installer.bat`:**
+
+- What was there before: `_multi_chart`/`_chart` imported matplotlib inside
+  a bare `try/except Exception: return False`, so any failure — including
+  matplotlib's own data files never being bundled — silently fell back to
+  "no chart," with zero visible cause. `build_installer.bat` built
+  `NetworkMonitorClient.exe` with plain `--onefile --windowed` flags: those
+  bundle the `matplotlib` Python package (PyInstaller's static analysis
+  follows the `import`), but not matplotlib's own `mpl-data` directory
+  (fonts, style sheets, backend registry) — without an explicit
+  `--collect-data matplotlib`, the import dies deep inside matplotlib's own
+  init on a fresh machine, and the bare except swallowed it completely.
+  That's almost certainly why charts never rendered for you even though the
+  code to draw them already existed.
+- What changed: added a `_mpl_probe()` that imports matplotlib once, caches
+  whether it worked, and prints the *real* exception to stderr instead of
+  swallowing it. `build_installer.bat`'s two `NetworkMonitorClient`
+  PyInstaller invocations now pass `--collect-data matplotlib
+  --hidden-import matplotlib.backends.backend_tkagg --hidden-import numpy`.
+  Latency tab now charts the worst-RTT targets (previously whichever
+  target sorted first alphabetically, which could chart a quiet target
+  while the actually-slow one never got a graph). Quality tab now charts
+  jitter and loss alongside bufferbloat, not just bufferbloat alone.
+- Verified: a real fake-server test (`_nm_poll_agents`/`_nm_agents_summary`
+  against a real `ThreadingHTTPServer`) and a real Tk+matplotlib render
+  under `xvfb-run` both pass. **Not verified against your actual built
+  .exe** — this bug only shows up in a frozen build, and there's no way to
+  freeze a Windows .exe from this sandbox. Rebuild with the updated
+  `build_installer.bat` and tell me if Dashboard/Latency/Quality actually
+  show graphs now.
+
+**Agents tab, `speedtest_monitor.py` (`/api/agents`) + `nm_client.py`:**
+
+- What was there before: the client's Agents tab only had whatever
+  `/api/agents` happened to return, which was far less than the desktop
+  app's own `AgentsWindow` shows — no platform/Python/version/uptime, no
+  link-health (timing, consecutive failures, last success), no history
+  charts, and no way to trigger a speed test/DNS check/refresh remotely.
+- What changed: `/api/agents` now carries identity (hostname, platform,
+  python version, agent version, uptime, test interval), link health
+  (per-endpoint response times, consecutive-failure count, last successful
+  poll — tracked server-side across polls, not just the current one),
+  system stats when the agent reports them (CPU/MEM/DISK/temp), and 40-point
+  history for download/upload/ping. New `POST /api/agent_action` endpoint
+  lets the client trigger Run Speed Test / Run DNS Check / Refresh on an
+  agent — the *server* looks the agent's token up fresh from `agents.json`
+  and proxies the call, so the client can never use this as an open relay
+  with a token of its own choosing. The Agents tab is now scrollable (it
+  wasn't) and each agent gets an Identity/Link/Latest-reading breakdown
+  plus a 3-panel history chart, matching the desktop window's level of
+  detail, with working action buttons.
+- Verified: a real fake-agent HTTP server end-to-end test (poll → summary →
+  action-proxy, including confirming a real connection failure increments
+  the fail counter, and that `/run`/`/dns` get proxied with the real
+  bearer token rather than anything the client supplies) — all passed. A
+  real Tk widget-tree test under `xvfb-run` confirms every expected
+  section and button renders, and that clicking "Run Speed Test" actually
+  POSTs the correct payload. Full `selftest.py`: 35 passed, 0 failed, 1
+  skipped — no regressions elsewhere.
+
+**Firewall "needs elevation" message, `nm_client.py`:**
+
+- I checked the server-side check first (`_nm_is_admin()`, called live on
+  every `/api/firewall` request, not cached) — found no bug there. My
+  read is that this is very likely the classic Windows UAC gap: whether
+  your Windows *account* is an Administrator and whether *this specific
+  process* is holding an elevated token are different things, and under
+  UAC a normal double-click or a Startup-folder autostart never elevates
+  even for an admin account. If that's not what's happening on your end,
+  tell me more about how the monitored machine is actually launched and
+  I'll dig further rather than assume this is it.
+- What changed (client-side only, no server logic touched): the warning
+  message now explains that distinction in plain terms and gives the
+  actual fix — "Run as administrator", or for autostart, a Task Scheduler
+  entry with "Run with highest privileges" checked (not the Startup
+  folder, which never elevates); sudo/root on Linux.
+
+**Follow-up, found by you on the real machine: it WAS actually wrong.**
+You confirmed the monitored machine's app really was running elevated,
+and the warning still showed — so this was a genuine bug in
+`_nm_is_admin()`, not the UAC account/process mix-up I assumed. Root
+cause: the Windows check used `shell32.IsUserAnAdmin()`, which Microsoft's
+own documentation says not to rely on for detecting actual elevation — it
+predates UAC and really answers "is this token a member of the
+Administrators group", which doesn't reliably match "is this token
+elevated right now" on every Windows build/config. And the whole thing
+sat in a bare `except Exception: return False`, so if that call ever
+raised for any reason, it silently became a wrong "not elevated" with
+zero trace — the same silent-failure shape as the matplotlib bundling
+bug earlier in this session.
+- What changed: `_nm_is_admin()` now reads the process token's
+  `TokenElevation` field directly via `OpenProcessToken`/
+  `GetTokenInformation` — the elevation-specific, Microsoft-documented
+  way to answer this — with `IsUserAnAdmin()` kept only as a fallback if
+  that lower-level call itself fails. Either way, any real exception is
+  now recorded in a module-level `_NM_ADMIN_CHECK_ERROR` instead of
+  vanishing into a bare `False`. `/api/firewall` now includes an
+  `elevated_check_error` field carrying that text (empty string when
+  nothing went wrong), and the client's firewall tab shows it directly
+  in the warning box when it's non-empty, instead of the generic
+  UAC-explanation message, so a wrong reading is diagnosable from what's
+  on screen rather than needing another back-and-forth.
+- Verified: a real test drives all four branches of the new
+  `_nm_is_admin()` logic with a faked `ctypes.windll` (TokenElevation
+  says elevated, TokenElevation says not elevated, TokenElevation fails
+  and the IsUserAnAdmin fallback catches it, both fail) — all four give
+  the right answer and only record an error string on an actual failure.
+  A real Tk render test confirms the firewall tab shows the plain
+  explanation when there's no check error and the diagnostic text when
+  there is one. Full `selftest.py`: `/api/firewall` legitimately gained
+  the new key (re-baselined with `--update-ok`); 35 passed, 0 failed, 1
+  skipped against the new baseline. **Not verified against your actual
+  Windows machine** — I can't run the real Windows elevation APIs from
+  here, only prove the branching logic is correct against a faked one.
+  Tell me whether the warning is gone now that the app is elevated, and
+  if it's somehow still wrong, the `elevated_check_error` text (visible
+  right in the tab now) is what to send me instead of just "still wrong."
+
+**Unrelated, pre-existing bug found while testing the above:** you hit a
+`ConnectionAbortedError` `[WinError 10053]`, printed as two chained
+tracebacks, on `/api/firewall` (and it can happen on any route). Not
+something this session's changes caused — it was already there in
+`do_GET`/`do_POST`'s handler, and just hadn't surfaced in front of you
+before. Cause: whenever a client's socket goes away mid-response — a
+closed browser tab, a request that timed out client-side, a laptop that
+slept, or Windows AV/firewall software resetting the connection, all
+completely normal and not attacker or app behaviour — the handler's
+generic `except Exception` caught it, logged a full traceback, and then
+tried to write a 500 error response back to the very socket that had
+just died, which raised the *same* kind of error a second time; that
+second failure is what produced the "During handling of the above
+exception, another exception occurred" chain you saw. Fixed by catching
+`ConnectionAbortedError`/`ConnectionResetError`/`BrokenPipeError`
+specifically, before the generic handler, in both `do_GET` and `do_POST`
+— it's now silently skipped (nothing to send a response to any more)
+instead of logged as an error, and the retry-write itself is guarded the
+same way in case a non-connection error still needs one.
+**Verified:** a real socket test — one end closed, the other told to
+write — reproduces the exact double-fault with the old exception order
+and confirms the new order swallows it cleanly with no log line and no
+retry attempt. Full `selftest.py`: 35 passed, 0 failed, 1 skipped, no
+shape changes this time. **Not verified against your actual traffic
+pattern** — this fixes the specific double-traceback you saw; if a
+*different* route still logs something ugly for a dropped connection,
+send me that route name and I'll check whether it goes through this same
+`do_GET`/`do_POST` dispatcher or has its own separate handling.
+
+**Firewall elevation warning still showing after a genuinely elevated
+launch:** confirmed by you (Task Manager showed the real
+`SpeedtestMonitor.exe` running, and you were certain it was elevated), and
+the `TokenElevation` fix above still read it as not elevated with no
+`elevated_check_error` — i.e. the check ran cleanly and just disagreed
+with what you could see. Rather than guess a third explanation, per your
+call: added a plain `⚡ ELEVATED` tag next to the build ID in the main
+app's status bar, driven by the exact same `_nm_is_admin()` call the
+firewall tab uses, so elevation is something visible at a glance on the
+machine itself instead of something to argue about through a warning
+message. Also added (but did not wire into any UI yet) `_nm_admin_debug()`
+— PID, parent process name, the raw `IsUserAnAdmin`/`TokenElevation`
+values, and `TokenElevationType` (Full = went through real UAC, Limited =
+the standard half of a split admin token, Default = no UAC split token in
+play at all) — in case the status-bar tag and the firewall tab's answer
+still disagree and this needs a real second look with actual data instead
+of another guess. **Not verified against your machine** — tell me what
+the new status-bar tag shows next to the build ID once you rebuild.
+
+**Follow-up, confirmed by you: the status bar showed `⚡ ELEVATED` while
+the firewall tab still warned "not elevated" — proof this was never
+a UAC/account misunderstanding on your end.** The same `_nm_is_admin()`
+call giving two different answers in what looked like one running app
+points at one thing: two separate OS processes, only one of them
+actually elevated, with the non-elevated one still bound to the HTTP
+port and answering the client's requests instead of the elevated one
+you're looking at (a stale instance from an earlier, non-elevated launch
+that never got killed). Rather than ask you to go process-hunting in
+Task Manager against my guesses, wired in the concrete proof directly:
+`/api/firewall` now returns `pid` — the PID of whichever process actually
+served that request — and the client's firewall-tab warning shows it
+front and center: "Reporting process PID: N — check this against the PID
+shown next to ⚡ ELEVATED in the status bar." The status bar's own tag now
+shows its PID too (`⚡ ELEVATED (pid N)`). If the two numbers differ on
+your next rebuild, that mismatch is the whole bug — kill the stray
+process holding the port (or just reboot) and the warning should go away
+on its own; no further changes to the elevation check itself should be
+needed. Build bumped to `b-7a2f19cc`.
+**Verified:** both files compile; full `selftest.py` — 35 passed, 0
+failed, 1 skipped, golden re-baselined for the new `pid` key, re-run
+afterwards to confirm a clean pass with no more shape changes.
+**Not verified against your machine** — rebuild both the server and the
+client, open the firewall tab, and tell me whether the two PIDs match or
+not; that answer settles this either way.
+
+**Root cause found and fixed: the elevation check itself was silently
+broken, not the process/PID theory.** The raw JSON you sent back after
+rebooting and rebuilding (`"elevated": true`, `"pid": 22088`) answered
+this directly — it carried `"elevated_check_error": "TokenElevation check
+failed (OSError: [WinError 6] The handle is invalid.); fell back to
+IsUserAnAdmin"`. That field only gets set when the `TokenElevation` check
+raises, which it apparently has been doing on your machine on *every*
+single call since the rewrite — it just happened to fall back to
+`IsUserAnAdmin()`, which gave the right answer this time because you
+really were elevated. In other words, the "improved" check was never
+actually working; it was quietly behaving exactly like the old
+`IsUserAnAdmin()`-only code the whole time, and a case where the fallback
+gives the wrong answer would have looked identical to this whole saga.
+
+Cause: `_nm_is_admin()` calls four raw WinAPI functions
+(`GetCurrentProcess`, `OpenProcessToken`, `GetTokenInformation`,
+`CloseHandle`) via `ctypes.windll` without declaring their real
+`argtypes`/`restype`. Left undeclared, ctypes assumes every return value
+is a 32-bit `c_int` and guesses argument types from the Python values
+passed in. `GetCurrentProcess()` actually returns a pointer-sized
+pseudo-HANDLE; on real 64-bit Windows, guessing 32-bit for that value is
+exactly the kind of thing that produces a corrupted/invalid handle
+downstream — which lines up precisely with the `WinError 6: The handle
+is invalid` you saw. This is a known ctypes-on-64-bit-Windows footgun,
+and it's on me: my TokenElevation rewrite never should have called these
+without explicit signatures in the first place.
+
+Fix: added `_nm_prep_token_ctypes()`, which declares proper `argtypes`/
+`restype` for all four calls (`GetCurrentProcess` returns `c_void_p`;
+`OpenProcessToken`/`GetTokenInformation`/`CloseHandle` take/return their
+real HANDLE and BOOL types) and is called at the top of both
+`_nm_is_admin()` and the unused diagnostic helper `_nm_admin_debug()`
+before either touches the WinAPI. Build bumped to `b-9c41e7d0`.
+**Verified:** both files still compile; full `selftest.py` — 35 passed,
+0 failed, 1 skipped, no golden changes (this fix touches internal
+correctness only, not any JSON response shape). **Not verified against
+your machine** — this sandbox's ctypes tests are mocked and can't
+exercise real Win32 HANDLE marshaling, so this specific fix can only be
+confirmed on your machine: rebuild, fully kill any old
+`SpeedtestMonitor.exe`/server processes first (Task Manager), relaunch
+elevated, and check the firewall tab — if this was the whole story, the
+"not elevated" warning should simply be gone, and if you fetch
+`/api/firewall` directly, `elevated_check_error` should now come back
+empty instead of naming `WinError 6`.
+
+**Rebuilt, reinstalled, ran the client — exact same warning, no better.**
+The ctypes fix above got verified for the wrong process: the left-hand
+"Network Monitor" app you rebuilt correctly shows `b-9c41e7d0` and
+`⚡ ELEVATED` now with no error, but the "Vanguard Flow NetSentinel Client"
+in your screenshot is a separate program — it has no elevation logic of
+its own, it only displays whatever JSON the server at its configured
+address sends back. Rebuilding and reinstalling *that client* cannot
+change the warning at all unless the machine actually answering at that
+address also got the same rebuild and was relaunched elevated. Rather
+than assert that again as a theory, added a `build` field to
+`/api/firewall` (and to the firewall tab's warning) carrying the
+server's own `_NM_BUILD_ID`, so the raw response settles on its own
+whether the process answering it is even running today's code, instead
+of it being argued about a third time. Build bumped to `b-2f8e6a51`.
+**Verified:** both files compile; full `selftest.py` — 35 passed, 0
+failed, 1 skipped, golden re-baselined for the new `build` key, re-run
+clean afterward. **Not verified against your machine** — after
+rebuilding, the firewall tab should now show a `Server build:` line; if
+it reads anything other than `b-2f8e6a51` (or is missing outright), the
+process answering your client's requests is not the one you just built —
+that is the thing to chase next, not the elevation code.
+
+**Look and feel:** you picked "Command Deck's discipline with NOC Glass's
+single-accent rule" from three mocked-up directions. Turned out the app
+already had most of Command Deck's discipline (monospace throughout, flat
+relief, 1px hairline borders — nothing to change there). The real work was
+the single-accent half: the app was colouring plain, non-state metrics
+(Download/Upload/Ping/DNS, "Avg upload," agent readings, nav buttons for
+Pi-hole/Traffic/Flow map/Analytics/etc.) with an arbitrary rainbow of
+cyan/mint/amber/violet, purely for visual variety, with no actual meaning
+behind which metric got which colour. That's now collapsed to one accent
+(cyan) for anything that's just a reading or a piece of chrome. Colour that
+actually means something — online/offline, ok/warning/critical thresholds,
+VDI health, honeypot blocked/suspicious/safe — was left exactly as it was;
+none of that is decorative. `VIOLET` is retired from use (kept defined so
+nothing breaks if something external still references it). One stray
+ad-hoc hex (`#ffd93d` on a button, `#d9c7ff` on the AI-briefing text) got
+folded into the same rule instead of staying its own one-off colour.
+- Verified: real Tk widget-tree test confirms `VIOLET` no longer appears
+  anywhere in the rendered Dashboard or Latency tabs; `py_compile` clean;
+  both real GUI test suites (agent API + agents tab) still pass after the
+  colour changes. **Not verified visually on your machine** — I can
+  confirm the code no longer emits the old colours, but I haven't seen the
+  actual re-skinned app running outside this sandbox.
+
+**Not verified, any of the above:** none of this window's client-side work
+has been tested against your real machine — the connection to it was down
+for this entire session. Once it's back and you've synced, tell me if the
+charts render, the Agents tab looks right, and whether the restyle reads
+the way you wanted.
+
+**Follow-up bug, found by you on the real rebuild:** `build_installer.bat`
+crashed outright ("`so` was unexpected at this time.") right after the
+main `SpeedtestMonitor.exe` build finished, never reaching the client
+build or the NSIS installer step. Cause: the explanatory `::` comment
+block I added right above the `NetworkMonitorClient` PyInstaller call had
+parentheses split across separate comment lines — e.g. one line opened
+with "(inside a try/except..." and the closing ")" landed on the *next*
+comment line. Windows batch doesn't treat `::` as a true full-line
+comment when it sits inside an already-open `if (...) else (...)` block
+(this one does, it's nested); it still scans those lines for matching
+parens, so the mismatched pair corrupted its count and derailed parsing
+of the real `if/else` that followed, right where "so" happened to fall.
+Fixed by rewriting the comment without any parentheses at all — same
+explanation, just phrased without a character that's landmine inside a
+batch block. Also removed the parens from the `nm_client.spec` copy of
+the same comment as a precaution, though `.spec` files are plain Python
+so `#` there is a real comment and was never actually at risk.
+**Verified:** every `(`/`)` in the file balances (107/107) and the specific
+nested comment block that broke is now paren-free; **not verified against
+a real build yet** — tell me if it gets further this time.
+
+**Also while in there:** you asked to stop the "Pull llama3.2 now?"
+prompt that blocked every single run of `build_installer.bat` waiting for
+a keypress, even when you already had a model pulled. Replaced the
+blocking `choice` prompt with a non-interactive check (`ollama list`) —
+it now only prints an informational note when Ollama genuinely has zero
+models pulled, never blocks, and never auto-downloads anything on its
+own. **Not verified against a real run yet.**
 
 ## Push Agent — deploy the agent to a remote box over the network, auto-run on reboot
 
@@ -424,20 +792,17 @@ impacket-shaped shipped in this build.
   (`test_status_dots.py`, `test_bloom_toggle.py`) re-run clean, so
   nothing here disturbed the status-bar dots or BLOOM work.
 
-**Not verified:** the Windows/WinRM path has NOT been tested against a
-real Windows machine — there isn't one reachable from this sandbox. The
-PowerShell it generates was checked by actually interpreting it (see
-above), which catches syntax/logic/escaping bugs, but it hasn't run
-against a real `winrm` service, a real Scheduled Task, or a real
-Windows firewall/UAC/execution-policy configuration. Before relying on
-it: pick one real Windows box, run `winrm quickconfig -q` on it once
-(documented in the new guide section), and try one push from ⇪ PUSH —
-watch the log pane, and if anything doesn't match what's described here,
-tell me the exact message and I'll fix it against the real thing instead
-of the mock. Also not done: no retry/rollback if a deploy fails partway
-through (e.g., file copied but the scheduled task registration fails) —
-you'd need to re-run the push, which is safe to do (it overwrites in
-place) but won't clean up a half-installed state on its own.
+**Windows/WinRM path — confirmed working by you against a real Windows
+box** (after the Linux path had already been confirmed earlier). Before
+that confirmation, the PowerShell it generates had only been checked by
+actually interpreting it (see above), which catches syntax/logic/escaping
+bugs but not real `winrm` service/Scheduled Task/firewall/UAC behaviour —
+that gap is now closed by an actual real-world run, on both platforms.
+Still not done: no retry/rollback if a deploy fails partway through (e.g.,
+file copied but the scheduled task registration fails) — you'd need to
+re-run the push, which is safe to do (it overwrites in place) but won't
+clean up a half-installed state on its own. Flag it if you hit anything
+worth tightening up now that both paths are proven out.
 
 **Follow-up bug, found by you on a real rebuild:** first real-world use hit
 "paramiko isn't installed in this build" even after rebuilding. Cause: there
@@ -456,6 +821,32 @@ PyInstaller runs. No app code changed, so the build ID stays `b-bf352903`.
 **Not verified:** haven't seen you rebuild with the fixed `build.bat` yet —
 next rebuild should pick up paramiko/pywinrm cleanly; if it doesn't, tell
 me the exact new error.
+
+**Second follow-up bug, same error, deeper cause:** you rebuilt and got the
+identical "paramiko isn't installed" error. Turned out the `build.bat` fix
+above was necessary but not sufficient. Your own diagnostics
+(`where python` / `where pip`) showed three Pythons on PATH, with bare
+`pip` resolving to a *different* interpreter than bare `python` —
+`build_installer.bat` (the script you actually run for a full build) used
+bare `pip`/`pyinstaller` commands throughout, so it wasn't even
+installing into the same Python that PyInstaller itself ran from. Fixed
+every bare `pip`/`pyinstaller` call in `build_installer.bat` to go through
+the one resolved `python -m pip` / `python -m PyInstaller` instead, plus
+added a hard `python -c "import paramiko, winrm"` check with an actionable
+error if it's still missing. That surfaced the *real* root cause once the
+PATH mismatch was gone: `python -m pip install paramiko pywinrm` on your
+machine failed with "No module named pip" — that specific Python install
+(Python 3.14, per `sys.executable`) never had pip in the first place, not
+a PATH issue this time. Fixed by adding a "check / bootstrap pip" step to
+both `build.bat` and `build_installer.bat`, right after Python detection:
+if `python -m pip --version` fails, it now runs `python -m ensurepip
+--upgrade` automatically, with a loud failure and reinstall instructions
+if that still doesn't fix it. No app code changed here either.
+**Verified:** you confirmed this worked ("got there well done") and did a
+real deploy to a real Linux box, which succeeded end-to-end ("linux worked
+atreat"). The Windows/WinRM path was tried against a real Windows box
+next and you confirmed that went well too — both deploy paths are now
+proven out for real, not just against a mock.
 
 ## Embedded guide updated to cover everything new this session
 
@@ -796,6 +1187,64 @@ should mostly ride it out going forward; if the gauges freeze again WITHOUT
 that badge ever turning red, this wasn't the cause and it needs a fresh
 look — please send me the log file from around when it happens next time,
 that would settle it either way.
+
+## The race from "the real cause" section above wasn't fully closed
+
+**What you asked:** "why is this happening AGAIN speedtest not matching
+the dashboard. this happens after the app has been running for a while
+mostly" — with a console showing one completed test (DL 410.9 / UL
+64.68) while the dashboard tile read something else entirely (633.0 /
+106.8) at the same moment. Two different real-looking numbers, not one
+frozen old one, so this is a recurrence of "the real cause" section
+above (the manual-vs-automatic race), not the separate "frozen gauge" /
+DB-read issue right before this section — those look different for a
+reason: a stuck gauge repeats the SAME stale number every refresh, this
+was two DIFFERENT numbers appearing close together.
+
+**Why the earlier fix didn't fully hold:** `b-8854f5c0` added
+`_running_manual`/`_running_auto` flags and a shared `_test_busy()`
+check, and it was genuinely confirmed working on your machine at the
+time. But every one of the four places that start a test still did it
+as two separate statements — `if self._test_busy(): return` on one line,
+then `self._running_manual = True` (or `_running_auto`) a few lines
+later — with nothing stopping two threads from both running that first
+line, both seeing "not busy", and both then proceeding to the second
+line. That gap is narrow, so it mostly doesn't get hit — which is
+exactly why this looked fixed for a while and then came back "after
+running for a while": two independently-timed loops (this app's own
+scheduler, a remote client's own refresh cadence, a manual click) will
+eventually land in that same narrow instant no matter how unlikely any
+single tick is, the same way two people's stopwatches drift into sync
+sooner or later.
+
+**What changed:** added `_try_start_test()`, which does the check and
+the claim as one operation under an actual `threading.Lock`, and pointed
+all four start points (the scheduler, the dashboard's RUN button, the
+web `/api/run_test` endpoint, and the dead System Monitor benchmark tab)
+at it instead of their own separate check-then-set. There is now exactly
+one place in the whole app that's allowed to say yes to "can a test
+start", and it can only say yes to one caller at a time.
+
+**Verified, not just by inspection:** wrote a standalone stress test
+(`stress_test_lock.py`) that reproduces the exact old pattern and the
+new one side by side under real thread contention (64 threads, 500
+attempts each, a deliberate gap inserted between check and claim to
+stand in for a real scheduling gap of any width). The old pattern
+double-claimed 395 times out of 32,000 attempts under that contention —
+proof the race was real, not theoretical. The new `_try_start_test()`
+pattern: zero double-claims across the same 32,000 attempts. Also: both
+files still compile, and the full `selftest.py` suite still passes
+35/1-skip/0-fail (this change touches no JSON shape or web route).
+Build bumped to `b-71c4a08e`.
+
+**Not verified against your machine** — a lock-based fix for a timing
+race can't be proven from a screenshot the way the PID/build fields
+could; the actual test is whether it stops recurring over real runtime
+on your install. If it happens again after this, the log will at least
+tell us something useful this time: `run_continuous` now logs "skipping
+this cycle, a test is already running" every time it correctly steps
+aside, so a repeat with that line NOT present around the mismatched
+readings would mean this wasn't the whole story after all.
 
 ## Live speed-test gauge, Ookla-style
 

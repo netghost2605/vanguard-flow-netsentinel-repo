@@ -185,18 +185,19 @@ if defined OLLAMA_EXE (
     )
 )
 
-:: ── Optional: pull the default AI model so the app works out of the box ───────
+:: ── Optional: nudge about the AI model, without stopping the build for input ──
+:: This used to be a blocking `choice` prompt every single run asking whether
+:: to pull llama3.2 - annoying once you already have a model pulled, which is
+:: the common case after the first build. Now it only speaks up when Ollama
+:: genuinely has zero models pulled, and it never blocks waiting for a keypress
+:: or auto-downloads anything on its own.
 if defined OLLAMA_EXE (
-    echo.
-    echo  The app's AI uses an Ollama model ^(default: llama3.2^).
-    echo  If you have already pulled a model ^(e.g. qwen3:8b^) you can skip this.
-    choice /c YN /n /m "  Pull llama3.2 now (~2 GB)? [Y/N]: "
-    if !errorlevel! equ 1 (
-        echo  [..] Pulling llama3.2 — this can take a few minutes...
-        "!OLLAMA_EXE!" pull llama3.2
-        echo  [OK] Model ready.
-    ) else (
-        echo  [i]  Skipped. You can pull one anytime with:  ollama pull llama3.2
+    set "OLLAMA_HAS_MODEL="
+    for /f "skip=1 delims=" %%m in ('"!OLLAMA_EXE!" list 2^>nul') do set "OLLAMA_HAS_MODEL=1"
+    if not defined OLLAMA_HAS_MODEL (
+        echo.
+        echo  [i]  No Ollama model pulled yet - the app's AI features need one.
+        echo       Pull the default anytime with:  ollama pull llama3.2
     )
 )
 
@@ -382,10 +383,23 @@ if exist "nm_client.py" (
     )
     if exist "build\NetworkMonitorClient" rmdir /s /q "build\NetworkMonitorClient" >nul 2>&1
 
+    :: nm_client.py imports matplotlib lazily, inside a try/except, only when
+    :: a tab actually draws a chart, so PyInstaller's static analysis DOES
+    :: find and bundle the matplotlib package itself -- but without
+    :: --collect-data it never bundles matplotlib's own data directory --
+    :: mpl-data: fonts, style sheets, backend registry. That makes
+    :: `import matplotlib` succeed at runtime but blow up a moment later
+    :: inside matplotlib's own init, which the try/except swallows silently
+    :: -- so every chart, Dashboard, Latency, Quality, quietly falls back to
+    :: a plain text table with no visible error. speedtest_monitor.spec
+    :: already does the equivalent via collect_data_files matplotlib;
+    :: --collect-data is the same fix expressed as CLI flags, kept as flags,
+    :: not a .spec, so the client stays a single onefile exe, matching what
+    :: installer.nsi expects to bundle.
     if exist "icon.ico" (
-        python -m PyInstaller --onefile --windowed --name NetworkMonitorClient --icon icon.ico nm_client.py --clean --noconfirm
+        python -m PyInstaller --onefile --windowed --name NetworkMonitorClient --icon icon.ico nm_client.py --clean --noconfirm --collect-data matplotlib --hidden-import matplotlib.backends.backend_tkagg --hidden-import numpy
     ) else (
-        python -m PyInstaller --onefile --windowed --name NetworkMonitorClient nm_client.py --clean --noconfirm
+        python -m PyInstaller --onefile --windowed --name NetworkMonitorClient nm_client.py --clean --noconfirm --collect-data matplotlib --hidden-import matplotlib.backends.backend_tkagg --hidden-import numpy
     )
 
     :: Trust PyInstaller's exit code - NOT the mere presence of an exe, which was
