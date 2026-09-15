@@ -1,6 +1,6 @@
-# Changes this session — build `b-71c4a08e`
+# Changes this session — build `b-ee1cd001`
 
-Eighty-four things this session. Build IDs for reference:
+Ninety things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -331,13 +331,48 @@ Eighty-four things this session. Build IDs for reference:
     guesswork: the raw response now proves whether the machine actually
     answering that request is running current code at all, instead of
     theorizing about it. See the section below.
-84. `b-71c4a08e` (current) — "the real cause" above came back: dashboard
+84. `b-71c4a08e` — "the real cause" above came back: dashboard
     vs. console mismatch again, mostly after the app's been running a
     while. The `_running_manual`/`_running_auto` guard from `b-8854f5c0`
     was real and did help, but it was a plain check-then-set with a gap
     two of the four start points could still both slip through in the
     same instant — closed that gap with an actual lock. See the section
     below.
+85. `b-f4e5ec66` (current) — Time-of-Day Heatmap now uses your actual
+    selected theme's colours instead of a fixed viridis/magma_r palette,
+    and re-colours live if you change theme while it's open. See the
+    section below.
+86. `b-f4e5ec66` (current) — AI briefing's "Ollama has no model" error was
+    genuinely undiagnosable when you'd already pulled the model — it never
+    said which Ollama it actually asked or what that Ollama has installed.
+    Now it names both. See the section below.
+87. (no separate build — bundled into `b-f4e5ec66`) — found and removed a
+    dead, unreachable `return rows` line in `_windowed_pids()` while
+    running the full test suite for #85/#86 (a stray leftover statement
+    after the function's real `return pids`, referencing a variable that
+    was never defined there — harmless at runtime since it could never
+    execute, but it tripped the "undefined names" check once pyflakes was
+    actually available to run it). Unrelated to anything you asked for
+    this session; fixed because it was sitting right there failing a test
+    I was running anyway.
+88. `b-51d3ca67` — you pasted the #86 fix's own error message
+    back at me showing "no model" for a model that its own "Installed
+    there" list said WAS installed at the right endpoint — meaning #86
+    correctly diagnosed the situation but hadn't actually closed it. See
+    the section below.
+89. `b-46815a9c` — "same message your getting on my tits fix
+    it" — #88's fix didn't stop it recurring either. Rather than guess a
+    fourth cause blind, made the error itself carry enough forensic detail
+    (build id, Ollama's raw response, proof of whether the retry used a
+    byte-identical name) that whatever happens next is diagnosable from
+    the error text alone, without another round trip. See the section
+    below.
+90. `b-ee1cd001` (current) — #89's diagnostic did its job on the very next
+    try: your pasted error revealed the real cause was never a model
+    problem at all — Ollama's own `llama-server.exe` engine binary is
+    missing on your machine. Fixed the app's own bug that misdiagnosed
+    this as "has no model" and pointed you at a useless `ollama pull`, and
+    replaced it with the actual cause and fix. See the section below.
 
 ## Client rework — real graphs, agent detail, firewall messaging, single-accent restyle
 
@@ -1245,6 +1280,318 @@ tell us something useful this time: `run_continuous` now logs "skipping
 this cycle, a test is already running" every time it correctly steps
 aside, so a repeat with that line NOT present around the mismatched
 readings would mean this wasn't the whole story after all.
+
+## The diagnostic worked — real cause was Ollama's own engine binary missing, not a model problem at all
+
+**What you asked:** nothing new — you triggered the briefing again on
+build `b-46815a9c` and pasted back whatever it said, per #89's own ask.
+This time the error was actually useful: it named the real Ollama
+response verbatim, and it was completely different from anything the last
+three fixes were chasing.
+
+**What it actually said:** `HTTP 500: {"error":"error starting
+llama-server: llama-server binary not found (checked:
+C:\Users\colli\AppData\Local\Programs\Ollama\llama-server.exe, ...)"}`.
+That's Ollama's own inference engine executable — the actual program that
+runs a model, separate from the model file itself — missing from where
+Ollama expects to find it. Nothing about a model name, nothing this app's
+config was ever going to affect. The #89 retry (already shipped, doing
+exactly its job) hit the identical HTTP 500 with the identical message on
+a byte-for-byte identical retry — which is exactly what "the model isn't
+the problem" looks like from outside, and confirms none of the last three
+builds' theories (BOM, whitespace, naming mismatch, corrupted download)
+were ever going to fix this, because they were never the actual cause.
+
+**The bug this exposed in this app's own code:** the "has no model"
+detection was `e.code == 404 or 'not found' in detail.lower()` — deliberately
+broad so it would catch Ollama's various ways of phrasing "no such model".
+Too broad, as it turns out: Ollama's "llama-server binary not found"
+message contains the words "binary not found", which matched that same
+check and routed a completely unrelated, unfixable-by-pulling failure
+into the "has no model, try `ollama pull`" branch — actively bad advice
+for a problem re-pulling can't touch.
+
+**What changed:** added a specific check, ahead of the model-matching
+logic, for Ollama's "llama-server ... binary not found" phrasing. When it
+matches, the error now says plainly that Ollama's engine is missing (not
+the model), that pulling again won't help, and names the actual causes —
+an antivirus (Windows Defender included) quarantining `llama-server.exe`
+(a large, unsigned native binary and a common false-positive target) as
+the most likely one on Windows, a botched Ollama update as the other —
+with the real fix: check the antivirus quarantine/protection history for
+that file and restore or exclude it, or failing that, uninstall and
+reinstall Ollama fresh. It also skips the retry entirely for this case
+(no model name fixes a missing .exe, so there's no point spending the
+round trip), and the existing "has no model" branch's own retry got the
+same check added to its failure path, in case the engine binary going
+missing surfaces on the retry instead of the first attempt. Also
+narrowed the original "has no model" detection itself (now requires the
+word "model" alongside "not found", not just "not found" alone) so this
+class of false match can't recur for some other Ollama error that happens
+to share the phrase.
+
+**Verified, not just by inspection:** wrote a standalone test
+(`test_ollama_missing_engine.py`) using Ollama's real pasted error text
+verbatim (not a paraphrase) against a fake server that always returns
+that exact HTTP 500 for a model that genuinely IS installed. Confirmed:
+the error correctly names the engine binary as the problem, never
+suggests pulling the model, names both real causes/fixes, quotes Ollama's
+actual raw text, and — importantly — makes exactly ONE `/api/generate`
+call instead of wasting a retry that could never have helped. Re-ran the
+#86, #88 and #89 tests unchanged — all three still pass, confirming the
+narrowed detection didn't disturb the genuine missing-model path. Full
+`selftest.py` suite: 36/0/0. Build `b-ee1cd001`.
+
+**Not verified against your machine:** I can't check your actual
+antivirus quarantine or reinstall Ollama for you — that part's on your
+end. But this is no longer a guess: `llama-server.exe` going missing from
+underneath an otherwise-working Ollama install, most often to Windows
+Defender or a third-party antivirus flagging it, is a documented, common
+issue for exactly this symptom (`ollama list` shows the model, `ollama
+run`/the API doesn't work). If reinstalling Ollama doesn't bring it back,
+that same file disappearing again afterward would point squarely at
+antivirus/quarantine rather than a one-off bad install.
+
+## Same "has no model" message again after #88 — stopped guessing, made the error prove what's actually happening
+
+**What you asked:** "same message your getting on my tits fix it." Fair —
+#88 was a specific, tested hypothesis (a BOM in `~/.nm_ai_model`) and it
+evidently either wasn't the real cause, or the app hadn't been relaunched
+onto the new build yet. Either way, shipping a fifth guess without a way
+to tell those two apart would just waste another round of your time.
+
+**What changed — not another theory, a way to stop needing one:** the
+"has no model" error message itself now carries everything needed to
+settle this in one look, whatever's actually going on:
+
+- **The build id, in brackets, at the very front** — `[b-46815a9c] Ollama
+  at ...`. If you see this error WITHOUT that tag (or with an older one),
+  the app hasn't picked up this fix yet — full stop, no need to reason
+  about Ollama at all. If you see it WITH the tag and it still fails,
+  we know for certain the code that includes both the BOM-cleanup and the
+  retry ran and still couldn't recover it.
+- **The model name via Python's `repr()`, not a plain `%s`** — a hidden
+  BOM or zero-width character prints as literally nothing next to an
+  ordinary quote, which is exactly how #88's own diagnostic text hid the
+  problem it was trying to reveal. `repr()` renders it as an escape
+  sequence instead, so it's impossible to miss if it's there — and equally
+  provable that it *isn't* there if it's absent.
+- **Ollama's own raw response text, verbatim** — previously discarded
+  after being used only to detect "is this a 404". Now quoted directly in
+  the error, in case the actual wording (not just the fact of a 404) turns
+  out to matter.
+- **Whether the retry happened, and with what result.** #88's retry logic
+  (confirm the model against `/api/tags`, retry once with Ollama's own
+  exact name) is still in place — but now its outcome is reported
+  explicitly instead of silently falling through to the same-looking
+  message on failure. If the retry uses the EXACT SAME string as the
+  first attempt (because the name already matched exactly — no BOM, no
+  case difference, nothing cosmetic) and STILL fails, the error now says
+  so directly: "copied straight from its /api/tags, so this rules out a
+  naming mismatch" — and points at the next real suspect, a corrupted or
+  partial model download, with the actual fix (`ollama rm` + `ollama
+  pull`) spelled out.
+
+**Verified, not just by inspection:** extended `test_ollama_bom_retry.py`
+with a fourth scenario matching what your last paste actually looked like
+— a model name that's an *exact* match against Ollama's installed list
+(no BOM, nothing cosmetic), where `/api/generate` 404s anyway, on both the
+first attempt and the identical-string retry. Confirmed: still an honest
+failure (no fabricated success), the error is tagged with the build id,
+the model name's `repr()` is present and shows nothing hidden, the "same
+kind of failure" / `ollama rm` guidance appears, no bogus "cosmetically
+different" note gets attached to two identical strings, and exactly two
+`/api/generate` calls were made (the original plus one retry — not a
+retry loop). Re-ran the #86 and #88 tests unchanged — both still pass.
+Full `selftest.py` suite: 36/0/0. Build `b-46815a9c`.
+
+**Not verified against your machine, and deliberately so this time:** I
+don't have a fifth theory to sell you. If this happens again, what you
+paste back will itself tell us which of these it actually is — old build
+still running, or a real Ollama-side problem with that specific model
+(most likely a corrupted/partial download, fixable with the `ollama rm` +
+`ollama pull` the error will now spell out directly) — instead of us
+going another round on my guesses.
+
+## "Installed there: deepseek-r1:7b" and STILL "has no model" — the #86 fix was a correct diagnosis, not a cure
+
+**What you asked:** you pasted back the exact new-format error from #86 —
+"Ollama at http://localhost:11434 has no model 'deepseek-r1:7b' ...
+Installed there: deepseek-r1:7b, nomic-embed-text:latest, llama3.2:latest,
+qwen3:8b, nemotron-3-super:cloud." — with "ffs". Which is fair: that
+error now genuinely contradicts itself. It's naming the right Ollama, and
+that same Ollama's own installed list — fetched by this app, moments
+after the failure — includes the exact model it just said didn't exist.
+#86 made the mismatch visible; it didn't explain why the mismatch was
+happening at all.
+
+**Root cause:** Ollama's `/api/generate` matches the model name you send
+it byte-for-byte. The name this app sends comes from a small text file,
+`~/.nm_ai_model`, which anyone can edit directly — and a dotfile edited by
+hand on Windows is an easy way to pick up characters that are completely
+invisible in Notepad or in this app's own model-name field, but are very
+much still there: a UTF-8 byte-order-mark (BOM) at the front of the file
+(Notepad's plain "UTF-8" save option adds one; some PowerShell
+redirections do too), or a zero-width character from copy-pasting a model
+name off a web page. `"deepseek-r1:7b"` and `"﻿deepseek-r1:7b"` look
+completely identical printed in an error message or typed into a form
+field — which is exactly why the #86 fix's own diagnostic text couldn't
+catch it: it printed the model name with an ordinary `%s`, which silently
+swallows a BOM the same way Notepad does. Ollama, matching bytes rather
+than appearances, correctly says the second one doesn't exist.
+
+**What changed, in two layers so this closes rather than just explains
+itself better:**
+
+1. **Prevention.** Every place in the app that reads one of these AI
+   config dotfiles (`.nm_ai_model`, `.nm_ai_provider`, `.nm_ai_url`) now
+   decodes it as `utf-8-sig` (which strips a leading BOM at read time) and
+   additionally runs the result through a new `_nm_clean_cfg_text()` that
+   strips the other common invisible characters (zero-width space/joiners)
+   on top of ordinary whitespace. So a dotfile you've hand-edited gets
+   silently cleaned up the next time anything reads it — no more "looks
+   right, isn't right".
+2. **Self-healing, for anything that gets past #1 anyway** (a fresh
+   `ollama pull` where `/api/generate` briefly lags `/api/tags`, or some
+   other invisible character my cleanup list doesn't happen to cover): the
+   "has no model" handler no longer gives up immediately. It now checks
+   what Ollama's `/api/tags` actually reports installed right then, and if
+   the requested name is an exact match (worth a retry in case the first
+   failure was just a timing blip) or matches after the same BOM/whitespace
+   cleanup, it retries the completion ONCE using Ollama's own exact name
+   string — guaranteed clean, since it came back from Ollama itself rather
+   than a file on disk. If that retry succeeds, you get your actual AI
+   briefing and never see an error at all. Only if the retry also fails
+   (or nothing plausible is installed) does it fall through to the error
+   text — which now additionally calls out a cosmetic-only mismatch by
+   name (with `repr()`, so an invisible character shows up as `﻿`
+   instead of nothing) if that's what's actually going on.
+
+**Verified, not just by inspection:** wrote a standalone test
+(`test_ollama_bom_retry.py`) against a fake Ollama server that reproduces
+this exactly — a `~/.nm_ai_model` file containing a real, byte-for-byte
+BOM in front of `deepseek-r1:7b`. Confirmed: the cleaned-at-read-time
+model name means the very first `/api/generate` call already uses the
+clean name and gets a real completion back, with no retry needed at all in
+this now-common case. Separately drove the retry helpers directly to
+confirm `_nm_find_model_match()` correctly maps a BOM'd request onto
+Ollama's clean installed name, and that the error hint calls out a
+cosmetic-only mismatch by name when one exists. Also confirmed a THIRD
+case doesn't regress: a genuinely-missing model (nothing installed remotely
+resembles it) still fails with an honest, unenriched error — no false
+"installed" note, no fabricated success. Re-ran the original
+`test_ollama_hint.py` from #86 and `test_heatmap_theme.py` from #85
+unchanged — both still pass. Full `selftest.py` suite: 36/0/0. Build
+`b-51d3ca67`.
+
+**Not verified against your machine** — I can't see the actual bytes in
+your real `~/.nm_ai_model`, so I can't confirm a BOM is literally what
+happened here (versus, say, a genuine multi-second gap between the pull
+finishing and the briefing running, which the retry logic also happens to
+cover). What I can say: after this build, re-typing the model name into
+either AI settings field and saving it will now always produce a clean
+file regardless of what was in it before, and if the briefing ever fails
+with "has no model" again, the error text will either show you a `﻿`
+right in the quoted name, or — if it's some other invisible character
+entirely — at least won't have the "it's right there in the installed
+list" self-contradiction anymore, because the retry would have already
+recovered it.
+
+## AI briefing's "Ollama has no model" error didn't say which Ollama, or what it had
+
+**What you asked:** you got "AI briefing unavailable (Ollama has no model
+'deepseek-r1:7b'. Pull it with `ollama pull deepseek-r1:7b`.)" along with a
+"Ive allready pulled it" — meaning the error told you nothing you could
+actually act on, because you'd already done the thing it told you to do.
+
+**Root cause:** the app reads which Ollama to talk to (`.nm_ai_url`) and
+which model to ask for (`.nm_ai_model`) from two small dotfiles in your
+home folder. If either one is stale from earlier troubleshooting — for
+example `.nm_ai_url` still pointing at a different Ollama instance/port
+than the one you ran `ollama pull` against — the app will keep asking the
+wrong Ollama for the right model, get a real 404 back, and have no way to
+show you that mismatch, because the error text never named which endpoint
+it actually queried or what that endpoint actually has installed. Separately,
+there was already a mechanism that lists installed models on error, but it
+was only wired into the Flow AI feature's own call path, not into the
+scheduled/on-demand briefing's — which is exactly the one that failed on
+you.
+
+**What changed:** the "has no model" error now always names the actual
+endpoint it queried and lists what's actually installed there, for every
+caller (briefing included), e.g.:
+
+> Ollama at http://127.0.0.1:11434 has no model 'deepseek-r1:7b'. Pull it
+> there with `ollama pull deepseek-r1:7b`. Installed there: llama3.2:latest,
+> qwen3:8b.
+
+If `deepseek-r1:7b` isn't in that "Installed there" list even after you've
+pulled it, that's the tell — it means `.nm_ai_url` in your home folder is
+pointing at a different Ollama than the one you pulled it into (a second
+instance, a different port, a remote box), and pointing that dotfile at the
+right one will fix it. Also removed the old duplicate enrichment code from
+the Flow AI window so the "Installed there" list can't ever get appended
+twice.
+
+**Verified, not just by inspection:** wrote a standalone test
+(`test_ollama_hint.py`) that spins up a real local HTTP server mimicking
+Ollama's actual `/api/generate` 404 and `/api/tags` behaviour, points the
+real dotfile config at it, and calls the app's real `_nm_ai_complete()`
+against it end to end. Confirmed: no completion text on the 404, the error
+names the real endpoint queried, names the missing model, lists both fake
+models actually "installed" there, and the "Installed there:" text appears
+exactly once (not doubled). Full `selftest.py` suite still passes clean
+(no JSON/web-route shape changed by this). Build `b-f4e5ec66`.
+
+**Not verified against your machine** — this can't fix a genuinely
+misconfigured `.nm_ai_url` for you; it can only make the mismatch visible
+in the error text instead of silent. If the next briefing failure still
+says "has no model" after this, check that the endpoint it names matches
+the Ollama you actually ran `ollama pull deepseek-r1:7b` against.
+
+## Time-of-Day Heatmap didn't follow your theme
+
+**What you asked:** "make the heatmap colours change with the theme."
+
+**What it was doing:** the heatmap window's colours (background, panel,
+borders, text, gridlines, tooltip, the actual data colour ramp) were all
+hardcoded hex values and a fixed matplotlib `viridis`/`magma_r` colormap,
+completely independent of whichever of the 12 themes (Ocean, Sunset, Neon,
+Pastel, Mono, Crimson, Arctic, Hacker, Purple, Gold, Fire, Ice) you'd
+actually picked in Settings.
+
+**What changed:** every colour the heatmap draws — window background,
+panel, borders, axis text, gridlines, the tooltip box, the pinned-cell
+highlight, and the data colour ramp itself — now comes from your active
+theme. The data ramp is built fresh per metric from that theme's own accent
+colour for Download/Upload/Ping/DNS (light-to-dark, one hue, the same
+"sequential = one hue" rule the rest of the app's gauges already follow),
+and automatically runs in reverse for ping (lower is better, so low ping =
+the accent colour, high ping = fades toward the panel tone). If the
+heatmap window is already open when you hit Save in Settings after
+changing theme, it now re-colours itself immediately instead of needing to
+be closed and reopened. The one deliberate exception: the "now" marker
+stays plain white regardless of theme, because it has to stay visible
+against any point on any theme's colour ramp.
+
+**Verified, not just by inspection:** wrote a standalone test
+(`test_heatmap_theme.py`) that opens the real heatmap window (headless, via
+xvfb) against a real temp database with real inserted readings. Confirmed
+under the Ocean theme the rendered colormap's "good" end matches Ocean's
+own download accent colour exactly; switched the theme to Sunset and called
+the same re-render hook Settings uses, and confirmed the colormap changed
+to Sunset's accent and was no longer Ocean's (proves it's actually
+re-deriving the ramp live, not redrawing a stale one); and confirmed the
+ping metric's ramp is correctly inverted (low value = accent colour, high
+value = fades to panel). Full `selftest.py` suite still passes clean. Build
+`b-f4e5ec66`.
+
+**Not verified against your machine** — the logic is proven against two
+real themes end to end, but I haven't seen it rendered on your actual
+screen under your actual chosen theme; if a particular theme's colours
+look off in the heatmap specifically, it's likely a case the two themes I
+tested didn't cover (e.g. a theme where a metric accent is very close to
+the panel colour, making the ramp low-contrast).
 
 ## Live speed-test gauge, Ookla-style
 

@@ -2740,7 +2740,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-71c4a08e'
+_NM_BUILD_ID = 'b-ee1cd001'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -4960,6 +4960,25 @@ _NM_METRICS = {
 }
 
 
+def _nm_heatmap_cmap(theme, metric, higher_better):
+    """Sequential colormap for the time-of-day heatmap, built from the
+    ACTIVE theme's own colours instead of a fixed matplotlib preset ('viridis'
+    / 'magma_r'). Each metric ramps from the theme's panel tone up to that
+    same metric's own accent colour (theme['download'/'upload'/'ping']), so
+    picking a different theme in Settings changes what the heatmap looks
+    like too -- the same way it already changes the dashboard's gauge cards
+    and charts, just not this one until now. Ping is lower-is-better, so its
+    ramp is reversed: low (good) latency reads as the accent colour, high
+    (bad) latency fades toward the panel tone -- mirroring the direction the
+    old fixed 'viridis' vs 'magma_r' choice already used.
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+    lo = theme.get('panel', '#0a1420')
+    hi = theme.get(metric) or theme.get('download', '#00d4aa')
+    cmap = LinearSegmentedColormap.from_list(f'nm_heat_{metric}', [lo, hi])
+    return cmap.reversed() if not higher_better else cmap
+
+
 def _nm_heatmap_grid(db, metric='download', days=90):
     """7x24 grid (weekday x hour) of median values. NaN where no samples.
 
@@ -5235,8 +5254,15 @@ def _nm_open_heatmap(monitor):
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     import matplotlib.figure as _mf
 
-    BG_    = '#0a0e18'
-    FG_    = '#c8dff0'
+    # Read once up front just to paint the window before any data has
+    # loaded; _render() below re-reads _nm_theme_ui()/monitor.colors on
+    # every call (initial draw, metric/window change, and a theme-change
+    # re-render triggered from Settings -- see ModernWindow._apply_gauge_
+    # colors), so switching themes actually changes this window too
+    # instead of it being stuck on whatever was active the moment it was
+    # first opened.
+    _ui0   = _nm_theme_ui(monitor)
+    BG_    = _ui0['bg']
     DAYS   = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
     win = tk.Toplevel()
@@ -5266,7 +5292,7 @@ def _nm_open_heatmap(monitor):
 
     # Permanent caption: explains the semantics without needing to hover, and
     # doubles as the hover readout target.
-    cap = tk.Label(win, bg=BG_, fg='#6a9ab8', font=(_NM_MONO, 8), anchor='w',
+    cap = tk.Label(win, bg=BG_, fg=_ui0['text2'], font=(_NM_MONO, 8), anchor='w',
                    text='Each cell = that weekday & hour across the whole window '
                         '(e.g. every Sunday 13:00), not just today. '
                         'White box = now. Hover a cell for its sample count & last reading.')
@@ -5277,6 +5303,18 @@ def _nm_open_heatmap(monitor):
     canvas.get_tk_widget().pack(fill='both', expand=True, padx=16, pady=(4, 16))
 
     def _render(*_a):
+        # Re-read the active theme every render (not just once at window-
+        # open) so a theme change picked up here always reflects Settings'
+        # CURRENT choice -- including a re-render fired from ModernWindow.
+        # _apply_gauge_colors while this window happens to be open.
+        _theme = monitor.colors if monitor is not None else THEMES['Ocean']
+        _ui    = _nm_theme_ui(monitor)
+        bg, panel, border = _ui['bg'], _ui['panel'], _ui['border']
+        fg, fg2 = _ui['text'], _ui['text2']
+        win.configure(bg=bg)
+        cap.configure(bg=bg, fg=fg2)
+        fig.set_facecolor(bg)
+
         fig.clear()
         metric = metric_var.get()
         try:
@@ -5304,31 +5342,37 @@ def _nm_open_heatmap(monitor):
             return
 
         ax  = fig.add_subplot(111)
-        ax.set_facecolor(BG_)
-        # Green = good. For latency, lower is better, so invert the map.
-        cmap = 'viridis' if higher_better else 'magma_r'
+        ax.set_facecolor(bg)
+        # Good = the metric's own theme accent colour; see _nm_heatmap_cmap
+        # for why (ramps from the theme's panel tone up to that accent,
+        # reversed for latency since lower is better there).
+        cmap = _nm_heatmap_cmap(_theme, metric, higher_better)
         masked = np.ma.masked_invalid(grid)
         im = ax.imshow(masked, aspect='auto', cmap=cmap, origin='upper',
                        interpolation='nearest')
-        im.cmap.set_bad('#0d1828')
+        im.cmap.set_bad(bg)
 
         ax.set_xticks(range(0, 24, 2))
         ax.set_xticklabels([f'{h:02d}' for h in range(0, 24, 2)],
-                           color=FG_, fontsize=8, fontfamily='monospace')
+                           color=fg, fontsize=8, fontfamily='monospace')
         ax.set_yticks(range(7))
-        ax.set_yticklabels(DAYS, color=FG_, fontsize=8, fontfamily='monospace')
-        ax.set_xlabel('Hour of day', color='#6a9ab8', fontsize=9)
-        ax.tick_params(colors='#6a9ab8', length=0)
+        ax.set_yticklabels(DAYS, color=fg, fontsize=8, fontfamily='monospace')
+        ax.set_xlabel('Hour of day', color=fg2, fontsize=9)
+        ax.tick_params(colors=fg2, length=0)
         for sp in ax.spines.values():
-            sp.set_color('#1a2535')
+            sp.set_color(border)
 
         # Grid lines between cells make it read as a table, not a blur.
         ax.set_xticks(np.arange(-0.5, 24, 1), minor=True)
         ax.set_yticks(np.arange(-0.5, 7, 1), minor=True)
-        ax.grid(which='minor', color=BG_, linewidth=1.2)
+        ax.grid(which='minor', color=bg, linewidth=1.2)
         ax.tick_params(which='minor', length=0)
 
         # ── 'Now' marker: shows at a glance which cells are still to come ────
+        # Left white deliberately rather than themed -- it needs to read as a
+        # locator against whatever colour that cell happens to be (any point
+        # on any theme's ramp), not blend into it the way a themed colour
+        # sometimes would.
         _now = datetime.now()
         ax.add_patch(mpatches.Rectangle(
             (_now.hour - 0.5, _now.weekday() - 0.5), 1, 1,
@@ -5345,13 +5389,13 @@ def _nm_open_heatmap(monitor):
         fig.subplots_adjust(left=0.07, right=0.855, top=0.90, bottom=0.15)
         cax = fig.add_axes([0.875, 0.15, 0.018, 0.75])
         cb = fig.colorbar(im, cax=cax)
-        cb.set_label(f'median {label} ({unit})', color=FG_, fontsize=8,
+        cb.set_label(f'median {label} ({unit})', color=fg, fontsize=8,
                      rotation=270, labelpad=14)
-        cb.ax.tick_params(colors='#6a9ab8', labelsize=7)
-        cb.outline.set_edgecolor('#1a2535')
+        cb.ax.tick_params(colors=fg2, labelsize=7)
+        cb.outline.set_edgecolor(border)
 
         ax.set_title(f'{label} by day & hour — median of last {days} days',
-                     loc='left', color=FG_, fontsize=11, fontweight='bold', pad=10)
+                     loc='left', color=fg, fontsize=11, fontweight='bold', pad=10)
 
         vals = grid[np.isfinite(grid)]
         best = np.nanmax(grid) if higher_better else np.nanmin(grid)
@@ -5376,10 +5420,10 @@ def _nm_open_heatmap(monitor):
         # ── Floating tooltip that follows the cursor ─────────────────────────
         tip = ax.annotate(
             '', xy=(0, 0), xytext=(14, 14), textcoords='offset points',
-            fontsize=8, fontfamily='monospace', color='#e8f4ff',
+            fontsize=8, fontfamily='monospace', color=fg,
             ha='left', va='bottom', zorder=20, annotation_clip=False,
-            bbox=dict(boxstyle='round,pad=0.55', fc='#0b1626',
-                      ec='#38b8f0', lw=1.0, alpha=0.97))
+            bbox=dict(boxstyle='round,pad=0.55', fc=panel,
+                      ec=_ui[metric], lw=1.0, alpha=0.97))
         tip.set_visible(False)
 
         def _cell_at(ev):
@@ -5465,7 +5509,7 @@ def _nm_open_heatmap(monitor):
                 pinned['cell'] = c
                 d, h = c
                 r = mpatches.Rectangle((h - 0.5, d - 0.5), 1, 1, fill=False,
-                                       edgecolor='#f7cc73', linewidth=2.2, zorder=8)
+                                       edgecolor=_ui['accent'], linewidth=2.2, zorder=8)
                 ax.add_patch(r)
                 ax._nm_pin = [r]
                 info.config(text=_describe(d, h) + '   (click again to unpin)')
@@ -5491,6 +5535,14 @@ def _nm_open_heatmap(monitor):
     metric_cb.bind('<<ComboboxSelected>>', _render)
     days_cb.bind('<<ComboboxSelected>>', _render)
     _render()
+    # Exposed so a theme change made in Settings WHILE this window is open
+    # can refresh it in place instead of only affecting the next time it's
+    # opened -- see ModernWindow._apply_gauge_colors. _nm_fig is exposed
+    # alongside it purely for introspection/testing (e.g. confirming the
+    # rendered colormap actually matches the active theme) without having
+    # to walk the Tk widget tree to find the FigureCanvasTkAgg.
+    win._nm_rerender = _render
+    win._nm_fig = fig
     return win
 
 
@@ -10568,10 +10620,14 @@ class EtherApeWindow:
         def _ai_rf(name, dflt=''):
             try:
                 _p=_pl.Path.home()/name
-                return _p.read_text().strip() if _p.exists() else dflt
+                # utf-8-sig + _nm_clean_cfg_text: see _nm_ai_complete's _rf
+                # for why a dotfile edited by hand can carry an invisible
+                # BOM/zero-width char that breaks an exact model-name match.
+                _raw = _p.read_text(encoding='utf-8-sig') if _p.exists() else dflt
+                return _nm_clean_cfg_text(_raw) or dflt
             except Exception: return dflt
         def _ai_wf(name, val):
-            try: (_pl.Path.home()/name).write_text((val or '').strip())
+            try: (_pl.Path.home()/name).write_text(_nm_clean_cfg_text(val or ''))
             except Exception: _exc('_ai_wf')
         ai_ctrl=tk.Frame(df,bg=self._PANEL); ai_ctrl.pack(fill='x',padx=4,pady=(4,0))
         tk.Label(ai_ctrl,text='\u2726 AI:',bg=self._PANEL,fg='#c084fc',
@@ -15272,34 +15328,20 @@ class EtherApeWindow:
         there is a single implementation to fix/maintain; the failure reason is
         left in self._ai_last_error so callers can surface it. No API key is
         needed for the default 'ollama' provider; nothing leaves the box.
+
+        _nm_ai_complete itself now names the actual Ollama endpoint and what
+        it has installed on a "has no model" error (see _nm_ollama_models_
+        hint), so this used to duplicate that enrichment here -- which,
+        after that change, would have shown the "Installed: ..." list
+        twice. Removed rather than left redundant, so every caller of
+        _nm_ai_complete (this window's Flow AI, and the scheduled AI
+        briefing, which calls it directly and never went through this
+        method at all) gets identical, non-duplicated error text from one
+        place instead of two copies that can drift apart.
         """
         text, err = _nm_ai_complete(prompt, want_json=want_json, timeout=timeout)
-        if err and 'has no model' in err:
-            # Enrich with the list of models this Ollama actually has.
-            try:
-                from pathlib import Path as _P
-                uf = _P.home() / '.nm_ai_url'
-                base = ((uf.read_text().strip() if uf.exists() else '')
-                        or 'http://localhost:11434').rstrip('/')
-                err += self._ollama_models_hint(base)
-            except Exception:
-                _exc_debug('_ai_complete')
         self._ai_last_error = err or ''
         return text
-
-    def _ollama_models_hint(self, base):
-        """Best-effort list of locally-installed Ollama models, for error text."""
-        try:
-            import json as _j, urllib.request
-            with urllib.request.urlopen(base.rstrip('/') + '/api/tags',
-                                        timeout=5) as r:
-                tags = _j.loads(r.read().decode()).get('models', [])
-            names = [m.get('name', '') for m in tags if m.get('name')]
-            if names:
-                return ' Installed: ' + ', '.join(names[:8]) + '.'
-        except Exception:
-            _exc_debug('_ollama_models_hint')
-        return ''
 
 
 
@@ -18305,7 +18347,8 @@ class WiresharkWindow:
 
         def _rdf(p, dflt=''):
             try:
-                return p.read_text().strip() if p.exists() else dflt
+                _raw = p.read_text(encoding='utf-8-sig') if p.exists() else dflt
+                return _nm_clean_cfg_text(_raw) or dflt
             except Exception:
                 return dflt
 
@@ -18490,7 +18533,8 @@ class WiresharkWindow:
             import pathlib as _pl2
             try:
                 _pv = _pl2.Path.home() / '.nm_ai_provider'
-                provider = (_pv.read_text().strip().lower() if _pv.exists() else 'ollama')
+                provider = (_nm_clean_cfg_text(_pv.read_text(encoding='utf-8-sig')).lower()
+                            if _pv.exists() else 'ollama') or 'ollama'
             except Exception:
                 provider = 'ollama'
             if provider == 'anthropic':
@@ -21818,6 +21862,94 @@ class UserGuideWindow:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _nm_clean_cfg_text(s):
+    """Strip the junk that makes a dotfile value (~/.nm_ai_model etc.) look
+    right in every editor and still fail an exact-string match: a leading
+    UTF-8 BOM and the common zero-width characters, on top of ordinary
+    whitespace. All of these are invisible in Notepad and in this app's own
+    settings fields, but Ollama's /api/generate matches the model name
+    byte-for-byte -- so a dotfile edited by hand on Windows (Notepad's
+    default "UTF-8" save adds a BOM; some PowerShell redirections do too)
+    can read back as "deepseek-r1:7b" to the eye while actually being
+    '\\ufeffdeepseek-r1:7b', which Ollama correctly reports as not found
+    even though `ollama list` shows the plain name right there."""
+    if not s:
+        return s
+    # BOM, zero-width space, zero-width non-joiner, zero-width joiner,
+    # word joiner -- written as explicit \u escapes, not literal invisible
+    # characters, so this stays legible (and copy/paste-safe) in an editor.
+    for ch in ('\ufeff', '\u200b', '\u200c', '\u200d', '\u2060'):
+        s = s.replace(ch, '')
+    return s.strip()
+
+
+def _nm_ollama_installed_names(base):
+    """Raw list of model names Ollama reports installed at *base*, or None
+    on any failure (network, bad JSON, ...). Split out from
+    _nm_ollama_models_hint so the retry logic in _nm_ai_complete and the
+    error-text hint can share one fetch instead of drifting."""
+    try:
+        import json as _j, urllib.request
+        with urllib.request.urlopen(base.rstrip('/') + '/api/tags',
+                                    timeout=5) as r:
+            tags = _j.loads(r.read().decode()).get('models', [])
+        return [m.get('name', '') for m in tags if m.get('name')]
+    except Exception:
+        _exc_debug('_nm_ollama_installed_names')
+        return None
+
+
+def _nm_find_model_match(requested, names):
+    """Find the installed name that's really the same model as *requested*
+    -- an exact match (worth a retry on its own: a fresh pull can lag
+    /api/generate behind /api/tags by a moment), or one that only differs
+    from an installed name after stripping BOM/zero-width junk and
+    case. Returns the INSTALLED string (Ollama's own, guaranteed clean) or
+    None if nothing plausible is installed."""
+    if not names:
+        return None
+    if requested in names:
+        return requested
+    req_norm = _nm_clean_cfg_text(requested).lower()
+    for n in names:
+        if _nm_clean_cfg_text(n).lower() == req_norm:
+            return n
+    return None
+
+
+def _nm_ollama_models_hint(base, requested=None, names=None):
+    """Best-effort list of locally-installed Ollama models at *base*, for
+    error text. Module-level (not a window method) so every caller of
+    _nm_ai_complete gets the same enrichment -- see the "has no model"
+    branch below, which is what actually needed this: the scheduled AI
+    briefing (_nm_generate_briefing) calls _nm_ai_complete directly, not
+    through EtherApeWindow._ai_complete, so it used to show a bare "Ollama
+    has no model 'X'" with no way to tell WHICH Ollama endpoint that was
+    (a stale/non-default .nm_ai_url is a real, easy-to-hit way to get this
+    even right after `ollama pull X` succeeds against the default one) or
+    what models that endpoint actually has installed. When *requested* is
+    given and it turns out to be installed under a cosmetically different
+    name (see _nm_find_model_match), calls that out explicitly with
+    repr() so an invisible character shows up instead of needing to be
+    spotted by eye.
+    """
+    if names is None:
+        names = _nm_ollama_installed_names(base)
+    if names is None:
+        return ''
+    hint = (' Installed there: ' + ', '.join(names[:8]) + '.') if names \
+        else ' No models installed there at all.'
+    if requested:
+        match = _nm_find_model_match(requested, names)
+        if match and match != requested:
+            hint += (" Note: your configured model %r is only cosmetically "
+                      "different from the installed %r (stray whitespace or "
+                      "an invisible character -- easy to pick up retyping "
+                      "the model field) -- re-typing and re-saving it "
+                      "should fix this." % (requested, match))
+    return hint
+
+
 def _nm_ai_complete(prompt, want_json=False, timeout=30):
     """Module-level provider-agnostic AI completion, shared by the 3D server and
     any non-widget caller. Reads provider/model from ~/.nm_ai_* files. Returns
@@ -21829,7 +21961,11 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
     def _rf(name, dflt=''):
         try:
             p = _P.home() / name
-            return p.read_text().strip() if p.exists() else dflt
+            # utf-8-sig eats a leading BOM at decode time; _nm_clean_cfg_text
+            # catches everything else (zero-width chars, plain whitespace) --
+            # see its docstring for why this is worth being paranoid about.
+            raw = p.read_text(encoding='utf-8-sig') if p.exists() else dflt
+            return _nm_clean_cfg_text(raw) or dflt
         except Exception:
             return dflt
 
@@ -21876,10 +22012,127 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
         except urllib.error.HTTPError as e:
             try: detail = e.read().decode(errors='replace')[:300]
             except Exception: detail = ''
-            if e.code == 404 or 'not found' in detail.lower():
-                return None, ("Ollama has no model '%s'. Pull it with "
-                              "`ollama pull %s`." % (model, model))
-            return None, 'Ollama HTTP %s: %s' % (e.code, detail)
+            detail_l = detail.lower()
+            # "llama-server binary not found" is Ollama's OWN inference
+            # engine executable missing from its install -- not a missing
+            # model at all. This is exactly what the retry logic below
+            # proved on your machine: a byte-identical retry hit the same
+            # HTTP 500 with the same message, because there's no model
+            # name that fixes a missing .exe. The broad 'not found' check
+            # that used to gate the "has no model" branch below matched
+            # this too (it contains the words "binary not found"),
+            # wrongly telling you to `ollama pull` a model that was never
+            # the problem -- caught from your own pasted evidence, not a
+            # guess. Handled separately, first, so it never reaches that
+            # branch, and skips the pointless second attempt entirely.
+            if 'llama-server' in detail_l and 'binary not found' in detail_l:
+                return None, (
+                    "[%s] Ollama at %s is broken, not missing a model: its "
+                    "own inference engine (llama-server.exe) isn't where "
+                    "Ollama expects it (Ollama said: %s). Pulling the model "
+                    "again will not fix this -- the model itself is fine, "
+                    "the engine that runs it is missing. The most common "
+                    "cause on Windows is an antivirus (Windows Defender "
+                    "included) quarantining llama-server.exe -- it's a "
+                    "large, unsigned native binary and a frequent "
+                    "false-positive target -- with a botched Ollama update "
+                    "a distant second. Check your antivirus's quarantine/"
+                    "protection history for llama-server.exe and restore "
+                    "or exclude it; if it's not there, uninstall Ollama, "
+                    "reinstall it fresh from https://ollama.com/download, "
+                    "and the model you already pulled should work again "
+                    "without re-pulling it."
+                    % (_NM_BUILD_ID, base, detail or '(no detail)'))
+            if e.code == 404 or ('not found' in detail_l and 'model' in detail_l):
+                # Before giving up: a model that genuinely IS installed can
+                # still 404 here -- a stray BOM/invisible character in the
+                # dotfile despite the _rf() cleanup above (belt and braces
+                # for anything that cleanup doesn't catch), or a freshly
+                # pulled model where /api/generate lags /api/tags by a
+                # moment. Check what's actually installed right now and,
+                # if it plausibly matches, retry ONCE using Ollama's own
+                # exact name string -- guaranteed clean, since it came back
+                # from Ollama itself rather than a file on disk.
+                names = _nm_ollama_installed_names(base)
+                match = _nm_find_model_match(model, names) if names else None
+                retry_note = ''
+                if match:
+                    try:
+                        body['model'] = match
+                        req2 = urllib.request.Request(
+                            base + '/api/generate', data=_j.dumps(body).encode(),
+                            headers={'Content-Type': 'application/json'},
+                            method='POST')
+                        with urllib.request.urlopen(req2, timeout=timeout) as r2:
+                            out2 = _j.loads(r2.read().decode())
+                        resp2 = out2.get('response', '')
+                        if resp2:
+                            resp2 = re.sub(r'<think>.*?</think>', '', resp2,
+                                          flags=re.DOTALL | re.IGNORECASE).strip()
+                        if resp2:
+                            return resp2, ''
+                        retry_note = (" Retried with Ollama's own name %r -- "
+                                      "no error this time, but the response "
+                                      "came back empty." % match)
+                    except urllib.error.HTTPError as e2:
+                        try: detail2 = e2.read().decode(errors='replace')[:300]
+                        except Exception: detail2 = ''
+                        detail2_l = detail2.lower()
+                        if 'llama-server' in detail2_l and 'binary not found' in detail2_l:
+                            # Same "engine binary missing" failure as the
+                            # top-level check above, just surfacing on the
+                            # retry instead of the first attempt -- still
+                            # nothing a different model name fixes.
+                            retry_note = (
+                                " Retried with Ollama's own name %r and hit "
+                                "the same failure: Ollama's inference engine "
+                                "(llama-server.exe) is missing, not the "
+                                "model. Re-pulling won't help -- check your "
+                                "antivirus's quarantine for llama-server.exe, "
+                                "or reinstall Ollama fresh from "
+                                "https://ollama.com/download." % match)
+                        else:
+                            # Same failure on a name copied straight out of
+                            # Ollama's own /api/tags rules out a naming/BOM
+                            # mismatch entirely -- whatever this is, it's on
+                            # Ollama's side for this specific model. A
+                            # corrupted/partial download is the most common
+                            # real-world cause of exactly this ("shows in
+                            # `ollama list`, 404s on generate").
+                            retry_note = (" Retried with Ollama's own name %r "
+                                          "(copied straight from its /api/tags, "
+                                          "so this rules out a naming mismatch) "
+                                          "and got the same kind of failure: "
+                                          "HTTP %s, %s. That points at a "
+                                          "corrupted or partial model download "
+                                          "rather than a wrong name -- "
+                                          "`ollama rm %s` then `ollama pull %s` "
+                                          "on the machine at %s would confirm "
+                                          "and fix that."
+                                          % (match, e2.code, detail2 or '(no detail)',
+                                             match, match, base))
+                    except Exception:
+                        _exc_debug('_nm_ai_complete retry-with-canonical-name')
+                        retry_note = (" Retried with Ollama's own name %r "
+                                      "but that attempt itself couldn't "
+                                      "complete." % match)
+                # Naming the endpoint (base), the build (so it's obvious
+                # whether a running instance actually includes this fix),
+                # the model name as Python's repr() (an invisible BOM/
+                # zero-width character prints as nothing with a plain %s,
+                # making two DIFFERENT strings look identical -- repr()
+                # makes it visible as ﻿ or similar instead), and
+                # Ollama's own raw error text turns "pull it again and
+                # hope" into something you can directly compare against
+                # `ollama list`/`ollama run` on the right machine, instead
+                # of another round of guessing.
+                return None, ("[%s] Ollama at %s has no model %r "
+                              "(Ollama said: %s). Pull it there with "
+                              "`ollama pull %s`.%s%s"
+                              % (_NM_BUILD_ID, base, model,
+                                 detail or '(no detail)', model, retry_note,
+                                 _nm_ollama_models_hint(base, model, names)))
+            return None, '[%s] Ollama HTTP %s: %s' % (_NM_BUILD_ID, e.code, detail)
         except urllib.error.URLError as e:
             # "Start it with ollama serve" is useless advice when Ollama is not
             # installed at all, which is the normal state on a fresh Linux box.
@@ -23569,7 +23822,7 @@ def _nm_ensure_model(base, exe=None):
 
     # Make it the app default: on first run, or if the configured model is gone.
     try:
-        current = mf.read_text().strip() if mf.exists() else ''
+        current = _nm_clean_cfg_text(mf.read_text(encoding='utf-8-sig')) if mf.exists() else ''
     except Exception:
         current = ''
     cur_ok = bool(current) and any(n == current or n.startswith(current + ':')
@@ -23595,14 +23848,15 @@ def _nm_ensure_ollama():
     from pathlib import Path
     try:
         pf = Path.home() / '.nm_ai_provider'
-        provider = (pf.read_text().strip().lower() if pf.exists() else 'ollama')
+        provider = (_nm_clean_cfg_text(pf.read_text(encoding='utf-8-sig')).lower()
+                    if pf.exists() else 'ollama') or 'ollama'
     except Exception:
         provider = 'ollama'
     if provider not in ('ollama', 'local'):
         return
     try:
         uf = Path.home() / '.nm_ai_url'
-        base = ((uf.read_text().strip() if uf.exists() else '')
+        base = ((_nm_clean_cfg_text(uf.read_text(encoding='utf-8-sig')) if uf.exists() else '')
                 or 'http://localhost:11434').rstrip('/')
     except Exception:
         base = 'http://localhost:11434'
@@ -25312,7 +25566,6 @@ class SystemMonitorWindow:
         except Exception:
             _exc_debug('_windowed_pids')
         return pids
-        return rows
 
     def _update_tiles(self, m):
         # Disks
@@ -37246,6 +37499,18 @@ class ModernWindow:
                     _exc_debug('ModernWindow._apply_gauge_colors sparkline')
         except Exception:
             _exc('ModernWindow._apply_gauge_colors')
+        # The Time-of-Day Heatmap is its own Toplevel, not one of the four
+        # gauge cards above -- if it's currently open, re-render it too so a
+        # saved theme change reaches it the same instant, instead of only
+        # the next time it's opened. winfo_exists() guards a window closed
+        # since it was last opened (Tk would otherwise raise on a destroyed
+        # widget).
+        try:
+            hw = getattr(self, '_heatmap_win', None)
+            if hw is not None and hw.winfo_exists():
+                hw._nm_rerender()
+        except Exception:
+            _exc_debug('ModernWindow._apply_gauge_colors heatmap')
 
     # ── Main refresh loop ─────────────────────────────────────────────────────
     def _refresh(self):
@@ -37840,7 +38105,9 @@ class ModernWindow:
 
     def _open_heatmap(self):
         try:
-            _nm_open_heatmap(self._monitor)
+            # Kept so a theme change while this window is open can re-render
+            # it in place -- see _apply_gauge_colors.
+            self._heatmap_win = _nm_open_heatmap(self._monitor)
         except Exception as ex:
             _m = str(ex); _exc('_open_heatmap'); log.error(f'[heatmap] {_m}')
 
