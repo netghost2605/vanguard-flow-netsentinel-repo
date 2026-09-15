@@ -1,6 +1,6 @@
-# Changes this session — build `b-ee1cd001`
+# Changes this session — build `b-5239b070`
 
-Ninety things this session. Build IDs for reference:
+Ninety-one things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -367,12 +367,18 @@ Ninety things this session. Build IDs for reference:
     byte-identical name) that whatever happens next is diagnosable from
     the error text alone, without another round trip. See the section
     below.
-90. `b-ee1cd001` (current) — #89's diagnostic did its job on the very next
+90. `b-ee1cd001` — #89's diagnostic did its job on the very next
     try: your pasted error revealed the real cause was never a model
     problem at all — Ollama's own `llama-server.exe` engine binary is
     missing on your machine. Fixed the app's own bug that misdiagnosed
     this as "has no model" and pointed you at a useless `ollama pull`, and
     replaced it with the actual cause and fix. See the section below.
+91. `b-5239b070` (current) — "update the guide please": the embedded
+    in-app guide's Troubleshooting → "AI Query returns an error" section
+    now covers the enriched "has no model" diagnostics and the
+    "llama-server.exe missing" / antivirus-quarantine case from #89-#90,
+    and the Time-of-Day Heatmap section now mentions that its colours
+    follow your theme (#85). No behaviour change — text only.
 
 ## Client rework — real graphs, agent detail, firewall messaging, single-accent restyle
 
@@ -1280,6 +1286,38 @@ tell us something useful this time: `run_continuous` now logs "skipping
 this cycle, a test is already running" every time it correctly steps
 aside, so a repeat with that line NOT present around the mismatched
 readings would mean this wasn't the whole story after all.
+
+## Embedded guide updated to cover this session's AI troubleshooting and the themed heatmap
+
+**What you asked:** "update the guide please."
+
+**What changed:** the in-app guide (the "? GUIDE" button / `/guide` web
+route) — specifically its Troubleshooting → "AI Query returns an error"
+section — now has two new bullets reflecting what actually got built and
+learned this session:
+
+- What the enriched "has no model" error tells you (the actual Ollama
+  endpoint, the build, what's installed there) and that a genuine
+  recurrence after this — despite the named model showing as installed —
+  points at Ollama itself rather than a typo or a stale setting, since the
+  app already retries once with Ollama's own confirmed name before giving
+  up.
+- What an "Ollama is broken, not missing a model" / `llama-server.exe`
+  error actually means (Ollama's own inference engine binary went
+  missing, not the model), that re-pulling won't fix it, and the real fix
+  — check antivirus quarantine history for `llama-server.exe`, or
+  reinstall Ollama fresh.
+
+Also added a line to the Time-of-Day Heatmap section noting its colours
+now follow your selected theme and re-colour live if you change theme
+while it's open (#85, shipped a few builds back but never made it into
+the guide text at the time).
+
+**Verified:** text-only change, so `py_compile` + the full `selftest.py`
+suite is what actually matters here — the `/guide` route's byte-for-byte
+content check failed as expected (84,610 → 85,757 bytes) since the guide
+text genuinely changed, then re-baselined with `--update-ok` and
+confirmed stable on a clean re-run. 36/0/0. Build `b-5239b070`.
 
 ## The diagnostic worked — real cause was Ollama's own engine binary missing, not a model problem at all
 

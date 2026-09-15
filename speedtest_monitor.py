@@ -2740,7 +2740,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-ee1cd001'
+_NM_BUILD_ID = 'b-5239b070'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -21622,6 +21622,8 @@ class UserGuideWindow:
             ('h2', 'AI Query returns an error'),
             ('bullet', 'AI runs locally via Ollama by default — no API key needed. Install Ollama from ollama.com and pull a model (default is deepseek-r1:7b — ollama pull deepseek-r1:7b — or a faster non-reasoning model like llama3.2)'),
             ('bullet', 'The app starts Ollama automatically on launch; if that fails, run "ollama serve" manually, and make sure the model name matches one from "ollama list"'),
+            ('bullet', '"Has no model" errors name the Ollama endpoint actually being asked, the build, and what that endpoint has installed — if the named model IS in that installed list, this app already retries once with Ollama\'s own exact name before giving up, so a genuine recurrence points at Ollama itself rather than a typo or stale setting'),
+            ('bullet', '"Ollama is broken, not missing a model" / "llama-server.exe" errors mean Ollama\'s own inference engine binary has gone missing from its install — re-pulling the model will not fix this. The most common cause on Windows is an antivirus (Windows Defender included) quarantining llama-server.exe, since it is a large, unsigned native binary; check your antivirus\'s quarantine history and restore or exclude it, or failing that uninstall and reinstall Ollama fresh'),
             ('bullet', 'Only if you switch the provider to Anthropic: check your API key and that the machine has outbound HTTPS access to api.anthropic.com'),
             ('bullet', 'Start a capture first — the AI needs packet data to analyse'),
             ('h2', 'Charts look wrong after switching views'),
@@ -34878,6 +34880,10 @@ self.addEventListener('fetch',function(e){
                       'hover any cell for its sample count and last reading.'),
                 ('bullet', 'Metric — download, upload, ping or DNS'),
                 ('bullet', 'Window — how many days of history to aggregate'),
+                ('bullet', 'Colours follow your selected theme (Settings) — each metric\'s ramp '
+                           'runs from that theme\'s panel colour up to its own accent colour, '
+                           'and ping\'s ramp runs the other way since lower is better. Changing '
+                           'theme in Settings re-colours the heatmap immediately if it\'s open'),
                 ('tip', 'Reads straight from the history database, so the longer it runs the '
                         'more reliable the picture.'),
             ],
