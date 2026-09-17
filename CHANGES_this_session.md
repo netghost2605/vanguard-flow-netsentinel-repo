@@ -1,6 +1,6 @@
-# Changes this session — build `b-5239b070`
+# Changes this session — build `b-a4056eca`
 
-Ninety-one things this session. Build IDs for reference:
+Ninety-six things this session. Build IDs for reference:
 
 1. `b-346cdf46` — corrupt speed data purge (see note further down).
 2. `b-86b6ab2d` — honeypot tarpit.
@@ -373,12 +373,53 @@ Ninety-one things this session. Build IDs for reference:
     missing on your machine. Fixed the app's own bug that misdiagnosed
     this as "has no model" and pointed you at a useless `ollama pull`, and
     replaced it with the actual cause and fix. See the section below.
-91. `b-5239b070` (current) — "update the guide please": the embedded
+91. `b-5239b070` — "update the guide please": the embedded
     in-app guide's Troubleshooting → "AI Query returns an error" section
     now covers the enriched "has no model" diagnostics and the
     "llama-server.exe missing" / antivirus-quarantine case from #89-#90,
     and the Time-of-Day Heatmap section now mentions that its colours
     follow your theme (#85). No behaviour change — text only.
+92. `b-00aa1a4b` — "under what section is the wsl setup" / "yes
+    i do" — the guide had no real Pi-hole/WSL section at all (just one
+    sidebar-button bullet) and the Kali Desktop entry was one line. Added
+    a full Pi-hole (WSL/Docker) section and expanded Kali Desktop with
+    what it actually does and its real first-run-setup requirement. See
+    the section below.
+93. `b-105b6e8a` — "in the 3d view get rid of the floor and make
+    the space background a deep black so the stars stand out more" — floor
+    grid + its solid fill mesh are gone entirely (not just hidden), the sky
+    gradient/fog/clear-colour are now all near-black, and the GRID button
+    now only controls the (untouched) wall grids. See the section below.
+94. `b-b0d1c6df` — you sent a video: "floor is a different black
+    to the sides and there is a weird moire effect going on. make the sides
+    the same colour as the floor" — the walls (#93 left them untouched) were
+    still pinned to the old, now-removed floor's colour, which is why they
+    stood out against the new deep-black backdrop. Walls now pull their
+    colour from the exact same constant the backdrop's fog uses, and the
+    wall grid lines were darkened to match. See the section below.
+95. `b-c385dd98` — "moire still there" (with screenshots) — #94's
+    diagnosis was wrong: the moire wasn't the walls at all, it was the deep-
+    black SKY GRADIENT itself banding (values so close to 0 that most of its
+    512 rows round to identical 8-bit colour and step in hard rings once
+    every ~15-20 rows, stretched huge over the 900-unit backdrop sphere).
+    Fixed by dithering the gradient before it's quantized. Confirmed the bug
+    and the fix in a real headless-Chromium canvas, not just reasoning about
+    it. See the section below.
+96. `b-a4056eca` (current) — "you've made it worse, stop guessing and fix it
+    once and for all" (with a much more visible ripple pattern in the
+    screenshot) — #95's dithering fix was real and measured, but dithering
+    an 8x512 texture with no mipmaps that then gets minified onto a
+    900-unit sphere is exactly the wrong tool: the noise had nothing to
+    pre-filter it and aliased into a WORSE pattern than the banding it
+    replaced. Two real bugs out of the same texture in a row — so instead
+    of patching it a third time, the whole sky-gradient sphere is gone:
+    the backdrop is now just the renderer's flat clear colour, which
+    cannot band (no gradient) and cannot alias (no texture). Verified with
+    an actual WebGL render in a real headless browser, not static
+    analysis: the new backdrop comes out as a single, byte-identical
+    colour across every pixel, with a negative-control render of the old
+    approach confirming the test can actually tell the difference. See the
+    section below.
 
 ## Client rework — real graphs, agent detail, firewall messaging, single-accent restyle
 
@@ -1286,6 +1327,316 @@ tell us something useful this time: `run_continuous` now logs "skipping
 this cycle, a test is already running" every time it correctly steps
 aside, so a repeat with that line NOT present around the mismatched
 readings would mean this wasn't the whole story after all.
+
+## 3D view: removed the sky-gradient sphere entirely instead of patching it again
+
+**What you asked:** after the dithering fix (#95) shipped, you sent two
+screenshots and said "fuck sake youve made it worse stop guessing and
+pissing around and fix it once and for all."
+
+**You were right, and the screenshots proved it.** Boosting the exposure
+on your screenshot in an image editor made it unmistakable: a wavy,
+rippling interference pattern across the whole backdrop, clearly worse
+than the milder banding rings from before the dithering fix. That fix was
+not a bluff — it was verified with a real headless-browser render showing
+the dithered gradient's identical-adjacent-row runs dropping from 26 to
+single digits — but "verified to reduce banding" and "looks right on your
+machine" turned out to be two different questions, and this time I checked
+the second one properly before calling it done again.
+
+**Root cause of why the fix made it worse:** the sky's gradient texture is
+tiny — 8 pixels wide, 512 tall — stretched over a 900-unit sphere, with
+`minFilter:LinearFilter` and no mipmaps generated. Dithering added
+per-pixel random noise to that texture, which is the textbook fix for
+banding on a *flat-panel* image — but this texture is heavily *minified*
+(many texels compressed into few screen pixels) almost everywhere it's
+visible. Without mipmaps to pre-filter it, high-frequency content (like
+random dither noise) doesn't average down cleanly under minification — it
+aliases, resampling inconsistently across the sphere's curvature into a
+new, uglier interference pattern. In short: the fix for banding made a
+*different*, worse artifact, because dithering was the right medicine for
+the wrong disease once mipmapping was in the picture.
+
+**The actual, final fix, `speedtest_monitor.py`:** stopped patching that
+texture a third time and removed it outright. The sky used to be a large
+inverted sphere carrying a canvas gradient (originally navy-to-cyan, then
+squeezed into near-black stops, then dithered) — all of that is gone.
+`_buildSky()`, the `SKY_TOP`/`SKY_MID`/`SKY_LOW`/`SKY_GLOW` constants, the
+gradient canvas, the dithering pass, and the 900-unit sphere mesh are all
+deleted. The backdrop is now just `renderer.setClearColor(0x000000,1)` —
+a single flat colour with nothing to render, nothing to sample, nothing to
+minify. `FogExp2` is untouched and still does the distance-fade job it
+always did, since fog is computed live by the shader per-pixel and was
+never part of either bug (it's not a texture, so it literally cannot
+band or alias).
+
+**Why this is the actual last word on it, not another guess:** a flat
+clear colour is not "less likely" to band or alias, it is *structurally
+incapable* of it — there is no gradient left to round to 8-bit, and no
+texture left to minify. Two different real bugs came out of that one
+piece of code in a row (banding, then dithering-induced aliasing); the
+fix is to stop relying on a texture there at all, not to find a third,
+cleverer way to build one.
+
+**Verified, with an actual render, not just code inspection:** wrote
+`test_sky_dither.py` fresh (replacing the version that tested the now-
+deleted dithering code) to load the app's own real `three.min.js` (the
+same file `/vendor/three.min.js` serves, cached at `~/.nm_vendor`) in a
+real headless Chromium browser and render two scenes for real: the
+current backdrop code extracted verbatim from the shipped file, and a
+reconstruction of the old sky-sphere-plus-gradient approach as a negative
+control. Reading back the actual rendered pixels: the current backdrop
+comes out as **one single colour, every pixel byte-identical** — the
+strongest possible proof there's nothing left to band or alias — while
+the reconstructed old approach renders with multiple distinct colours,
+confirming this test genuinely can tell a good backdrop from a bad one
+rather than trivially passing. Extended `test_3d_floor_removed.py`'s
+existing backdrop checks to confirm the sky constants, the gradient
+canvas, and the sphere mesh are gone from the shipped script too. `py_compile`
+and `pyflakes` clean (same pre-existing unrelated warnings, nothing new).
+Full `selftest.py` suite re-run clean at 36/0/0 after re-baselining the
+`/3d` route's golden file for the (smaller, code-removing) script change.
+All prior regression tests (Ollama diagnostics, themed heatmap, floor
+removal, wall recolouring) still pass unchanged. Build bumped to
+`b-a4056eca`.
+
+**What "verified" means here, plainly:** this is now checked by literally
+rendering the real WebGL scene in a real browser and reading back pixels —
+not a screenshot from your machine, but the closest this sandbox can get
+to one. If there is still any visible pattern in the 3D view after this,
+it is coming from something other than the backdrop (the starfield, the
+wall panes, a link/flow gradient, or your own GPU/driver) rather than
+this code, since the code responsible for the pattern you were seeing no
+longer exists to produce it.
+
+## 3D view: the real moire was the sky gradient banding, not the walls
+
+**What you asked:** you sent two screenshots after the wall-colour fix
+(#94) and said "moire still there."
+
+**The previous fix (#94) was a real bug, correctly diagnosed and fixed —
+just not the one causing what you were looking at.** The walls really were
+mismatched against the new deep-black backdrop, and that fix stands. But
+the wavy interference pattern in your screenshots is on the open black
+background itself, between the nodes — nothing to do with the walls, which
+aren't even in frame in a topology view zoomed in that far.
+
+**Root cause, found by actually reproducing it, not by re-guessing from
+the screenshot:** the sky backdrop is a 900-unit inverted sphere painted
+with an 8×512 canvas gradient (`_buildSky()`), and the previous "make it
+deep black" change (#93) picked gradient stops all within about 12 levels
+of zero (`#000000` to `#04040c`). A canvas gradient interpolates smoothly
+in float space, but the canvas's backing store is 8-bit — squeezing a
+12-level colour range across 512 rows means most adjacent rows round to
+the exact same integer colour, and the colour only steps up once every
+15-25 rows. That's flat colour bands with a hard 1-unit edge between them,
+invisible at normal brightness but, stretched across a 900-unit sphere,
+exactly the wavy concentric rings in your screenshots — a classic
+gradient-banding artifact that reads as "moire" to the eye. I built and
+ran a real headless-Chromium test (`test_sky_dither.py`) against the
+*actual* gradient code from the file, not a reimplementation, and
+confirmed it directly: the real canvas output has runs of up to 26
+byte-identical adjacent rows, with 27% of all 512 rows landing on the
+exact colour of the row above them.
+
+**What changed, `speedtest_monitor.py`:** added a dithering pass in
+`_buildSky()` — after the gradient is drawn, every pixel gets ±6 levels of
+random per-channel noise before the canvas quantizes it to 8-bit. This is
+the standard fix for banding on a narrow colour range: the noise breaks
+the hard rounding steps into fine grain instead of visible rings, without
+changing how dark the sky reads overall (it's imperceptible grain on a
+tiny 8×512 texture, and the mean brightness only shifts by about 1 level).
+
+**Verified:** the same headless-Chromium test now shows the fix actually
+works on the real code — longest identical-row run drops from 26 to
+single digits, and the fraction of rows landing on an identical neighbour
+roughly halves, run after run. It also checks the dithered gradient's mean
+brightness stays within a few levels of the undithered one (still reads as
+deep black, this is a banding fix, not a colour change). `py_compile` and
+`pyflakes` clean (same pre-existing unrelated warnings as before, nothing
+new). Full `selftest.py` suite re-run clean at 36/0/0 after re-baselining
+the `/3d` route's golden file for the script-content change. The earlier
+`test_3d_floor_removed.py` and the Ollama/heatmap regression tests all
+still pass unchanged. Build bumped to `b-c385dd98`.
+
+**Not verified against your machine** — same limitation as the last two
+3D-view changes: this sandbox can run a real browser's canvas/2D rendering
+(confirmed above) but can't screenshot the actual WebGL scene the way your
+GPU renders it. The canvas-level fix is real and measured, not guessed,
+but only your own eyes on the actual 3D view can confirm the rings are
+gone. If there's still a residual pattern, it may need the dither
+amplitude raised further or the gradient simplified to fewer stops — tell
+me what it looks like and I'll adjust from there rather than guess again.
+
+## 3D view: walls recoloured to match the new deep-black floor/background
+
+**What you asked:** you sent a video of the 3D view and said "floor is a
+different black to the sides and there is a weird moire effect going on.
+make the sides the same colour as the floor."
+
+**Root cause, found in the code, not guessed from the video:** the
+previous change (#93, right below) deliberately left the 4 glass wall
+panes untouched, since you'd only asked about the floor at the time — but
+the walls' colour was never actually independent of the floor to begin
+with. Both `GLASS_COLOR` (the wall panes) and the wall `GridHelper` line
+colours were hard-coded to `0x070f1c` / `0x061019` / `0x03070d` — the
+*old* floor's exact colour, back when there was a solid floor-fill mesh to
+match — with comments literally saying "same colour as the floor" and
+"exact floor colour (see the floor fill above)." Once #93 removed that
+floor and darkened the backdrop to near-#000, those comments became false:
+the walls stayed at the old, visibly lighter/bluer floor tone while the
+open space where the floor used to be dropped to a much deeper black. That
+mismatch is the "different black" you saw. The wall `GridHelper`s (60x60,
+so a dense line grid) sitting on top of that mismatched, non-black glass
+tint at a shallow viewing angle is what read as the "moire" — dense
+repeating lines against a background they don't blend into stand out and
+shimmer in a way they wouldn't against a properly matching, low-contrast
+surface.
+
+**What changed, `speedtest_monitor.py`:** the wall glass colour is no
+longer its own hard-coded hex value — it now reads `GLASS_COLOR=FOG_TINT`,
+literally the same constant the backdrop's fog already uses, so it's
+guaranteed to match rather than being a hand-copied number that can drift
+out of sync again the next time either one changes. The wall grid line
+colours were darkened from `0x061019`/`0x03070d` to `0x020204`/`0x010102`
+to sit in that same deep-black family instead of the old floor tone. The
+stale "matches the floor" comments were rewritten to explain this history
+so the next person editing this code doesn't reintroduce the same drift.
+The packet-capture console mounted on the left wall was deliberately left
+alone — it's a distinct HUD-style panel with its own dark-navy background
+and cyan frame (meant to read as a mounted screen, not as the wall
+surface itself), not part of the room's ambient colour you were pointing
+at.
+
+**Verified:** `py_compile` clean; `pyflakes` shows only the same
+pre-existing, unrelated warnings as before. Extended
+`test_3d_floor_removed.py` with checks against the real served `/3d` HTML:
+the wall colour assignment is literally `GLASS_COLOR=FOG_TINT` (not just a
+matching literal), the old `0x070f1c` floor-coloured assignment is gone,
+and the wall grid line colours are measurably near-black (luma ≤ 8,
+tighter than the sky/fog's own ≤ 16 floor since these sit drawn on top of
+the glass rather than being the backdrop itself) — all passing. Full
+`selftest.py` suite re-run clean at 36/0/0 after re-baselining the `/3d`
+route's golden file (expected from editing the embedded script) and
+confirming it holds stable on a second clean run. Build bumped to
+`b-b0d1c6df`.
+
+**Not verified against your machine** — same limitation as #93: this is
+client-side WebGL rendering with no headless screenshot available from
+this sandbox. The fix is provably correct by construction (the walls now
+share the exact same colour constant as the space around them, not just a
+close guess), but only your own eyes on the actual 3D view can confirm the
+seam and the moire are actually gone. If the moire persists even with the
+colour now matching, it may need a second pass at the wall grid line
+*density* itself (fewer/thicker lines) rather than just colour — let me
+know what it looks like.
+
+## 3D view: floor removed, space background taken to deep black
+
+**What you asked:** "in the 3d view get rid of the floor and make the space
+background a deep black so the stars stand out more."
+
+**What was there before:** the floor was two separate meshes stacked on top
+of each other at y=-6 — a `THREE.GridHelper(60,60,...)` line-grid, plus a
+solid `PlaneGeometry(60,60)` fill mesh sitting just beneath it (added earlier
+this session purely to stop the sky/wall/starfield colour bleeding through
+the grid's cell gaps as faint "dark squares" — with the grid line-work gone,
+that fill mesh's whole reason to exist goes with it). The space backdrop —
+the inverted-sphere sky gradient, the fog tint, and the renderer's clear
+colour — was a navy/cyan palette (`#02070f` → `#12496e` for the sky stops,
+`0x08203a` fog, two different navy clear-colours depending on which
+`setClearColor()` call happened to run last), which competed with the
+starfield instead of setting it off.
+
+**What changed, `speedtest_monitor.py`:**
+
+- The floor `GridHelper` and its solid fill-plane mesh are both deleted from
+  the scene-construction code — not hidden, not toggled off by default,
+  actually gone. The 4 vertical glass wall panes and their own grid lines
+  are untouched, since you only asked about the floor.
+- `toggleGrid()` (the GRID button) no longer touches the removed `grid`
+  variable — it would have thrown a `ReferenceError` on the very next click
+  otherwise. It now drives only the wall grids, and the button's tooltip was
+  reworded from "Show/hide the floor and wall reference grid" to "Show/hide
+  the wall reference grid" to match.
+- `SKY_TOP`/`SKY_MID`/`SKY_LOW`/`SKY_GLOW` (the sky-sphere gradient stops),
+  `FOG_TINT`, and both `renderer.setClearColor()` calls are now all
+  near-black (`#000000` down to `#04040c` — kept a hair of graduation
+  between the sky stops rather than one flat value, so the backdrop still
+  reads as a gradient sky and not a banding-prone solid, but every stop is
+  dark enough that the effect is "deep black" to the eye). The two clear-
+  colour calls — previously two different navy tones depending on which one
+  happened to run last — now agree on the exact same value.
+- The floor-anchored protocol bars (`FLOOR_Y=-6`) and their explanatory
+  comments still describe positions in terms of the old grid's 1-unit
+  squares (kept for the spacing math, which didn't change), reworded so
+  they no longer claim a grid mesh is actually there to align to — the bars
+  themselves are untouched and still float at the same position, just with
+  nothing drawn beneath them now.
+
+**Verified:** `py_compile` clean; `pyflakes` shows no new warnings (only
+the same pre-existing unrelated ones from before this change); a dedicated
+test (`test_3d_floor_removed.py`) confirms against the real served `/3d`
+HTML that the floor `GridHelper`/fill-mesh construction calls are gone, no
+bare `grid.` reference survives anywhere in the `/3d` script (which would
+have been the `toggleGrid()` crash), `_wallGrids` is still built and still
+driven by the button, all 4 sky stops + the fog tint + both clear-colour
+calls are near-black by actual luma measurement (≤16 out of 255) and the
+two clear-colour calls now match each other, the GRID button's tooltip no
+longer mentions the floor, and the 4 glass wall panes are still present and
+unmodified. Full `selftest.py` suite re-run clean at 36/0/0 after
+re-baselining the `/3d` route's golden file (an expected byte-count change
+from editing the embedded script, not a bug) and confirming it holds stable
+on a second clean run. Build bumped to `b-105b6e8a`.
+
+**Not verified against your machine** — this is client-side Three.js
+rendering; there's no headless way to actually screenshot the WebGL canvas
+from this sandbox, so the check above is as thorough as static analysis of
+the served script gets (right constants, right meshes gone, right function
+behaviour, no dangling references). Open the 3D view and confirm the floor
+is actually gone and the background reads as deep black behind the stars —
+if anything looks off (e.g. the protocol bars now look like they're
+floating with nothing under them and you'd rather they got repositioned or
+removed too), tell me and I'll adjust; you only asked about the floor and
+background so I left the bars as pure positioning math, unchanged.
+
+## Guide never actually explained Pi-hole/WSL, or what Kali Desktop needs first
+
+**What you asked:** "under what section is the wsl setup" — and after I
+told you the honest answer (Pen Test's Kali Desktop bullet was the only
+WSL mention, and the Pi-hole deploy dialog — which also installs WSL2 —
+had no real documentation at all, just one sidebar-button line) — "yes i
+do" want it written properly.
+
+**What was actually there:** the ☉ PI-HOLE sidebar button opens a full
+guided deployment dialog (status checks for WSL2/Docker/the container,
+a web port and admin password field, a Pi-hole URL + API token for
+querying its stats, and DEPLOY/RE-CHECK/STATS/REPORT/ADMIN UI buttons) —
+and none of that had a guide section. The only place WSL appeared at all
+was a single bullet under Pen Test's Kali Desktop entry saying it "needs
+Kali's first-run setup completed once by hand beforehand," without saying
+what that setup actually is.
+
+**What changed:** added a new "Pi-hole (WSL/Docker)" guide section
+(between DNS Monitor and Colour Themes, both in the desktop guide window
+and the web `/guide` page), covering: what the dialog's three status rows
+mean, what each field does (including that the API token field is only
+needed for Pi-hole v5, not v6), the exact order DEPLOY does things in
+(WSL install + required reboot, Docker install + PATH refresh, waiting
+for the engine, pulling and creating the container with an auto-restart
+policy), the port 53 conflict warning, and what to do once it's running
+(the admin UI, stats, report, and that you still need to point your
+router or PC at this machine's DNS to actually use it). Also expanded the
+Kali Desktop bullet into a proper subsection: what "wsl -d kali-linux"
+actually does (opens a shell, deliberately does not auto-start Win-KeX —
+earlier attempts at that crashed Xfce), and spelled out that "first-run
+setup" means running `wsl -d kali-linux` yourself once first to create a
+Kali username and password before this button will work.
+
+**Verified:** text-only change again — `py_compile` clean, and the
+`/guide` route's byte-for-byte content check failed as expected (85,757 →
+89,845 bytes), re-baselined with `--update-ok`, confirmed stable on a
+clean re-run. Full suite: 36/0/0. Build `b-00aa1a4b`.
 
 ## Embedded guide updated to cover this session's AI troubleshooting and the themed heatmap
 

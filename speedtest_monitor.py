@@ -2740,7 +2740,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-5239b070'
+_NM_BUILD_ID = 'b-a4056eca'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -20504,6 +20504,7 @@ class UserGuideWindow:
         ('Charts & Views',           'charts'),
         ('Run Speed Test',           'speedtest'),
         ('DNS Monitor',              'dns'),
+        ('Pi-hole (WSL/Docker)',     'pihole'),
         ('Colour Themes',            'colours'),
         ('Export Data',              'export'),
         ('Reports & Scheduling',     'report'),
@@ -20678,10 +20679,19 @@ class UserGuideWindow:
                    'one, and the same authorization reminder — and opens it in your browser. Print to PDF '
                    'from there if you need one.'),
             ('h2', 'Kali Desktop button'),
-            ('p',  '⌘ Kali Desktop (Win-KeX) opens a Kali Linux shell in its own console window '
-                   '(Windows only). Type kex at the prompt to start the Win-KeX desktop.'),
-            ('bullet', 'Needs the installer\'s "WSL + Kali Linux" component'),
-            ('bullet', 'Needs Kali\'s first-run setup completed once by hand beforehand'),
+            ('p',  '⌘ Kali Desktop opens a plain WSL shell into Kali Linux (wsl -d kali-linux) in '
+                   'its own console window — Windows only. It deliberately stops there: type kex at '
+                   'the prompt yourself to start the Win-KeX graphical desktop.'),
+            ('bullet', 'Installed by the desktop installer\'s "WSL + Kali Linux" component — this '
+                       'button only launches what that already set up, it does not install anything'),
+            ('bullet', 'Needs Kali\'s own first-run setup done once by hand first: run '
+                       '"wsl -d kali-linux" yourself from a normal terminal, which walks you through '
+                       'creating a Kali username and password — until that\'s done once, this button\'s '
+                       'launch will fail'),
+            ('tip', 'The button only opens a shell, on purpose — earlier attempts at also '
+                    'auto-starting Win-KeX from here ran into Xfce/Wayland crashes and windows that '
+                    'closed before anything appeared. Typing kex yourself, once you have a working '
+                    'shell, is one word and always works.'),
         ],
         'gauges': [
             ('h1', 'Gauges'),
@@ -20807,6 +20817,56 @@ class UserGuideWindow:
             ('h2', 'Data retention'),
             ('p',  'Up to 500 DNS readings are stored in speedtest_data.json alongside the speed '
                    'test history. Per-host breakdown data is held in memory for the current session.'),
+        ],
+        'pihole': [
+            ('h1', 'Pi-hole (WSL / Docker)'),
+            ('p',  'The ☉ PI-HOLE sidebar button opens a guided deployment for Pi-hole — the '
+                   'network-wide DNS ad- and tracker-blocker — running as a Docker container inside '
+                   'WSL2. Windows only. Nothing is installed until you press DEPLOY: WSL and Docker '
+                   'Desktop are large, system-level installs that need Administrator rights and, for '
+                   'WSL, a reboot, so this never happens silently in the background.'),
+            ('h2', 'What the dialog shows'),
+            ('p',  'Opening it runs a read-only check (RE-CHECK re-runs it any time) and colour-codes '
+                   'three rows: WSL 2, Docker engine, and the Pi-hole container itself — green for '
+                   'present/running, amber for missing or not yet running. The status line above them '
+                   'lists exactly what DEPLOY would do next, and flags if the app is not running '
+                   'elevated (installs may then fail and ask you to relaunch as Administrator).'),
+            ('h2', 'Fields'),
+            ('bullet', 'Web UI port — which local port serves the Pi-hole admin page (default 8081, '
+                       'since 80 is often already taken)'),
+            ('bullet', 'Admin password — leave blank and Pi-hole generates one (shown in its own '
+                       'first-run logs) — set one here to skip that'),
+            ('bullet', 'Pi-hole URL / API token — where STATS and REPORT below query Pi-hole\'s own '
+                       'API; auto-filled from the container\'s real mapped port once it is running, '
+                       'and remembered between sessions once you save. The API token field is only '
+                       'needed for Pi-hole v5 — v6 uses a session login with just the admin password'),
+            ('h2', 'What DEPLOY actually does, in order'),
+            ('bullet', 'Installs WSL2 if missing (needs Administrator) — this step alone requires a '
+                       'RESTART before anything else can continue; press DEPLOY again after rebooting'),
+            ('bullet', 'Installs Docker Desktop via winget if missing (large download) — if the app '
+                       'still cannot see docker.exe afterwards, restart the app itself so it picks up '
+                       'the refreshed PATH, then make sure Docker Desktop is actually running'),
+            ('bullet', 'Waits for the Docker engine to be up, not just installed'),
+            ('bullet', 'Pulls the pihole/pihole image and creates the container with --restart '
+                       'unless-stopped, so it comes back on its own whenever Docker starts — including '
+                       'after a reboot'),
+            ('bullet', 'If a Pi-hole container already exists but is stopped, DEPLOY just starts it '
+                       'instead of recreating it'),
+            ('warn', 'Pi-hole binds UDP/TCP port 53 (DNS). If something else on the machine already '
+                     'holds it, the dialog warns you up front and the container create step will fail '
+                     '— stop whatever is holding it (Windows\' own "Internet Connection Sharing" is a '
+                     'common culprit) and press DEPLOY again.'),
+            ('h2', 'After it is running'),
+            ('bullet', 'ADMIN UI opens Pi-hole\'s own web interface in your browser'),
+            ('bullet', 'STATS pulls a quick summary (queries, blocked, top blocked/permitted, clients) '
+                       'straight into this window\'s console'),
+            ('bullet', 'REPORT builds the same summary as a standalone HTML file and opens it'),
+            ('bullet', 'To actually start blocking ads network-wide, point your router\'s DNS setting '
+                       '(or, for just this PC, its network adapter\'s DNS setting) at this machine\'s '
+                       'IP address — Pi-hole does nothing until something is asking it to resolve names'),
+            ('tip', 'If STATS/REPORT say nothing answered at the address you entered, the dialog '
+                    'automatically probes a short list of likely local addresses and offers to switch '
+                    'to whichever one actually responded.'),
         ],
         'colours': [
             ('h1', 'Colour Themes & Customisation'),
@@ -28456,7 +28516,7 @@ html,body{max-width:100%;overflow-x:hidden}
   <button class="tbtn" id="btnBlocked" onclick="toggleShowBlocked()"
           title="highlight blocked flows">⛔ BLOCKED</button>
   <button class="tbtn" id="btnLabels" onclick="toggleLabels()">🏷 LABELS</button>
-  <button class="tbtn active" id="btnGrid" onclick="toggleGrid()" title="Show/hide the floor and wall reference grid">▦ GRID</button>
+  <button class="tbtn active" id="btnGrid" onclick="toggleGrid()" title="Show/hide the wall reference grid">▦ GRID</button>
   <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
   <button class="tbtn" onclick="resetCamera()">⌖ RESET</button>
   <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
@@ -28625,45 +28685,40 @@ function fmtBytes(b){if(b<1024)return b+'B';if(b<1048576)return(b/1024).toFixed(
 const canvas=document.getElementById('c');
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true,alpha:true});
 renderer.setPixelRatio(1);  // No DPI scaling — keeps buffer size == CSS size, avoids mismatch
-renderer.setClearColor(0x060d1a,1);
+renderer.setClearColor(0x000000,1);
 
 const scene=new THREE.Scene();
 
 /* ── Backdrop ───────────────────────────────────────────────────────────────
-   A flat clear-colour makes the scene feel like a box. Instead: a large
-   inverted sphere carrying a vertical gradient (deep space overhead easing
-   into a faint cyan horizon glow), with the fog tinted to the SAME mid tone so
-   distant nodes dissolve into the backdrop instead of hitting a wall of flat
-   colour. Purely decorative — unlit, unfogged, never depth-writes, and drawn
-   first, so it cannot interfere with nodes, links, picking or labels.        */
-const SKY_TOP='#02070f', SKY_MID='#071a2e', SKY_LOW='#0e3350', SKY_GLOW='#12496e';
-const FOG_TINT=0x08203a;
+   Flat clear-colour, no sky mesh. There used to be a large inverted sphere
+   here carrying a canvas-gradient texture (navy-to-cyan originally, then
+   squeezed into a "deep black" range of stops all within ~12 8-bit levels
+   of #000 once you asked for the background to go deep black). That
+   gradient banded -- a canvas gradient interpolates in float space but the
+   backing store is 8-bit, so most of its rows rounded to the SAME integer
+   colour and stepped in hard rings every 15-25 rows, stretched huge over a
+   900-unit sphere. Adding dither noise to break up the banding (the
+   textbook fix, and it did measurably reduce the identical-row runs in a
+   real headless-browser test) made it WORSE, not better, once actually
+   seen on your machine: that texture is only 8x512, mapped over a 900-unit
+   sphere, with minFilter:LinearFilter and no mipmaps -- so the high-
+   frequency noise the dither added had nothing to pre-filter it on
+   minification, and it aliased into a fresh, uglier interference pattern
+   instead of the smoother (if banded) gradient it replaced. Two different
+   real bugs in the same texture, in a row.
+   The actual fix: there is no non-buggy way to squeeze a gradient this
+   subtle through an 8-bit canvas texture on a giant sphere, and the
+   gradient was providing no visible benefit anyway once every stop reads
+   as "black" -- so the texture is gone, not patched again. A flat
+   WebGLRenderer clear colour cannot band (there's no gradient to round)
+   and cannot alias (there's no texture to minify) -- it is just one solid
+   colour, always, everywhere, on every GPU. Fog still does the distance
+   fade job (FogExp2 is computed live per-pixel by the shader, not sampled
+   from a texture, so it was never part of this bug and doesn't need to
+   change). */
+const FOG_TINT=0x010103;
 scene.fog=new THREE.FogExp2(FOG_TINT,0.0125);
-renderer.setClearColor(0x02070f,1);
-
-(function _buildSky(){
-  try{
-    const cv=document.createElement('canvas'); cv.width=8; cv.height=512;
-    const g=cv.getContext('2d');
-    const grd=g.createLinearGradient(0,0,0,512);
-    grd.addColorStop(0.00, SKY_TOP);
-    grd.addColorStop(0.42, SKY_MID);
-    grd.addColorStop(0.78, SKY_LOW);
-    grd.addColorStop(0.93, SKY_GLOW);
-    grd.addColorStop(1.00, SKY_MID);
-    g.fillStyle=grd; g.fillRect(0,0,8,512);
-    const tex=new THREE.CanvasTexture(cv);
-    tex.magFilter=THREE.LinearFilter; tex.minFilter=THREE.LinearFilter;
-    const sky=new THREE.Mesh(
-      new THREE.SphereGeometry(900,32,24),
-      new THREE.MeshBasicMaterial({map:tex,side:THREE.BackSide,
-                                   depthWrite:false,fog:false}));
-    sky.renderOrder=-1;
-    sky.frustumCulled=false;
-    sky.userData.isSky=true;      // keep it out of raycasting/picking
-    scene.add(sky);
-  }catch(e){ /* backdrop is optional — scene still renders without it */ }
-})();
+renderer.setClearColor(0x000000,1);
 
 /* ── Star sprite textures ─────────────────────────────────────────────────
    Two small canvas-drawn textures, generated once and shared by every star:
@@ -28845,41 +28900,36 @@ scene.add(new THREE.AmbientLight(0x112244,2));
 const dlight=new THREE.DirectionalLight(0x4488ff,1.2);
 dlight.position.set(5,10,8);scene.add(dlight);
 
-const grid=new THREE.GridHelper(60,60,0x061019,0x03070d);   // near-black floor
-grid.position.y=-6;scene.add(grid);
-// Toggled by the GRID button (toggleGrid()) — floor grid plus the 4 wall
-// grids pushed in below. The solid floor fill and the glass wall panes are
-// separate decorative meshes and stay put; this only hides the line grids.
+// Floor removed on purpose (you asked to get rid of it so the starfield reads
+// as open space rather than a room with a lit surface underneath). There used
+// to be a GridHelper floor grid plus a solid PlaneGeometry fill mesh sitting
+// under it (the fill only existed to block the sky/wall/starfield colour from
+// bleeding through the grid's cell gaps as faint "dark squares" — with the
+// grid itself gone that problem is moot, so both meshes are gone together).
+// The 4 glass wall panes and their own grid lines are untouched below — only
+// the floor was requested — so toggleGrid()/_wallGrids now only ever refer to
+// the walls; there is no `grid` variable left to toggle.
 let _gridVisible=true;
 const _wallGrids=[];
 
-// Solid floor just beneath the grid lines. The floor is ONLY a line grid, so
-// without this the sky/fog/wall-grids/starfield behind it show THROUGH the cell
-// gaps — and because that background isn't uniform, some cells read darker and
-// bluer than others: the faint "dark squares" scattered on the floor. A matte
-// fill at the base floor colour blocks the bleed-through; the grid lines still
-// read on top, so the look is unchanged except the artifacts are gone.
-(function(){
-  const fill=new THREE.Mesh(
-    new THREE.PlaneGeometry(60,60),
-    new THREE.MeshBasicMaterial({color:0x070f1c})   // matches the near-black floor
-  );
-  fill.rotation.x=-Math.PI/2;
-  fill.position.y=-6.08;            // just below the grid lines at y=-6 (no z-fight)
-  fill.renderOrder=-2;
-  fill.userData.isSky=true;         // decorative — excluded from picking
-  scene.add(fill);
-})();
 
-
-// 4 vertical walls — same colour as the floor, but glass: a translucent tinted
-// pane behind the grid lines (mirrors the floor's own line-grid + solid-fill
-// treatment, just with the fill made see-through instead of opaque) so the
-// starfield glows through rather than the room reading as a closed box.
+// 4 vertical walls — glass: a translucent tinted pane behind faint grid
+// lines, so the starfield glows through rather than the room reading as a
+// closed box.
+// These used to be pinned to the old floor's colour (0x070f1c, back when
+// there was a solid floor-fill mesh to match). That floor is gone now and
+// the backdrop it left behind is a much deeper black (FOG_TINT and the sky
+// gradient, both near #000), so the walls were left visibly lighter/bluer
+// than the empty space where the floor used to be -- a mismatched seam,
+// plus the dense grid lines standing out against black were the "weird
+// moire" effect at a shallow viewing angle. Fixed by pulling the wall
+// colour from the SAME constant the backdrop's fog uses (so it's not just
+// a close guess, it's the identical value) and darkening the grid lines to
+// match that same near-black family instead of the old floor tone.
 (function(){
-  const W=60,D=60,G=0x061019,G2=0x03070d;   // near-black wall grid lines, matches floor
-  const cy=-6+(W/2); // centre Y so bottom aligns with floor
-  const GLASS_COLOR=0x070f1c;   // exact floor colour (see the floor fill above)
+  const W=60,D=60,G=0x020204,G2=0x010102;   // near-black wall grid lines, matches the new deep-black backdrop (see FOG_TINT/SKY_* above), not the old removed floor
+  const cy=-6+(W/2); // centre Y so bottom aligns with where the floor used to be
+  const GLASS_COLOR=FOG_TINT;   // same deep-black tone as the backdrop/fog -- no more mismatched seam against the sides
   const GLASS_OPACITY=0.16;     // translucent enough that the stars clearly read through
 
   function glassPane(px,py,pz,ry){
@@ -29280,21 +29330,25 @@ function makeSprite(text,hex){
 }
 
 /* ── Protocol bar graph ─────────────────────────────────────────────────────
-   One bar per protocol, each occupying exactly one grid square of the cube
-   floor (GridHelper(60,60), so 1 unit == 1 square). The bars lie FLAT and grow
-   HORIZONTALLY across the floor with each protocol's share of traffic — a
-   dominant protocol stretches away from the row rather than shooting up as a
-   skyscraper. Purely decorative: not in _rayTargets, so it can never
-   intercept a click.                                                        */
+   One bar per protocol, positioned as if occupying one square of a 60x60,
+   1-unit-per-square grid (the floor grid this convention was built against
+   has since been removed — the bars now float at FLOOR_Y in open space, but
+   keep the same spacing math since nothing about the bars themselves
+   changed). The bars lie FLAT and grow HORIZONTALLY with each protocol's
+   share of traffic — a dominant protocol stretches away from the row rather
+   than shooting up as a skyscraper. Purely decorative: not in _rayTargets,
+   so it can never intercept a click.                                       */
 const PROTO_BARS=['http','http2','tls','ssl','dns','mdns','dhcp','dhcpv6',
                   'icmp','icmpv6','tcp','udp','arp','other','blocked','suspicious'];
 const BAR_LABEL={http:'HTTP',http2:'HTTP2',tls:'TLS',ssl:'SSL',dns:'DNS',mdns:'mDNS',
                  dhcp:'DHCP',dhcpv6:'DHCPv6',icmp:'ICMP',icmpv6:'ICMPv6',tcp:'TCP',
                  udp:'UDP',arp:'ARP',other:'OTHER',blocked:'BLOCKED',suspicious:'SUSPECT'};
-/* One grid square each: the floor is GridHelper(60,60) spanning -30..30, so
-   grid lines land on integers and square CENTRES on half-integers. 16 bars
-   at 1.0 spacing centred on 0 gives centres -7.5 .. +7.5 (exactly square
-   centres); a 1.0 footprint fills each square edge to edge, no gaps.      */
+/* One virtual grid square each, sized against the removed floor grid's old
+   60x60 span (-30..30, lines on integers, square CENTRES on half-integers).
+   16 bars at 1.0 spacing centred on 0 gives centres -7.5 .. +7.5 (exactly
+   those old square centres); a 1.0 footprint fills each virtual square edge
+   to edge, no gaps — kept for consistent, non-overlapping bar spacing even
+   though there's no drawn grid to align to any more.                      */
 const BAR_W=1.0, BAR_GAP=1.0, BAR_MAXL=20.0, BAR_T=0.20, FLOOR_Y=-6;
 // ── Attack drill button on the 3D view itself ─────────────────────────────
 let ATK_ON=false;
@@ -30340,8 +30394,9 @@ function toggleLabels(){
   rebuildGeometry(nodeData,flowData);
 }
 function toggleGrid(){
+  // Floor grid is gone (removed entirely, not just hidden) — this now only
+  // ever controls the 4 wall grids.
   _gridVisible=!_gridVisible;
-  grid.visible=_gridVisible;
   _wallGrids.forEach(g=>{ g.visible=_gridVisible; });
   document.getElementById('btnGrid').classList.toggle('active',_gridVisible);
 }
@@ -34959,7 +35014,7 @@ self.addEventListener('fetch',function(e){
 
         # Preferred section order (weaves the web-only sections in sensibly).
         ORDER = ['overview', 'dashboard', 'system', 'pentest', 'monitor', 'gauges', 'charts',
-                 'speedtest', 'dns', 'heatmap', 'quality', 'report', 'evidence', 'colours', 'export',
+                 'speedtest', 'dns', 'pihole', 'heatmap', 'quality', 'report', 'evidence', 'colours', 'export',
                  'wireshark', 'etherape', 'topology_search', 'country_block',
                  'scrubber', 'killswitch', 'talkers', 'radar', 'world', 'attack',
                  'agents',

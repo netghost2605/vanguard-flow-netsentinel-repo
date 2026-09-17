@@ -89,8 +89,8 @@
       "status": 200
     },
     "/3d": {
-      "bytes": 206171,
-      "sha256": "1dc294086b4013b616c2560db6925c1e8ac8e1611edb9cb724bdd761eec567e7",
+      "bytes": 207038,
+      "sha256": "4fa968c9ab53d0b63f60b098fb727babf0fe6e7be312df1e4b93c0507b100d08",
       "status": 200
     },
     "/agents": {
@@ -109,8 +109,8 @@
       "status": 200
     },
     "/guide": {
-      "bytes": 85757,
-      "sha256": "d6420cc003371576c05e81bf9101f74b9863e4d5c8560c03df031b144ac312a5",
+      "bytes": 89845,
+      "sha256": "0e14d36d45ae4e44d2087c1f006df8e5acabfd6be497eebbc0ed79afc48f5ede",
       "status": 200
     },
     "/honeypot": {
