@@ -48,6 +48,19 @@ else:
         stacklevel=2
     )
 
+# ── Bundle real ship-model asset (3D topology view node meshes) ───────────
+ship_glb = HERE / 'glb.glb'
+if ship_glb.exists():
+    datas.append((str(ship_glb), '.'))
+else:
+    import warnings
+    warnings.warn(
+        "\n\n  WARNING: glb.glb not found in the build folder.\n"
+        "  The 3D topology view will fall back to plain sphere nodes\n"
+        "  instead of the real ship model.\n",
+        stacklevel=2
+    )
+
 # ── Hidden imports that PyInstaller sometimes misses ─────────────────────
 hiddenimports = [
     'mplcursors',

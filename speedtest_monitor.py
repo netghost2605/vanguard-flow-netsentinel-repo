@@ -2740,7 +2740,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-a4056eca'
+_NM_BUILD_ID = 'b-9cfc3b65'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -22072,8 +22072,9 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
                 return resp, ''
             return None, (out.get('error', '') or 'Ollama returned an empty response.')
         except urllib.error.HTTPError as e:
-            try: detail = e.read().decode(errors='replace')[:300]
-            except Exception: detail = ''
+            try: detail_full = e.read().decode(errors='replace')
+            except Exception: detail_full = ''
+            detail = detail_full[:300]
             detail_l = detail.lower()
             # "llama-server binary not found" is Ollama's OWN inference
             # engine executable missing from its install -- not a missing
@@ -22088,23 +22089,105 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
             # guess. Handled separately, first, so it never reaches that
             # branch, and skips the pointless second attempt entirely.
             if 'llama-server' in detail_l and 'binary not found' in detail_l:
+                # A plain "reinstall Ollama" recommendation stops being useful
+                # the moment someone actually DOES that and hits the exact
+                # same error again (which is exactly what happened here) --
+                # at that point the canned advice is actively misleading,
+                # since it implies the fix is untried. So: actually check the
+                # filesystem, right now, on THIS machine, for every path
+                # Ollama itself just said it checked (parsed straight out of
+                # its own error text -- these are the real candidate install
+                # locations, not a guess), plus this app's own registered
+                # scan. Whether the file is (a) still missing after a fresh
+                # reinstall -- meaning something is deleting/blocking it
+                # again, not that the reinstall silently failed -- or (b)
+                # actually present now -- meaning the problem has moved on
+                # to something that isn't "missing file" at all -- changes
+                # what to tell the user to do next, so don't guess: look.
+                # Scan the FULL (untruncated) body, not the 300-char display
+                # snippet -- three long Windows paths easily blow past that
+                # limit and would silently drop the later ones. Ollama's
+                # error field is JSON-string-escaped, so a literal backslash
+                # comes through as two characters (\\) in this raw,
+                # not-yet-JSON-decoded text; collapse those back to one
+                # before touching the filesystem with them.
+                found_paths = [p.replace('\\\\', '\\') for p in
+                                re.findall(r'[A-Za-z]:\\\\?[^,)\s][^,)]*\.exe', detail_full)]
+                path_status = []
+                any_present = False
+                for p in found_paths:
+                    try:
+                        exists = os.path.exists(p)
+                        size = os.path.getsize(p) if exists else 0
+                    except Exception:
+                        exists, size = False, 0
+                    if exists:
+                        any_present = True
+                        path_status.append('%s -- EXISTS (%d bytes%s)' % (
+                            p, size,
+                            ', suspiciously small for a real build -- likely '
+                            'a truncated/corrupted download' if 0 < size < 1_000_000
+                            else ''))
+                    else:
+                        path_status.append('%s -- still MISSING' % p)
+                checked_note = ('Checked the exact paths Ollama itself just '
+                                 'reported, on this machine, right now:\n  '
+                                 + '\n  '.join(path_status)) if path_status else \
+                    "Couldn't parse a checkable path out of Ollama's own error text."
+                if found_paths and not any_present:
+                    verdict = (
+                        "Still missing after checking again just now. If you "
+                        "already reinstalled Ollama and re-pulled the model "
+                        "and it's STILL not there, a plain reinstall isn't "
+                        "enough -- something is removing this exact file "
+                        "again every time it's written (almost always "
+                        "antivirus/EDR deleting it post-install, not just "
+                        "blocking it once). Add an explicit exclusion for "
+                        "the Ollama install folder in your antivirus BEFORE "
+                        "reinstalling again, then reinstall -- checking "
+                        "quarantine history after the fact won't help if "
+                        "it's being silently deleted rather than quarantined "
+                        "where you can see it.")
+                elif found_paths and any_present:
+                    verdict = (
+                        "The file actually exists on disk right now, at a "
+                        "normal size -- so this is NOT a missing-file "
+                        "problem (a reinstall will not help further). "
+                        "Ollama's own launcher is failing to find/execute a "
+                        "file that's genuinely there, which points at "
+                        "something else: a security tool blocking "
+                        "EXECUTION rather than deleting the file (Windows "
+                        "Defender Application Control, an EDR policy, or "
+                        "similar -- check its block/audit log, not just "
+                        "quarantine), a stale PATH/registry entry from an "
+                        "older Ollama version conflicting with the new one, "
+                        "or file permissions. Try fully quitting Ollama "
+                        "(check Task Manager for a lingering ollama.exe/"
+                        "ollama_llama_server.exe) and starting it fresh; if "
+                        "that doesn't help, Ollama's own logs "
+                        "(%LOCALAPPDATA%\\Ollama\\app.log or similar) will "
+                        "show the real launch failure.")
+                else:
+                    verdict = (
+                        "Reinstalling Ollama is the standard fix for this "
+                        "exact error, but if you've already done that (and "
+                        "re-pulled the model) and are seeing this again, "
+                        "something is preventing the engine binary from "
+                        "staying installed -- most often antivirus deleting "
+                        "it again on each fresh copy. Check your "
+                        "antivirus's quarantine/protection history "
+                        "specifically for llama-server.exe or "
+                        "ollama_llama_server.exe, and add an exclusion for "
+                        "the whole Ollama install folder rather than just "
+                        "restoring one flagged file.")
                 return None, (
                     "[%s] Ollama at %s is broken, not missing a model: its "
                     "own inference engine (llama-server.exe) isn't where "
                     "Ollama expects it (Ollama said: %s). Pulling the model "
                     "again will not fix this -- the model itself is fine, "
-                    "the engine that runs it is missing. The most common "
-                    "cause on Windows is an antivirus (Windows Defender "
-                    "included) quarantining llama-server.exe -- it's a "
-                    "large, unsigned native binary and a frequent "
-                    "false-positive target -- with a botched Ollama update "
-                    "a distant second. Check your antivirus's quarantine/"
-                    "protection history for llama-server.exe and restore "
-                    "or exclude it; if it's not there, uninstall Ollama, "
-                    "reinstall it fresh from https://ollama.com/download, "
-                    "and the model you already pulled should work again "
-                    "without re-pulling it."
-                    % (_NM_BUILD_ID, base, detail or '(no detail)'))
+                    "if it's actually the engine that's missing. %s\n\n%s"
+                    % (_NM_BUILD_ID, base, detail or '(no detail)',
+                       checked_note, verdict))
             if e.code == 404 or ('not found' in detail_l and 'model' in detail_l):
                 # Before giving up: a model that genuinely IS installed can
                 # still 404 here -- a stray BOM/invisible character in the
@@ -27611,6 +27694,34 @@ class _ThreeDServer:
             return
         handler._send(200, 'application/javascript', data)
 
+    def _serve_shipmodel(self, handler):
+        """Serve the bundled real ship-model GLB for the /3d view's node
+        meshes (see the _NC_ loader in the page script). The asset is
+        bundled locally by the PyInstaller spec (glb.glb, next to bg.jpg) —
+        never fetched from a URL, so this is a simple file read, not a
+        cache-or-download like _serve_vendor above.
+
+        Missing/unreadable file must never break the page: the client-side
+        loader already treats a failed fetch as "stay on sphere nodes"
+        (see _NC_startLoad's .catch), so a 404 here is a graceful no-op.
+        """
+        try:
+            fp = _nm_resource_path('glb.glb')
+        except Exception:
+            fp = None
+            _exc_debug('_serve_shipmodel resource lookup')
+        if not fp:
+            handler._json(404, {'error': 'ship model not bundled'}); return
+        try:
+            import pathlib as _pl
+            data = _pl.Path(fp).read_bytes()
+        except Exception:
+            _exc_debug('_serve_shipmodel read')
+            handler._json(404, {'error': 'ship model unreadable'}); return
+        if not data:
+            handler._json(404, {'error': 'ship model empty'}); return
+        handler._send(200, 'model/gltf-binary', data)
+
     def _serve_flag(self, handler, cc):
         """Proxy + cache country-flag PNGs for the 3D view's flag spheres.
         Missing this route is why the flag spheres vanished — every /flag/<cc>
@@ -28900,6 +29011,40 @@ scene.add(new THREE.AmbientLight(0x112244,2));
 const dlight=new THREE.DirectionalLight(0x4488ff,1.2);
 dlight.position.set(5,10,8);scene.add(dlight);
 
+// ── Studio env map for the real ship-model nodes (see _NC_ below) ─────────
+// The sphere nodes use MeshPhongMaterial, which never reads scene.environment
+// at all -- adding this is purely additive and has zero effect on them, on
+// the walls, the starfield, or anything else already tuned and approved.
+// It exists because the ship model uses MeshStandardMaterial with real
+// metallic-roughness maps, and a physically-based metal surface with no
+// environment to reflect renders almost black no matter how bright the
+// direct lights are -- confirmed the hard way in a standalone test before
+// this ever touched the real app. A small hand-built studio probe (sky
+// gradient + one bright "sun" highlight + a cool fill) gives it something
+// real to reflect without shipping an external HDRI file.
+(function(){
+  const pmrem=new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+  const W=512,H=256, cv=document.createElement('canvas'); cv.width=W;cv.height=H;
+  const cx=cv.getContext('2d');
+  const g=cx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#5d7688'); g.addColorStop(0.4,'#28313c');
+  g.addColorStop(0.6,'#12161d'); g.addColorStop(1,'#020305');
+  cx.fillStyle=g; cx.fillRect(0,0,W,H);
+  let sun=cx.createRadialGradient(W*0.7,H*0.22,0, W*0.7,H*0.22,W*0.22);
+  sun.addColorStop(0,'rgba(255,248,232,0.95)'); sun.addColorStop(1,'rgba(255,248,232,0)');
+  cx.fillStyle=sun; cx.fillRect(0,0,W,H);
+  let fill=cx.createRadialGradient(W*0.15,H*0.6,0, W*0.15,H*0.6,W*0.2);
+  fill.addColorStop(0,'rgba(120,170,255,0.3)'); fill.addColorStop(1,'rgba(120,170,255,0)');
+  cx.fillStyle=fill; cx.fillRect(0,0,W,H);
+  const tex=new THREE.CanvasTexture(cv);
+  tex.mapping=THREE.EquirectangularReflectionMapping;
+  tex.encoding=THREE.sRGBEncoding;
+  const rt=pmrem.fromEquirectangular(tex);
+  scene.environment=rt.texture;
+  tex.dispose(); pmrem.dispose();
+})();
+
 // Floor removed on purpose (you asked to get rid of it so the starfield reads
 // as open space rather than a room with a lit surface underneath). There used
 // to be a GridHelper floor grid plus a solid PlaneGeometry fill mesh sitting
@@ -29062,11 +29207,169 @@ const MAX_NODES=500, MAX_FLOWS=2000, CPS=20, MAX_PARTS=MAX_FLOWS*2;
 let _topN=500;
 function onTopN(v){_topN=parseInt(v);document.getElementById('topN-val').textContent=_topN>=500?'ALL':_topN+'';}
 
+// ── Real ship-model nodes (loaded once, cloned per node) ───────────────────
+// Trevor supplied a real, licensed 3D asset (glb.glb -- ~2.6M tris, full
+// baseColor/normal/metallic-roughness/emission PBR textures baked in
+// Blender) to replace the plain spheres below with something that actually
+// looks like a spacecraft. Deliberately NOT a straight swap:
+//   - Parsed with a small hand-written GLB reader below, not the full
+//     three.js GLTFLoader addon -- this page already self-hosts three.js +
+//     the postprocessing addons by downloading them once to ~/.nm_vendor
+//     (see _serve_vendor server-side), and pulling in a full generic glTF
+//     loader on top of that for one specific, already-inspected file
+//     wasn't worth it. This reader only handles what glb.glb actually
+//     contains -- a single scene, plain TRS node transforms, no skinning/
+//     animation/morph targets, non-interleaved float accessors, uint32
+//     indices, standard metallicRoughness materials -- verified against
+//     the real file before writing this, not written as a generic parser
+//     and hoped for the best.
+//   - Loaded ONCE into a template Group and reused via .clone() (which
+//     shares geometry/material references, not real copies) for every
+//     node -- never re-parsed or re-decoded per node.
+//   - Only used up to _NC_MAX_SHIP_NODES active nodes at a time. MAX_NODES
+//     below allows up to 500 simultaneous nodes; even ignoring draw-call
+//     cost, 500 x 2.6M triangles is not a real-time triangle budget on any
+//     GPU. Past the threshold this falls back to the existing sphere path,
+//     completely untouched -- the same "flat/simple material past a size
+//     or count threshold" LOD call any game engine makes, just keyed on
+//     node COUNT here instead of on-screen size.
+//   - Deliberately does NOT tint the ship's material per node the way the
+//     sphere's protocol/blocked colour does. Doing that safely would need
+//     every clone to carry its own cloned material instead of sharing the
+//     template's (mutating a shared material would recolour every ship at
+//     once), and even then a flat colour multiply over a baked, weathered
+//     PBR texture looks worse than leaving it alone. Blocked/protocol
+//     status is already carried by two things that don't touch the mesh
+//     itself -- the existing red ring instance for blocked nodes, and the
+//     node's label sprite colour -- both keep working unchanged.
+//   - If the model 404s, fails to parse, or the fetch throws for any
+//     reason, _NC_TEMPLATE just stays null forever and every node quietly
+//     stays a sphere -- this never breaks the page.
+let _NC_TEMPLATE = null;            // THREE.Group once loaded, else null
+let _NC_LOAD_STARTED = false;
+const _NC_MAX_SHIP_NODES = 40;      // see rationale above
+const _NC_COMPONENT_CTORS = {5120:Int8Array,5121:Uint8Array,5122:Int16Array,5123:Uint16Array,5125:Uint32Array,5126:Float32Array};
+const _NC_TYPE_SIZES = {SCALAR:1,VEC2:2,VEC3:3,VEC4:4,MAT4:16};
+
+function _NC_parseGLB(arrayBuffer){
+  const dv=new DataView(arrayBuffer);
+  if(dv.getUint32(0,true) !== 0x46546C67) throw new Error('bad glb magic');
+  let offset=12, json=null, bin=null;
+  while(offset < arrayBuffer.byteLength){
+    const len=dv.getUint32(offset,true), type=dv.getUint32(offset+4,true), start=offset+8;
+    if(type===0x4E4F534A) json=JSON.parse(new TextDecoder('utf-8').decode(new Uint8Array(arrayBuffer,start,len)));
+    else if(type===0x004E4942) bin=arrayBuffer.slice(start,start+len);
+    offset = start+len;
+  }
+  if(!json || !bin) throw new Error('incomplete glb (missing JSON or BIN chunk)');
+  return {json,bin};
+}
+function _NC_accessorArray(json,bin,i){
+  const acc=json.accessors[i], bv=json.bufferViews[acc.bufferView];
+  const Ctor=_NC_COMPONENT_CTORS[acc.componentType], n=_NC_TYPE_SIZES[acc.type];
+  const off=(bv.byteOffset||0)+(acc.byteOffset||0);
+  return new Ctor(bin, off, acc.count*n);
+}
+function _NC_loadTexture(json,bin,imageIndex,srgb){
+  return new Promise((resolve)=>{
+    const img=json.images[imageIndex], bv=json.bufferViews[img.bufferView];
+    const bytes=new Uint8Array(bin,bv.byteOffset||0,bv.byteLength);
+    const blob=new Blob([bytes],{type:img.mimeType||'image/png'});
+    createImageBitmap(blob,{imageOrientation:'none'}).then(bitmap=>{
+      const tx=new THREE.Texture(bitmap);
+      tx.flipY=false;    // glTF UVs assume a non-flipped image, unlike three.js's own default
+      tx.wrapS=tx.wrapT=THREE.RepeatWrapping;
+      if(srgb) tx.encoding=THREE.sRGBEncoding;
+      tx.anisotropy=renderer.capabilities.getMaxAnisotropy();
+      tx.needsUpdate=true;
+      resolve(tx);
+    }).catch(()=>resolve(null));
+  });
+}
+async function _NC_buildTemplate(arrayBuffer){
+  const {json,bin}=_NC_parseGLB(arrayBuffer);
+  const texCache={};
+  async function tex(i,srgb){
+    if(i===undefined||i===null) return null;
+    const key=i+'_'+(srgb?'s':'l');
+    if(!texCache[key]) texCache[key]=await _NC_loadTexture(json,bin,json.textures[i].source,srgb);
+    return texCache[key];
+  }
+  const materials=[];
+  for(const m of json.materials){
+    const pbr=m.pbrMetallicRoughness||{};
+    const baseColorTex = pbr.baseColorTexture ? await tex(pbr.baseColorTexture.index,true) : null;
+    const mrTex = pbr.metallicRoughnessTexture ? await tex(pbr.metallicRoughnessTexture.index,false) : null;
+    const normalTex = m.normalTexture ? await tex(m.normalTexture.index,false) : null;
+    const emissiveTex = m.emissiveTexture ? await tex(m.emissiveTexture.index,true) : null;
+    const ef = m.emissiveFactor || [0,0,0];
+    materials.push(new THREE.MeshStandardMaterial({
+      map:baseColorTex, roughnessMap:mrTex, metalnessMap:mrTex,
+      roughness: mrTex?1.0:(pbr.roughnessFactor!==undefined?pbr.roughnessFactor:0.6),
+      metalness: mrTex?1.0:(pbr.metallicFactor!==undefined?pbr.metallicFactor:0.2),
+      normalMap:normalTex, emissiveMap:emissiveTex,
+      emissive: emissiveTex ? new THREE.Color(ef[0],ef[1],ef[2]) : new THREE.Color(0,0,0),
+      emissiveIntensity: emissiveTex?1.0:0,
+      side: m.doubleSided?THREE.DoubleSide:THREE.FrontSide,
+      envMapIntensity: 1.1
+    }));
+  }
+  const group=new THREE.Group();
+  for(const node of json.nodes){
+    if(node.mesh===undefined) continue;
+    const meshDef=json.meshes[node.mesh];
+    for(const prim of meshDef.primitives){
+      const geo=new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.attributes.POSITION),3));
+      if(prim.attributes.NORMAL!==undefined)
+        geo.setAttribute('normal', new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.attributes.NORMAL),3));
+      if(prim.attributes.TEXCOORD_0!==undefined)
+        geo.setAttribute('uv', new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.attributes.TEXCOORD_0),2));
+      if(prim.indices!==undefined)
+        geo.setIndex(new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.indices),1));
+      const mat = prim.material!==undefined ? materials[prim.material] : new THREE.MeshStandardMaterial();
+      const m3=new THREE.Mesh(geo,mat);
+      if(node.translation) m3.position.fromArray(node.translation);
+      if(node.rotation) m3.quaternion.fromArray(node.rotation);
+      if(node.scale) m3.scale.fromArray(node.scale);
+      group.add(m3);
+    }
+  }
+  // Normalise so the ship occupies roughly the same footprint as a unit
+  // sphere -- the raw model is tens of units long, but every call site
+  // below scales node meshes as if starting from a unit-radius sphere
+  // (mesh.scale.setScalar(r) with r roughly 0.3-0.8).
+  group.updateMatrixWorld(true);
+  const box=new THREE.Box3().setFromObject(group);
+  const size=box.getSize(new THREE.Vector3());
+  const center=box.getCenter(new THREE.Vector3());
+  const maxDim=Math.max(size.x,size.y,size.z) || 1;
+  const wrapper=new THREE.Group();
+  group.position.sub(center);
+  group.scale.setScalar(2/maxDim);   // longest axis -> 2 units, matching a unit sphere's diameter
+  wrapper.add(group);
+  return wrapper;
+}
+function _NC_startLoad(){
+  if(_NC_LOAD_STARTED) return;
+  _NC_LOAD_STARTED = true;
+  fetch('/api/shipmodel').then(r=>{
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.arrayBuffer();
+  }).then(buf=>_NC_buildTemplate(buf)).then(tpl=>{
+    _NC_TEMPLATE = tpl;
+  }).catch(err=>{
+    console.warn('[3d] ship model unavailable, staying on sphere nodes:', err);
+  });
+}
+_NC_startLoad();
+
 // ── Flag sphere system ──────────────────────────────────────────────────────
 const _texLoader = new THREE.TextureLoader();
 const _texCache  = {};          // cc → THREE.Texture
 const _nodeMeshes = [];         // active meshes this frame
-const _meshPool   = [];         // reusable mesh pool
+const _meshPool   = [];         // reusable sphere mesh pool
+const _craftPool  = [];         // reusable ship-model group pool (see _NC_ above)
 const _fallbackMat = new THREE.MeshStandardMaterial({roughness:0.35,metalness:0.6});
 
 function _getFlagTex(cc){
@@ -29083,7 +29386,23 @@ function _getFlagTex(cc){
   return t;
 }
 
-function _getNodeMesh(r, cc, col, isBlocked, isLocal){
+function _getNodeMesh(r, cc, col, isBlocked, isLocal, useCraft){
+  // Real ship model, up to _NC_MAX_SHIP_NODES active nodes -- see the _NC_
+  // block above for why this doesn't get a flag texture or a colour tint
+  // the way the sphere below does.
+  if(useCraft){
+    let obj = _craftPool.pop();
+    if(!obj){
+      obj = _NC_TEMPLATE.clone();
+      obj.userData._kind = 'craft';
+      scene.add(obj);
+    }
+    obj.scale.setScalar(r);
+    obj.visible = true;
+    _nodeMeshes.push(obj);
+    return obj;
+  }
+
   let mesh = _meshPool.pop();
 
   if(!mesh){
@@ -29091,6 +29410,7 @@ function _getNodeMesh(r, cc, col, isBlocked, isLocal){
     const geo = new THREE.SphereGeometry(1, 24, 16);
     const mat = new THREE.MeshPhongMaterial({shininess:180});
     mesh = new THREE.Mesh(geo, mat);
+    mesh.userData._kind = 'sphere';
 
     // No glow sub-mesh — emissive channel handles self-illumination
 
@@ -29134,7 +29454,8 @@ function _returnNodeMeshes(){
   while(_nodeMeshes.length){
     const m = _nodeMeshes.pop();
     m.visible = false;
-    _meshPool.push(m);
+    if(m.userData && m.userData._kind === 'craft') _craftPool.push(m);
+    else _meshPool.push(m);
   }
 }
 
@@ -29805,6 +30126,24 @@ function rebuildGeometry(nodes,flows){
 
   const N=Math.min(nodes.length,MAX_NODES);
   let ringCount=0;
+  // Node meshes are ALWAYS the plain flag sphere -- never the real ship
+  // model. Two earlier attempts at substituting the real ship model onto
+  // node positions (first an all-or-nothing whole-view node-count gate,
+  // then a top-N-by-traffic ranking) both got the same real complaint once
+  // Trevor actually saw them live: the ship replacing a node hid the
+  // flag/colour "orb" identity he relies on to eyeball a host at a glance,
+  // and losing it was worst for exactly the busiest/most-labelled hosts he
+  // cares about most. Per his explicit call, the real ship model is no
+  // longer a node substitute at all -- see the ambient real-ship flyby
+  // below (search _mkFlyby, spawned via _shipSpawn('flyby',...) from
+  // _shipsScanHosts) for where it actually lives now: a transient
+  // background pass, same fly-in/fly-out motion the old low-poly cruiser
+  // had, never pinned to a node's position. useCraft
+  // stays as a parameter on _getNodeMesh (and the pooling/raycast-recursion
+  // work stays, since it's inert but harmless) only so this isn't a bigger,
+  // riskier rip-out than necessary -- it is simply never passed true from
+  // here any more.
+  const useCraft=false;
 
   for(let i=0;i<N;i++){
     const nd=nodes[i];
@@ -29812,9 +30151,16 @@ function rebuildGeometry(nodes,flows){
     const sx=nd.x*spreadFactor, sy=nd.y*spreadFactor, sz=nd.z*spreadFactor;
     const col=nodeColor(nd);
 
-    const mesh=_getNodeMesh(r, nd.cc, col, nd.blocked, nd.local);
+    const mesh=_getNodeMesh(r, nd.cc, col, nd.blocked, nd.local, useCraft);
     mesh.position.set(sx,sy,sz);
     mesh.userData.nodeIdx=i;
+    if(useCraft){
+      // The ship model is a Group of many child meshes -- raycasting hits
+      // whichever child mesh the ray actually touches (see the two
+      // intersectObjects(_rayTargets, true) call sites below), so every
+      // descendant needs its own copy of nodeIdx, not just the group root.
+      mesh.traverse(o=>{ o.userData.nodeIdx=i; });
+    }
     _rayTargets.push(mesh);
 
     if(nd.blocked){
@@ -29942,7 +30288,7 @@ function onMouseMove(e){
   mouse2.x=(e.clientX/_getW())*2-1;
   mouse2.y=-(e.clientY/_getH())*2+1;
   raycaster.setFromCamera(mouse2,camera);
-  const hits=raycaster.intersectObjects(_rayTargets,false);
+  const hits=raycaster.intersectObjects(_rayTargets,true);
   if(hits.length>0){
     const idx=hits[0].object.userData.nodeIdx;
     if(idx!==undefined && idx<nodeData.length){
@@ -30358,7 +30704,7 @@ canvas.addEventListener('click',e=>{
   mouse2.x=(e.clientX/_getW())*2-1;
   mouse2.y=-(e.clientY/_getH())*2+1;
   raycaster.setFromCamera(mouse2,camera);
-  const hits=raycaster.intersectObjects(_rayTargets,false);
+  const hits=raycaster.intersectObjects(_rayTargets,true);
   if(hits.length>0){
     const idx=hits[0].object.userData.nodeIdx;
     if(idx!==undefined && idx<nodeData.length){
@@ -31983,51 +32329,25 @@ function sampleCurve(pts,u){
 }
 
 // ── Data-driven traffic (original designs, no licensed IP) ────────────────
-// A patrol cruiser makes a slow pass whenever a host we have never seen before
-// turns up. A raider warps in and is destroyed when the firewall actually
-// writes a block rule — the same event stream that detonates the radar.
-let _ships=[], _shipHosts=new Set(), _shipPrimed=false, _shipLast=0;
+// A raider warps in and is destroyed when the firewall actually writes a
+// block rule — the same event stream that detonates the radar. There used
+// to also be a low-poly patrol cruiser that made a slow pass whenever a host
+// we'd never seen before turned up; that got pulled earlier this session
+// (see history) because on a busy real capture it read as constant
+// background clutter of leftover-looking ships right next to the new real
+// ship-model node meshes -- a genuinely separate, working-as-designed
+// feature that just looked broken by association.
+//
+// It's back now as a *flyby*, not a node substitute: same host-discovery
+// trigger, same fly-in-from-one-side/drift-across/exit-off-screen motion the
+// old cruiser had (that motion code below was never removed -- only the
+// low-poly mesh and its trigger were), but built from the real GLB ship
+// template (_NC_TEMPLATE, see above) instead of a placeholder box-and-sphere
+// mesh. If the template hasn't finished loading yet, the spawn is just
+// skipped for that host -- no placeholder fallback, no queueing it for
+// later. See _mkFlyby()/_shipsScanHosts() below.
+let _ships=[], _shipLast=0, _shipHosts=new Set(), _shipPrimed=false;
 const SHIP_MAX=4;
-
-function _mkCruiser(){
-  const T=THREE, g=new T.Group();
-  const body=new T.MeshPhongMaterial({color:0x35506e,emissive:0x0a1826,
-                                      emissiveIntensity:0.9,shininess:60});
-  const trim=new T.MeshPhongMaterial({color:0x8fc6e8,emissive:0x1d4a68,
-                                      emissiveIntensity:1.0,shininess:90});
-  // long tapered hull
-  const hull=new T.Mesh(new T.CylinderGeometry(0.13,0.30,2.5,7),body);
-  hull.rotation.z=Math.PI/2; g.add(hull);
-  // dorsal spine
-  const spine=new T.Mesh(new T.BoxGeometry(1.15,0.10,0.16),trim);
-  spine.position.set(-0.15,0.20,0); g.add(spine);
-  // bridge block
-  const br=new T.Mesh(new T.BoxGeometry(0.34,0.20,0.26),body);
-  br.position.set(-0.72,0.20,0); g.add(br);
-  // outriggers
-  for(const zz of [-0.34,0.34]){
-    const f=new T.Mesh(new T.BoxGeometry(0.75,0.05,0.10),body);
-    f.position.set(0.05,-0.06,zz); g.add(f);
-  }
-  // engine bells + glow
-  for(const zz of [-0.16,0.16]){
-    const e=new T.Mesh(new T.CylinderGeometry(0.10,0.13,0.22,8),
-      new T.MeshBasicMaterial({color:0x7fe4ff}));
-    e.rotation.z=Math.PI/2; e.position.set(1.30,0,zz); g.add(e);
-    const gl=new T.Mesh(new T.SphereGeometry(0.20,10,8),
-      new T.MeshBasicMaterial({color:0x38b8f0,transparent:true,opacity:0.30,
-                               depthWrite:false}));
-    gl.position.set(1.46,0,zz); g.add(gl);
-  }
-  // running lights
-  for(let i=0;i<5;i++){
-    const l=new T.Mesh(new T.SphereGeometry(0.035,6,6),
-      new T.MeshBasicMaterial({color:i%2?0x39ff14:0xffffff}));
-    l.position.set(-0.9+i*0.45,0.27,0); g.add(l);
-  }
-  g.userData.kind='patrol';
-  return g;
-}
 
 function _mkRaider(){
   const T=THREE, g=new T.Group();
@@ -32050,13 +32370,34 @@ function _mkRaider(){
   return g;
 }
 
+// A background pass using the real ship model, for the "new host discovered"
+// ambient flyby. Unlike the per-node craft path in _getNodeMesh (which pools
+// clones because it swaps them in and out every rebuildGeometry tick), each
+// flyby is a one-shot: clone, fly across, get removed by _shipsUpdate's own
+// off-screen check below -- same lifecycle a raider has, just no explosion.
+// Returns null (never throws) if the template isn't loaded yet, so callers
+// can skip the spawn cleanly instead of falling back to a placeholder mesh.
+function _mkFlyby(){
+  if(!_NC_TEMPLATE) return null;
+  let obj;
+  try{ obj = _NC_TEMPLATE.clone(); }catch(e){ return null; }
+  obj.userData.kind='flyby';
+  return obj;
+}
+
 function _shipSpawn(kind,label){
   if(_ships.length>=SHIP_MAX) return;
+  // Check template availability BEFORE the throttle below consumes its
+  // window -- otherwise a flyby attempt that finds _NC_TEMPLATE still
+  // loading would eat the 900ms cooldown for nothing and delay the very
+  // next (possibly real, raider) spawn.
+  if(kind!=='raider' && !_NC_TEMPLATE) return;
   const now=performance.now();
   if(now-_shipLast<900) return;       // never a swarm
   _shipLast=now;
   let obj;
-  try{ obj = (kind==='raider') ? _mkRaider() : _mkCruiser(); }catch(e){ return; }
+  try{ obj = (kind==='raider') ? _mkRaider() : _mkFlyby(); }catch(e){ return; }
+  if(!obj) return;
   // Cross the view well behind the network, so it never obscures the data.
   const side = Math.random()<0.5 ? -1 : 1;
   const y = 6 + Math.random()*9;
@@ -32070,6 +32411,28 @@ function _shipSpawn(kind,label){
             born:now, life:0, dying:0, label:label||'', sparks:null};
   if(kind==='raider'){ obj.scale.setScalar(0.01); }   // warp-in
   _ships.push(sh);
+}
+
+// Triggers the ambient flyby: called once per poll() tick with the live
+// topology payload. The first tick just primes _shipHosts with every host
+// already in the capture -- otherwise resuming on a busy real network would
+// spawn a whole flock of "new" hosts in the first second. After that, only a
+// host this session has genuinely never seen before queues a flyby.
+function _shipsScanHosts(d){
+  const hosts=(d.nodes||[]).map(n=>n.ip||n.id).filter(Boolean);
+  if(!_shipPrimed){
+    hosts.forEach(h=>_shipHosts.add(h));
+    _shipPrimed=true;
+    return;
+  }
+  for(const h of hosts){
+    if(_shipHosts.has(h)) continue;
+    _shipHosts.add(h);
+    _shipSpawn('flyby', h);
+    break;   // _shipSpawn's own 900ms throttle + SHIP_MAX already cap the
+             // rate; this just avoids burning the whole loop on a tick that
+             // discovers a dozen hosts at once (e.g. right after a scan).
+  }
 }
 
 function _shipKill(sh){
@@ -32142,21 +32505,6 @@ function _shipsUpdate(dt){
       _ships.splice(i,1);
     }
   }
-}
-
-// A host we have never seen before -> send a patrol past.
-function _shipsScanHosts(d){
-  try{
-    const ids=(d.nodes||[]).map(n=>n && n.id).filter(Boolean);
-    if(!_shipPrimed){ ids.forEach(x=>_shipHosts.add(x)); _shipPrimed=true; return; }
-    for(const id of ids){
-      if(!_shipHosts.has(id)){
-        _shipHosts.add(id);
-        _shipSpawn('patrol', id);
-      }
-    }
-    if(_shipHosts.size>4000) _shipHosts=new Set(ids);
-  }catch(e){}
 }
 
 function animate(){
@@ -35624,6 +35972,8 @@ ol.steps li{margin:6px 0}
                         server_self._serve_topology3d(self)
                     elif path.startswith('/vendor/'):
                         server_self._serve_vendor(self, path[8:])
+                    elif path == '/api/shipmodel':
+                        server_self._serve_shipmodel(self)
                     elif path.startswith('/flag/'):
                         server_self._serve_flag(self, path[6:])
                     elif path == '/api/whois':

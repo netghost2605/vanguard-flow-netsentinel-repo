@@ -1,153 +1,160 @@
-# Changes this session — build `b-a4056eca`
+# Changes this session — build `b-9cfc3b65`
 
-Ninety-six things this session. Build IDs for reference:
+Ninety-nine things this session. Build IDs for reference:
+1. `b-9cfc3b65` — the real ship model is no longer a per-node substitute at all (reverted the top-N-by-traffic LOD from the previous build after you reported it hid the flag/colour orb identity on your busiest nodes); it now powers an ambient "flyby" instead — a transient background pass that flies in, drifts across, and exits, the same motion the old low-poly cruiser had, triggered by newly-discovered hosts. See the section below for the full writeup.
 
-1. `b-346cdf46` — corrupt speed data purge (see note further down).
-2. `b-86b6ab2d` — honeypot tarpit.
-3. `b-dd991374` — attacker-seconds wasted, surfaced in the report + AI
+2. `b-6b7e63f5` — three fixes after you flagged the ship-model build as broken: removed the old ambient background patrol-ship spawn (kept the real-block raider kill effect), changed the real ship-model LOD from all-or-nothing to top-N-by-traffic, and made the Ollama "llama-server binary not found" diagnostic actually check the disk instead of repeating canned advice. See the section below for the full writeup.
+3. `b-def7f507` — real ship-model GLB (`glb.glb`, ~125MB) replaces
+   plain sphere node meshes in the /3d topology view when the node
+   count is small enough (<=40) to afford the triangle budget; falls
+   back to spheres above that, or if the model fails to load. See the
+   section below for the full writeup.
+4. `b-346cdf46` — corrupt speed data purge (see note further down).
+5. `b-86b6ab2d` — honeypot tarpit.
+6. `b-dd991374` — attacker-seconds wasted, surfaced in the report + AI
    assessment.
-4. `b-78978af4` — "Stuck now: 0" investigation + live "Held total" stat.
-5. `b-48119510` — guide updated to cover all of the above.
-6. `b-6446ed81` — Classic view removed entirely; guide rewritten to match.
-7. `b-248b00b4` — firewall rules: search bar + host names, on every
+7. `b-78978af4` — "Stuck now: 0" investigation + live "Held total" stat.
+8. `b-48119510` — guide updated to cover all of the above.
+9. `b-6446ed81` — Classic view removed entirely; guide rewritten to match.
+10. `b-248b00b4` — firewall rules: search bar + host names, on every
    surface that lists them.
-8. `b-d363c5f7` — merged the two `_NM_OUI` vendor tables into one.
-9. `b-7b6beaf3` — 3D view: sparkle-flare starfield + glass walls.
-10. `b-54bce347` — 3D view: traveling light pulses on the protocol bars
+11. `b-d363c5f7` — merged the two `_NM_OUI` vendor tables into one.
+12. `b-7b6beaf3` — 3D view: sparkle-flare starfield + glass walls.
+13. `b-54bce347` — 3D view: traveling light pulses on the protocol bars
     (superseded by #11 below — you didn't like the look).
-11. `b-2a88d56c` — 3D view: protocol bars redone as scrolling neon circuit
+14. `b-2a88d56c` — 3D view: protocol bars redone as scrolling neon circuit
     traces.
-12. `b-6cefa676` — 3D view: floor animated with glowing flow-path lines
+15. `b-6cefa676` — 3D view: floor animated with glowing flow-path lines
     (superseded by #13 below — you wanted a packet-capture table instead).
-13. `b-bdecb4b1` — 3D view: floor redone as a live scrolling packet-capture
+16. `b-bdecb4b1` — 3D view: floor redone as a live scrolling packet-capture
     console (superseded by #14 below — you wanted it on the wall instead).
-14. `b-a8335452` — 3D view: packet-capture console moved off the floor onto
+17. `b-a8335452` — 3D view: packet-capture console moved off the floor onto
     the left wall (superseded by #15 below — you wanted it lower).
-15. `b-61579561` — 3D view: packet console lowered on the left wall.
-16. `b-1fb06fce` — honeypot: higher tarpit capacity/hold time, five more
+18. `b-61579561` — 3D view: packet console lowered on the left wall.
+19. `b-1fb06fce` — honeypot: higher tarpit capacity/hold time, five more
     decoy ports.
-17. `b-ca2ce494` — 3D view: GRID toggle button.
-18. `b-c954532e` — Wireshark Monitor: Clear now actually deletes the
+20. `b-ca2ce494` — 3D view: GRID toggle button.
+21. `b-c954532e` — Wireshark Monitor: Clear now actually deletes the
     capture file instead of sometimes leaving it behind.
-19. `b-d4a95b9d` — ISP Evidence Pack PDF: fixed a crash ("x and y must
+22. `b-d4a95b9d` — ISP Evidence Pack PDF: fixed a crash ("x and y must
     have same first dimension") when any download/upload/ping reading in
     the period was missing or implausible (this one, current).
-20. (no build ID — this is the installer script, not the app) —
+23. (no build ID — this is the installer script, not the app) —
     `installer.nsi`/`build_installer.bat`: Npcap download URL was pinned
     to a stale version; bumped, plus a stale build-script banner fixed
     (this one, current).
-21. (no build ID — build script only) — `build_installer.bat` now
+24. (no build ID — build script only) — `build_installer.bat` now
     downloads and installs the NSIS inetc plugin automatically instead
     of requiring a manual download/extract/copy (could not be run
     end-to-end — no Windows box here, see caveat further down).
-22. `b-4431b665` — installer now auto-installs a speed-test CLI
+25. `b-4431b665` — installer now auto-installs a speed-test CLI
     (librespeed-cli) instead of requiring you to find one yourself; the
     app's own CLI-discovery code updated to match.
-23. (no build ID — installer script only) — the auto-installed inetc
+26. (no build ID — installer script only) — the auto-installed inetc
     plugin from #21 failed on your machine ("Plugin not found, cannot
     call inetc::get"); removed the inetc dependency from `installer.nsi`
     entirely instead of patching the plugin-installer further.
-24. `b-b2a464b9` — added a Settings field for the advertised download/
+27. `b-b2a464b9` — added a Settings field for the advertised download/
     upload speed the ISP Evidence Pack compares against (previously
     config-file-only); also fixed the in-app guide's stale "five preset
     colour themes" line — it's actually twelve.
-25. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
+28. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
     rest of the app, using your active colour theme's download/upload/
     ping colours for the charts.
-26. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
+29. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
     moved off the middle of the canvas onto the actual blocked external
     server it refers to.
-27. `b-8834f5f5` — EtherApe window: new "LAN SCAN" button — active subnet
+30. `b-8834f5f5` — EtherApe window: new "LAN SCAN" button — active subnet
     scan with full name resolution, MAC/vendor, and open ports, shown as
     both a table and a live network map.
-28. `b-738e198c` — LAN Scan map redone as an icon topology diagram (router
+31. `b-738e198c` — LAN Scan map redone as an icon topology diagram (router
     hub + connected device icons with name/IP/ports underneath), replacing
     the plain dot-grid from #27.
-29. `b-340c4b04` — LAN Scan is now several times faster: hosts are scanned
+32. `b-340c4b04` — LAN Scan is now several times faster: hosts are scanned
     concurrently instead of one at a time.
-30. `b-a1d0e459` — LAN Scan map icons are now real device artwork, cropped
+33. `b-a1d0e459` — LAN Scan map icons are now real device artwork, cropped
     from the Visio stencil screenshot you sent, instead of hand-drawn
     shapes.
-31. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
+34. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
     glowing hardware-monitor-style waveform, updating on its own faster
     timer.
-32. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
+35. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
     removed; new "System" button opens a full System Monitor window built
     after watching Dave Plummer's Task Manager OG demo.
-33. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
+36. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
     / Performance / Processes) after watching the actual video instead of
     working from a transcript alone.
-34. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
+37. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
     full-window rebuild on every page/tab click that was making it feel
     slow and clunky.
-35. `b-a1d07a24` — System Monitor: full 13-page rebuild to match the real
+38. `b-a1d07a24` — System Monitor: full 13-page rebuild to match the real
     TMOG app you screen-recorded (System Info, App history, Startup apps,
     Users, Services, Power & Freq, Connections, Installed Apps, Disk
     Space, Benchmarks — the 8 pages the video has that the 3-page rebuild
     in #33 didn't), plus `nvidia-ml-py` now bundled into the installer
     build automatically.
-36. `b-028de0ed` — CRITICAL FIX: the CPU benchmark added in #35 was
+39. `b-028de0ed` — CRITICAL FIX: the CPU benchmark added in #35 was
     launching a full new copy of the entire app (new window, new threads,
     everything) once per CPU core every time it ran, because of a
     Windows/PyInstaller multiprocessing pitfall I didn't catch in the
     Linux sandbox. Fixed — see the entry above this one.
-37. `b-5cbb9230` — "System" button now launches the real Task Manager
+40. `b-5cbb9230` — "System" button now launches the real Task Manager
     TMOG app (bundled + silently installed by the installer) instead of
     the from-scratch rebuild from #33-#35.
-38. (no build ID — installer script only) — installer now installs and
+41. (no build ID — installer script only) — installer now installs and
     configures WSL, then installs Kali Linux, as a pen-testing
     environment. Step 1 of 2 — GUI panels to drive specific tools inside
     it are a planned follow-up, not built yet.
-39. (no build ID — installer script only) — CRITICAL FIX: #38's WSL
+42. (no build ID — installer script only) — CRITICAL FIX: #38's WSL
     detection reported "not found" on a machine that genuinely had WSL
     installed and working, because of a 32-bit-installer/WOW64 path bug.
     Fixed.
-40. `b-5ecee4c5` — new "Pen Test" button next to "System" on the main
+43. `b-5ecee4c5` — new "Pen Test" button next to "System" on the main
     dashboard, runs `wsl -d kali-linux -- kex --sl -s`.
-41. `b-b6a3a1fb` + installer script — "Pen Test" now opens an Nmap scanner
+44. `b-b6a3a1fb` + installer script — "Pen Test" now opens an Nmap scanner
     GUI with an AI box that crafts scans and recommends next steps; Kali
     desktop is still one click away inside it.
-42. `b-30771036` — Nmap GUI: new "Report" button generates a self-contained
+45. `b-30771036` — Nmap GUI: new "Report" button generates a self-contained
     HTML report of the scan.
-43. `b-6e2b823c` — "Kali Desktop" button now runs `wsl -d kali-linux` then
+46. `b-6e2b823c` — "Kali Desktop" button now runs `wsl -d kali-linux` then
     plain `kex` — dropped the `--sl -s` (seamless mode + sound) flags.
-44. `b-c4249a31` — CRITICAL FIX: #43's button crashed Xfce on your real
+47. `b-c4249a31` — CRITICAL FIX: #43's button crashed Xfce on your real
     machine ("Unable to start notification daemon ... wlr-layer-shell")
     even though typing the same two steps by hand worked fine. Fixed by
     running `kex` through a login shell.
-45. `b-c6e3c79a` — CRITICAL FIX: #44's Xfce crash was gone, but the button
+48. `b-c6e3c79a` — CRITICAL FIX: #44's Xfce crash was gone, but the button
     still didn't work — console popped up and closed immediately, no
     desktop. Bare `kex` has no mode flag; switched to Kali's own
     documented `kex --win -s` recipe.
-46. `b-0618aa6b` — CORRECTION to #45: you pasted the real `kex --help`
+49. `b-0618aa6b` — CORRECTION to #45: you pasted the real `kex --help`
     output — window mode IS the default, so #45's "needs a mode flag"
     diagnosis was wrong. The real remaining gap was interactive vs
     non-interactive shell (`~/.bashrc` only loads for interactive shells);
     switched from `bash -lc` to `bash -lic`.
-47. `b-c71b6fc3` — "Kali Desktop" button simplified back to bare
+50. `b-c71b6fc3` — "Kali Desktop" button simplified back to bare
     `wsl -d kali-linux`, no `kex` at all — you asked to just get a shell
     and type `kex` yourself.
-48. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
+51. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
     stale System-button description rewritten to match what it actually
     does now.
-49. `b-6790beaa` — Guide: rewrote the Kali Desktop button paragraph —
+52. `b-6790beaa` — Guide: rewrote the Kali Desktop button paragraph —
     you called the previous version "very badly written" and pasted it
     back at me.
-50. `b-52b7391c` — CRITICAL FIX: the gauge cards (Download/Upload/Ping/
+53. `b-52b7391c` — CRITICAL FIX: the gauge cards (Download/Upload/Ping/
     DNS strip at the top of the dashboard) never picked up a Colour Theme
     change — only the historical charts further down did.
-51. (no build ID — `build_installer.bat` only, not the app) — Step 1 of
+54. (no build ID — `build_installer.bat` only, not the app) — Step 1 of
     the build (`SpeedtestMonitor.exe` itself) now wipes the old exe first
     and refuses loudly if it's locked, instead of possibly rebuilding
     over it silently.
-52. `b-a3b670a8` — CRITICAL FIX (two bugs, one report): the Live traffic
+55. `b-a3b670a8` — CRITICAL FIX (two bugs, one report): the Live traffic
     panel's title was gone for good the moment it had real data, and
     Colour Theme only ever reached three of the six chart panels — DNS
     history, the DNS gauge, and the DNS row in Statistics were always a
     fixed colour no matter the theme. Also found and fixed a second,
     unrelated theme bug while in there: 7 of the app's 12 themes could
     never survive an app restart.
-53. `b-ef1e7021` — CRITICAL FIX: found the actual reason the System
+56. `b-ef1e7021` — CRITICAL FIX: found the actual reason the System
     button / Task Manager TMOG content wasn't showing up in the Guide,
     and it wasn't the Guide text — it was that the "? GUIDE" button never
     opens the Tkinter guide I'd been editing all session; it opens a web
@@ -155,7 +162,7 @@ Ninety-six things this session. Build IDs for reference:
     un-synced list that had never heard of "Pen Test." System (Task
     Manager TMOG) now gets its own page too, and both new pages have a
     real embedded screenshot.
-54. `b-09f33cdb` — you (Trevor) added HTTPS support to the embedded web
+57. `b-09f33cdb` — you (Trevor) added HTTPS support to the embedded web
     server and the remote client yourself — `speedtest_monitor.py` now
     wraps its socket in TLS when `ssl_cert`/`ssl_key` are configured,
     and `nm_client.py` now trusts the server's cert (or falls back to
@@ -164,30 +171,30 @@ Ninety-six things this session. Build IDs for reference:
     HTML report both still hardcoded `http://`, so they'd have silently
     broken the moment HTTPS was actually on — fixed both, plus synced
     everything.
-55. `b-464af3fd` — fixed the IDS report's hardcoded `http://localhost:8765`
+58. `b-464af3fd` — fixed the IDS report's hardcoded `http://localhost:8765`
     (flagged last build as a known, pre-existing, unrelated gap) now that
     you sent your real `netsentinel.crt`/`.key` and I could verify the
     whole HTTPS chain against your actual files instead of a throwaway
     test cert.
-56. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
+59. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
     found (and fixed) the same hardcoded-`http://` bug in three more
     places my previous "check all the others" pass missed entirely.
-57. `b-fe30eb24` — colour themes now apply to all 11 web-served pages
+60. `b-fe30eb24` — colour themes now apply to all 11 web-served pages
     (Guide, Monitor, Threat Radar, Honeypot, Remote Agents, Top Talkers,
     Topology, VDI, Analytics, the mobile dashboard, and the 3D view's 2D
     HUD) — previously the 12 themes only touched the main dashboard's
     gauges, the Remote Agents chart, and the Evidence Pack PDF.
-58. `b-d3604f66` — captured-traffic pcap file is now actually deleted when
+61. `b-d3604f66` — captured-traffic pcap file is now actually deleted when
     the app closes, instead of only being wiped at the *next* launch.
-59. `b-1fbadf59` — the Wireshark Monitor window itself now stops capture
+62. `b-1fbadf59` — the Wireshark Monitor window itself now stops capture
     and deletes the pcap when just that window is closed (X button), not
     only when the whole app quits — closes the gap flagged in the last
     entry.
-60. `b-e787ec87` — you reported "reporting is broken"; found and
+63. `b-e787ec87` — you reported "reporting is broken"; found and
     fixed the actual crash — `_fmt_ms()` had no `None` guard, so any HTML
     report over a period with no ping or DNS readings threw
     `TypeError: unsupported format string passed to NoneType.__format__`.
-61. `b-ed99f4cc` — EtherApe toolbar redesign: the old two-row,
+64. `b-ed99f4cc` — EtherApe toolbar redesign: the old two-row,
     ~55-control toolbar (the "mess" you flagged, that needed full-screen to
     see half of it) is replaced with a left icon rail + collapsible bottom
     filters drawer (the "Option B" mockup you picked). Plus two real,
@@ -196,11 +203,11 @@ Ninety-six things this session. Build IDs for reference:
     button permanently stuck disabled, and a window-packing order bug that
     could make the bottom status bar and the LIVE/REPLAY scrubber bar
     invisible whenever the window's content needed more height than it had.
-62. `b-c368fa76` — rail button text was too small to read (your report);
+65. `b-c368fa76` — rail button text was too small to read (your report);
     bumped the rail icon buttons from 6pt to 8pt and re-verified nothing
     gets squeezed. Also traced your "DNS is broken" report — turned out to
     be two different panels, one working as designed (see entry 63).
-63. `b-e0c512dc` — found and fixed the real bug behind "Visited
+66. `b-e0c512dc` — found and fixed the real bug behind "Visited
     Hosts" staying empty: it was reading the *shortened* display name
     ("Google", "Amazon" — no dot) instead of the actual resolved domain,
     so real hostnames for every well-known provider — which is most real
@@ -208,26 +215,26 @@ Ninety-six things this session. Build IDs for reference:
     (`'ip'` vs `'id'`) that meant the panel's own backup DNS-resolution
     kick-off never actually ran. Turned out not to be the whole story —
     see entry 64.
-64. `b-7118b630` — the actual root cause of "Visited Hosts" is empty,
+67. `b-7118b630` — the actual root cause of "Visited Hosts" is empty,
     confirmed against your real machine: nothing was resolving *at all*
     for external hosts, DNS or PTR, VPN on or off. Added TLS SNI sniffing
     as a second, independent hostname source that doesn't depend on DNS
     working at all — see the section below for why plain DNS sniffing was
     never going to be enough in 2026. It worked — `api.telegram.org`
     showed up in your very next screenshot.
-65. `b-25adc03e` — found and fixed the real bug behind the Sankey legend
+68. `b-25adc03e` — found and fixed the real bug behind the Sankey legend
     not listing every colour actually on screen (your "green ribbons, no
     legend entry" report): the legend and the ribbons were reading two
     different fields — a node's single, last-packet-wins protocol tag vs.
     each flow's own, more specific protocol — so a protocol like TLS
     could colour a ribbon without ever being any node's tag, and the
     legend simply never knew it existed.
-66. `b-7ee49e69` — moved the MIN TRAFFIC (flow-size) slider out
+69. `b-7ee49e69` — moved the MIN TRAFFIC (flow-size) slider out
     of the collapsed FILTERS & BLOCKING drawer and onto the always-visible
     top toolbar, and fixed a real bug in the slider itself: its handle was
     drawn in the exact same colour as the toolbar background, so even
     with the drawer open the handle was effectively invisible.
-67. `b-85909778` — 3D view: the VPN status pill (shows
+70. `b-85909778` — 3D view: the VPN status pill (shows
     "○ VPN" when idle, "🔒 TAILSCALE"/"🔒 NORDVPN"/etc. when a tunnel is
     actually carrying traffic) was independently centred over the top
     header, with no awareness of the nodes/flows/pkts stats and toolbar
@@ -235,14 +242,14 @@ Ninety-six things this session. Build IDs for reference:
     at your screen's approximate width and confirmed it collides.
     Repositioned it to sit below both header rows instead, verified with
     the same real-browser test at three window widths.
-68. `b-0517e611` — Top Flow Talkers: gave the ribbons the same
+71. `b-0517e611` — Top Flow Talkers: gave the ribbons the same
     scrolling neon circuit-trace overlay the 3D view's protocol bars use,
     and fixed the real reason incoming flows looked like an unreadable
     blur — a particle speed/count calculation that only ever measured
     against the biggest OUTGOING flow, so any incoming flow bigger than
     that (a big download vs. a tiny request — normal, everyday asymmetric
     traffic) blew way past its intended bounds.
-69. `b-58cf88ca` — the new Top Flow Talkers trace overlay from
+72. `b-58cf88ca` — the new Top Flow Talkers trace overlay from
     #68 was gated at 20px of band thickness (copied from an unrelated
     effect that needed that floor to avoid strobing), which silently
     excluded most flows in any capture with one dominant host and a long
@@ -253,7 +260,7 @@ Ninety-six things this session. Build IDs for reference:
     straight from the WebGL 3D bars, which look right there because
     WebGL adds its own bloom on top; a flat 2D canvas has no bloom, so
     the same numbers just looked dim.
-70. `b-4edd6c7a` — switched the default local AI model from llama3.2 to
+73. `b-4edd6c7a` — switched the default local AI model from llama3.2 to
     deepseek-r1:7b everywhere it's referenced in the app (Flow Detail AI
     box, Settings, the Guide, and the actual Ollama call itself), and
     added the handling a reasoning model like deepseek-r1 actually needs
@@ -262,62 +269,62 @@ Ninety-six things this session. Build IDs for reference:
     before the text reaches any panel or JSON parser, and the reply token
     budget was raised so that reasoning doesn't eat the whole allowance
     and leave nothing for the actual answer.
-71. `b-abb8c4b4` — added a floating "AI QUERY" button to every one of the
+74. `b-abb8c4b4` — added a floating "AI QUERY" button to every one of the
     11 web-served pages (previously the only free-form "ask the AI" boxes
     lived in the desktop app; the web pages only had a couple of
     single-purpose canned-prompt buttons).
-72. `b-2433c0ac` — clicking RUN TEST on the main dashboard now pops up a
+75. `b-2433c0ac` — clicking RUN TEST on the main dashboard now pops up a
     live speed-test gauge, needle and all, like Ookla's own app. See the
     section below for how it actually gets "live" numbers, since the real
     speed-test CLI turned out not to offer any.
-73. `b-36cc030b` — investigated the "dashboard still shows 5.0 Mbps while
+76. `b-36cc030b` — investigated the "dashboard still shows 5.0 Mbps while
     the log says 27.57" report; hardened the dashboard's DB read against
     the most plausible cause found at the time (see the section below —
     this turned out not to be the actual cause, but the hardening is
     harmless and stays in).
-74. `b-8854f5c0` — found and fixed the REAL cause of the above: the
+77. `b-8854f5c0` — found and fixed the REAL cause of the above: the
     automatic scheduled speed test and a manually-triggered one could run
     at the same time, each corrupting the other's reading. Confirmed fixed
     on your machine.
-75. `b-8cef6209` — the "web" and "SQLite" status-bar dots at the bottom of
+78. `b-8cef6209` — the "web" and "SQLite" status-bar dots at the bottom of
     the dashboard were stuck on the same dim grey they're created with,
     forever, regardless of whether the web server or database were actually
     up. See the section below.
-76. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
+79. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
     turns a glow/bloom effect on and off for every chart on the main
     dashboard. See the section below.
-77. `b-c5d3c0c0` — embedded guide (desktop "? GUIDE" window and
+80. `b-c5d3c0c0` — embedded guide (desktop "? GUIDE" window and
     the web `/guide` page) updated to document everything new this
     session: the BLOOM button, the status bar's now-real dots, the
     live speed-test gauge popup, and the web AI Query button. See the
     section below.
-78. `b-bf352903` — new "⇪ PUSH" button on the main dashboard:
+81. `b-bf352903` — new "⇪ PUSH" button on the main dashboard:
     deploys the agent to a remote Windows (WinRM) or Linux (SSH) box
     given login credentials, starts it immediately, and installs it to
     auto-run on every reboot. Guide updated with a dedicated "Push
     Agent" section; the Push Agent window itself also explains what it
     does before you use it. See the section below.
-79. (no build ID — build scripts only) — real-world Push Agent deploy hit
+82. (no build ID — build scripts only) — real-world Push Agent deploy hit
     "paramiko isn't installed in this build" even after the #78 fix; root
     cause was two layers deeper than the first patch (see the follow-up
     under the Push Agent section below) — `build.bat`/`build_installer.bat`
     now resolve one Python consistently and self-heal a missing `pip` via
     `ensurepip`. Confirmed working by you on the Linux deploy path.
-80. `b-5385a8bb` (current) — client (`nm_client.py`) rework: dashboard,
+83. `b-5385a8bb` (current) — client (`nm_client.py`) rework: dashboard,
     Latency and Quality tabs now actually draw graphs (a matplotlib
     packaging bug was silently killing every chart in the built .exe);
     Agents tab rebuilt to match the desktop app's own agent detail;
     firewall "not elevated" message rewritten to explain the real UAC
     cause; look-and-feel restyled (Command Deck discipline + single
     accent colour). See the section below.
-81. `b-7a2f19cc` — proof the elevation disagreement is a real
+84. `b-7a2f19cc` — proof the elevation disagreement is a real
     bug, not you: the status bar's own "⚡ ELEVATED" tag now also shows
     its PID, and `/api/firewall` now returns the PID of whichever process
     actually answered the request, shown right in the firewall tab's
     warning — so a mismatched PID (a stale second instance still bound
     to the port) is directly visible instead of argued about. See the
     section below.
-82. `b-9c41e7d0` — the actual root cause, found from the PID/
+85. `b-9c41e7d0` — the actual root cause, found from the PID/
     error-message data you sent back: the "improved" `TokenElevation`
     check was failing on your real machine every single time with
     `OSError: [WinError 6] The handle is invalid`, silently falling back
@@ -325,28 +332,28 @@ Ninety-six things this session. Build IDs for reference:
     just happened to fall back to the right answer. Cause was a bug on my
     end (missing ctypes type declarations, not a UAC/account issue), now
     fixed. See the section below.
-83. `b-2f8e6a51` — after that fix, the client showed the exact
+86. `b-2f8e6a51` — after that fix, the client showed the exact
     same warning again post-rebuild. Added a `build` field to
     `/api/firewall` and to the firewall tab's warning so this stops being
     guesswork: the raw response now proves whether the machine actually
     answering that request is running current code at all, instead of
     theorizing about it. See the section below.
-84. `b-71c4a08e` — "the real cause" above came back: dashboard
+87. `b-71c4a08e` — "the real cause" above came back: dashboard
     vs. console mismatch again, mostly after the app's been running a
     while. The `_running_manual`/`_running_auto` guard from `b-8854f5c0`
     was real and did help, but it was a plain check-then-set with a gap
     two of the four start points could still both slip through in the
     same instant — closed that gap with an actual lock. See the section
     below.
-85. `b-f4e5ec66` (current) — Time-of-Day Heatmap now uses your actual
+88. `b-f4e5ec66` (current) — Time-of-Day Heatmap now uses your actual
     selected theme's colours instead of a fixed viridis/magma_r palette,
     and re-colours live if you change theme while it's open. See the
     section below.
-86. `b-f4e5ec66` (current) — AI briefing's "Ollama has no model" error was
+89. `b-f4e5ec66` (current) — AI briefing's "Ollama has no model" error was
     genuinely undiagnosable when you'd already pulled the model — it never
     said which Ollama it actually asked or what that Ollama has installed.
     Now it names both. See the section below.
-87. (no separate build — bundled into `b-f4e5ec66`) — found and removed a
+90. (no separate build — bundled into `b-f4e5ec66`) — found and removed a
     dead, unreachable `return rows` line in `_windowed_pids()` while
     running the full test suite for #85/#86 (a stray leftover statement
     after the function's real `return pids`, referencing a variable that
@@ -355,49 +362,49 @@ Ninety-six things this session. Build IDs for reference:
     actually available to run it). Unrelated to anything you asked for
     this session; fixed because it was sitting right there failing a test
     I was running anyway.
-88. `b-51d3ca67` — you pasted the #86 fix's own error message
+91. `b-51d3ca67` — you pasted the #86 fix's own error message
     back at me showing "no model" for a model that its own "Installed
     there" list said WAS installed at the right endpoint — meaning #86
     correctly diagnosed the situation but hadn't actually closed it. See
     the section below.
-89. `b-46815a9c` — "same message your getting on my tits fix
+92. `b-46815a9c` — "same message your getting on my tits fix
     it" — #88's fix didn't stop it recurring either. Rather than guess a
     fourth cause blind, made the error itself carry enough forensic detail
     (build id, Ollama's raw response, proof of whether the retry used a
     byte-identical name) that whatever happens next is diagnosable from
     the error text alone, without another round trip. See the section
     below.
-90. `b-ee1cd001` — #89's diagnostic did its job on the very next
+93. `b-ee1cd001` — #89's diagnostic did its job on the very next
     try: your pasted error revealed the real cause was never a model
     problem at all — Ollama's own `llama-server.exe` engine binary is
     missing on your machine. Fixed the app's own bug that misdiagnosed
     this as "has no model" and pointed you at a useless `ollama pull`, and
     replaced it with the actual cause and fix. See the section below.
-91. `b-5239b070` — "update the guide please": the embedded
+94. `b-5239b070` — "update the guide please": the embedded
     in-app guide's Troubleshooting → "AI Query returns an error" section
     now covers the enriched "has no model" diagnostics and the
     "llama-server.exe missing" / antivirus-quarantine case from #89-#90,
     and the Time-of-Day Heatmap section now mentions that its colours
     follow your theme (#85). No behaviour change — text only.
-92. `b-00aa1a4b` — "under what section is the wsl setup" / "yes
+95. `b-00aa1a4b` — "under what section is the wsl setup" / "yes
     i do" — the guide had no real Pi-hole/WSL section at all (just one
     sidebar-button bullet) and the Kali Desktop entry was one line. Added
     a full Pi-hole (WSL/Docker) section and expanded Kali Desktop with
     what it actually does and its real first-run-setup requirement. See
     the section below.
-93. `b-105b6e8a` — "in the 3d view get rid of the floor and make
+96. `b-105b6e8a` — "in the 3d view get rid of the floor and make
     the space background a deep black so the stars stand out more" — floor
     grid + its solid fill mesh are gone entirely (not just hidden), the sky
     gradient/fog/clear-colour are now all near-black, and the GRID button
     now only controls the (untouched) wall grids. See the section below.
-94. `b-b0d1c6df` — you sent a video: "floor is a different black
+97. `b-b0d1c6df` — you sent a video: "floor is a different black
     to the sides and there is a weird moire effect going on. make the sides
     the same colour as the floor" — the walls (#93 left them untouched) were
     still pinned to the old, now-removed floor's colour, which is why they
     stood out against the new deep-black backdrop. Walls now pull their
     colour from the exact same constant the backdrop's fog uses, and the
     wall grid lines were darkened to match. See the section below.
-95. `b-c385dd98` — "moire still there" (with screenshots) — #94's
+98. `b-c385dd98` — "moire still there" (with screenshots) — #94's
     diagnosis was wrong: the moire wasn't the walls at all, it was the deep-
     black SKY GRADIENT itself banding (values so close to 0 that most of its
     512 rows round to identical 8-bit colour and step in hard rings once
@@ -405,7 +412,7 @@ Ninety-six things this session. Build IDs for reference:
     Fixed by dithering the gradient before it's quantized. Confirmed the bug
     and the fix in a real headless-Chromium canvas, not just reasoning about
     it. See the section below.
-96. `b-a4056eca` (current) — "you've made it worse, stop guessing and fix it
+99. `b-a4056eca` (current) — "you've made it worse, stop guessing and fix it
     once and for all" (with a much more visible ripple pattern in the
     screenshot) — #95's dithering fix was real and measured, but dithering
     an 8x512 texture with no mipmaps that then gets minified onto a
@@ -7197,3 +7204,213 @@ Settings → Data → "Purge corrupt speed readings…". Counts and nulls
 out-of-range download/upload values (the old units-mismatch bug) directly
 in `speedtest_data.db`, backing up the file first. Full detail was sent
 with that build; not repeating it here.
+
+---
+
+## Real ship-model GLB in the /3d topology view (build `b-def7f507`)
+
+**What you asked:** "still pretty crap add real texture model assets" (on
+the earlier procedural ship preview), then you dropped the actual asset —
+`glb.rar` (65MB, a 125MB `glb.glb` once extracted) — straight into the
+`setup` folder because it was too big to attach. After two rounds of
+quality passes on a standalone preview page, "looks good add it to the
+app" was the go-ahead to wire the real model into the production `/3d`
+view's node meshes, not just a preview page.
+
+**What changed:** every node in the `/3d` topology view is a plain
+Phong sphere today. Below a node-count threshold (`_NC_MAX_SHIP_NODES =
+40` — a budget choice, not a visual one: this view already caps at
+`MAX_NODES` pooled mesh instances, and the real model's triangle count
+times a large node count would tank frame rate), each node now renders as
+a clone of your actual ship model instead. Above that threshold, or if the
+model hasn't loaded yet, or if it fails to load at all, every node stays
+exactly the plain sphere it always was — nothing about the sphere path was
+touched.
+
+**Why a hand-written GLB parser instead of three.js's own GLTFLoader:**
+this app self-hosts its three.js + post-processing files (cached to
+`~/.nm_vendor`, downloaded once) rather than pulling from a CDN at
+runtime, and the standard `GLTFLoader.js` addon couldn't be reliably
+fetched in this project's sandboxed dev environment. Rather than take on
+that dependency, I wrote a ~90-line parser scoped to exactly what your
+verified file actually contains: a single scene, plain translation/
+rotation/scale node transforms (no skinning, animation, or morph
+targets), non-interleaved float32 position/normal/uv accessors, uint32
+indices, and standard `pbrMetallicRoughness` materials with baseColor/
+normal/metallicRoughness/emissive PNG textures. It is not a general glTF
+loader and isn't meant to be — it's the minimum needed for this one asset.
+
+**Server side:** a new `/api/shipmodel` route (`_serve_shipmodel`) finds
+the bundled `glb.glb` via the same generic `_nm_resource_path()` finder
+every other bundled resource already uses (searches next to the frozen
+exe, next to the .py, cwd, and a few other candidate dirs — never a
+hardcoded path) and serves it as `model/gltf-binary`. Missing or unreadable
+degrades to a graceful 404 rather than an exception, matching the same
+"never break the page" philosophy `_serve_vendor` already uses for the
+three.js files — the client-side loader already treats a failed fetch as
+"stay on sphere nodes."
+
+**Client side:** on page load, `_NC_startLoad()` fetches `/api/shipmodel`
+once, parses it, builds materials + geometry, centers/normalizes it into a
+reusable template `Group`, and caches it in `_NC_TEMPLATE`. From then on,
+`_getNodeMesh()` clones that template per node (pooled separately from the
+sphere mesh pool — `_craftPool` vs the existing `_meshPool`, tagged via
+`userData._kind` so the two never mix or get returned to the wrong pool)
+instead of allocating a new `SphereGeometry`. I deliberately named
+everything with an `_NC_`/`_craftPool` prefix rather than reusing `_ship*`
+— this codebase already has an unrelated `_ship*`/`_shipHosts` naval
+patrol-boat visualization, and I wanted zero chance of collision or
+confusion between the two.
+
+**Raycasting had to change:** hover and click both do
+`raycaster.intersectObjects(_rayTargets, ...)`. A `THREE.Group` (what a
+ship clone is) has no geometry of its own — only its child `Mesh`es do —
+so the existing non-recursive call (`..., false`) would have found zero
+hits against a ship node while working fine for spheres. Both call sites
+are now recursive (`..., true`), and since a recursive hit resolves to
+whichever *child* mesh the ray actually touched rather than the group
+root, `userData.nodeIdx` is now propagated onto every descendant of a ship
+clone via `.traverse()` at build time, not just set once on the group.
+Confirmed this actually works end-to-end (not just "should work" from
+reading the code) with a real headless-Chromium raycast: scanned a grid of
+screen points using the page's own `raycaster`/`_rayTargets`/`camera`, and
+got a real hit whose `object.type` was `"Mesh"`, nested two levels inside
+the ship clone's group hierarchy, resolving to a correct, in-range
+`nodeIdx`.
+
+**Two quality passes already folded in from the preview work**, since the
+production integration reuses that same template-building code:
+
+- A studio environment map (`PMREMGenerator`, a canvas-built sky gradient
+  with a bright sun highlight + softbox + rim, converted to a proper
+  reflection source) — purely additive, since the old Phong sphere
+  material never read `scene.environment` at all, but the real model's
+  `MeshStandardMaterial` renders almost black without one.
+- Anisotropic filtering (`tex.anisotropy =
+  renderer.capabilities.getMaxAnisotropy()`) on every loaded texture — the
+  concrete, named root cause of your "quality looks shit" feedback on the
+  first real-model pass; every texture was sampling with anisotropic
+  filtering completely off.
+
+**Verified, not assumed:** built a minimal standalone test server (serving
+exactly what the `/3d` script actually fetches — the page itself, the
+cached three.js vendor files, `/api/topology3d` with synthetic node data,
+and `/api/shipmodel` from the real 125MB `glb.glb`) and drove it with real
+headless-Chromium Playwright sessions:
+
+- With 12 synthetic nodes (under the 40-node threshold): confirmed
+  `_NC_TEMPLATE` loads, and — this is the part that actually proves the
+  LOD *switches* live, not just that ships can render — nodes render as
+  plain spheres immediately on the first `poll()` tick (before the 125MB
+  model has finished loading), then switch to real ship meshes on the very
+  next tick once the template resolves. All 12 ray targets ended up
+  tagged `craft`.
+- With 120 synthetic nodes (over the threshold): confirmed the template
+  still loads successfully in the background, but every ray target stayed
+  tagged `sphere` — proving the sphere fallback there is the node-count LOD
+  threshold actually working as designed, not the model silently failing
+  to load.
+- Hover/click: grid-scanned raycast hits in both scenarios resolved to
+  valid, in-range node indices — including, for the craft scenario, a hit
+  object of type `Mesh` nested inside a ship clone's group hierarchy, the
+  direct proof the recursive-raycast + `nodeIdx`-propagation fix works.
+- No unexpected failed requests in either run (the only 404s were
+  `/flag/<cc>` and `/api/killswitch` — routes this minimal test harness
+  doesn't implement, not anything `/vendor/*`, `/api/topology3d`, or
+  `/api/shipmodel` related) and no page or console errors.
+- `py_compile` and `pyflakes` on the full file: compiles clean, and
+  pyflakes reports the exact same 87 pre-existing warnings as before this
+  change — zero new ones introduced.
+- `selftest.py`: every route came back byte-identical except `/3d` itself
+  (expected — its content changed), which was re-baselined with
+  `--update-ok` and confirmed clean on a clean re-run. All API routes'
+  structural checks (status + key sets) also stayed green.
+- New `test_ship_model_nodes.py` locks in the key facts of this change for
+  future regressions: the GLB parser functions exist and GLTFLoader is
+  genuinely unused at runtime; the `_NC_`/`_craftPool` naming avoided the
+  `_ship*` collision; the LOD threshold gates on both template-loaded AND
+  node-count; the two pools route craft vs. sphere objects correctly and
+  never mix; both raycast call sites are recursive and no non-recursive
+  call remains; `nodeIdx` propagation via `.traverse()` is present; the
+  studio env map and anisotropic filtering are both in place; the server
+  route exists, uses the shared resource finder, and degrades gracefully;
+  and both `speedtest_monitor.spec` and `installer.nsi` bundle `glb.glb`.
+
+**Build-time bundling:** `speedtest_monitor.spec` now bundles `glb.glb`
+next to the .py the exact same way `bg.jpg` already is (`datas.append`,
+with a build-time warning — not a hard failure — if it's missing).
+`installer.nsi` installs it with `File /nonfatal "glb.glb"` right after
+`bg.jpg`, and the uninstaller removes it again. Both follow existing
+patterns in those files exactly; neither is new machinery.
+
+**One infrastructure wrinkle worth knowing about:** the device bridge that
+lets me read/write files on your machine caps at ~20MB per file coming
+back from the container, so a 125MB model could never have been pushed
+back to you through the normal "send in chat, save to your folder"
+pipeline. Since the file was already sitting in your `setup` folder
+(you'd extracted `glb.rar` — actually, I ended up extracting it directly
+on your machine via a shell that runs there, so the 125MB file never had
+to cross into or out of this sandboxed container at all), this was a
+non-issue for shipping — just flagging it in case a future asset this
+size needs to move the other direction.
+
+**Not done / your call:**
+
+- No per-node color tinting for ship-mode nodes (e.g. to distinguish
+  blocked/local the way sphere nodes sometimes get recolored). `.clone()`
+  shares materials by *reference*, not a deep copy, so tinting one
+  instance's material would recolor every other node sharing that pool
+  entry — fixable, but only by cloning materials too, which costs more and
+  risks looking worse than the baked PBR textures. Blocked/local status is
+  already conveyed independently via the existing red ring + label sprite
+  color, so I left this alone rather than force it in.
+- `_NC_MAX_SHIP_NODES = 40` is my number, not one you specified — happy to
+  raise or lower it if 40 real ships turns out to be too many or too few
+  for comfortable frame rates on your machine.
+
+---
+
+## Ship-model follow-up: old ships removed, top-N-by-traffic LOD, Ollama diagnostic dug deeper (build `b-6b7e63f5`)
+
+**What happened:** right after the previous build shipped, you sent a video of the live `/3d` view calling it "totally fucked" with "the old ships still there." I traced the video frame-by-frame against the actual code rather than guessing, and found two genuinely separate things tangled together:
+
+1. The dim, slowly-drifting ships in the background were `_mkCruiser` — a **pre-existing, unrelated** feature (`_shipSpawn('patrol', ...)`, triggered once per newly-seen host) that has nothing to do with the real ship-model work and that I never touched. It was working exactly as it always had.
+2. The real per-node ship model wasn't visible anywhere in that capture because your actual node count was comfortably over the old `_NC_MAX_SHIP_NODES = 40` cutoff, which was **all-or-nothing**: over the limit, every node stayed a sphere, full stop.
+
+Put those two facts together and the confusion made complete sense: you were looking at an old, cheap-looking, always-there feature, while the new feature you actually asked for was correctly (but unhelpfully) doing nothing at all on your real traffic volume. Nothing was actually broken by the previous build — but I get why it read that way, and the fix for both halves of that confusion is below.
+
+**1. Old ambient patrol-ship spawn — removed.** `_mkCruiser`, `_shipsScanHosts`, and the `_shipHosts`/`_shipPrimed` tracking state are gone entirely — construction, call site, and state, not just hidden. I deliberately kept the *other* thing that shared this code: `_mkRaider` + `_shipSpawn('raider', ...)` + `_shipKill`, which is a different, occasional effect — a raider ship warps in and gets destroyed specifically when the firewall **actually writes a real block rule** (tied into the same event stream that detonates the attack-sim radar). That one is a deliberate dramatization of a real security event, not ambient clutter, so it stays. If you'd rather that go too, say so and it's a two-function removal.
+
+**2. Real ship-model LOD: top-N-by-traffic instead of all-or-nothing.** Every node now gets ranked by its traffic share (`frac`, already computed per node) each frame, and the top `_NC_MAX_SHIP_NODES` (still 40) busiest nodes get the real ship model — everything else stays a plain sphere, same as before. On a quiet capture with fewer than 40 nodes, this is unchanged (everyone still gets a ship). On a busy real capture like the one in your video, the 40 busiest hosts now show as real ships and the long tail of quiet ones stays spheres, instead of the old behavior where crossing 40 total nodes turned the feature off completely.
+
+**3. Ollama's "llama-server binary not found" diagnostic — actually checks the disk now.** You said you'd already reinstalled Ollama and re-pulled the model and were still hitting the exact same error, which means the app's canned "reinstall Ollama" advice was actively wrong to keep repeating — you'd already tried the only thing it suggested. The diagnostic (`_nm_ai_complete`) now parses the exact paths Ollama's own error message says it checked and tests each one against the real filesystem at the moment the error happens, then gives different, concrete next steps depending on what it finds:
+   - Still missing everywhere → says plainly that a plain reinstall isn't enough if you've already done that, and that something is likely deleting the fresh binary again (antivirus/EDR), so the actual next step is an exclusion *before* reinstalling, not a repeat reinstall.
+   - Present at a normal size → says this is NOT a missing-file problem any more, and points at execution-blocking (Defender Application Control / EDR), a stale install conflict, or permissions instead — completely different troubleshooting path than "go reinstall."
+   - Present but suspiciously small → flags a likely truncated/corrupted download specifically.
+
+   This can't fully verify itself from here — I have no way to reach your actual Windows Ollama install from this sandbox — so I built a real HTTP server that reproduces Ollama's exact error response and drove the real function against it, confirming both the "still missing" and "exists now" branches produce the right differentiated advice, with real filesystem checks (monkeypatched paths standing in for your real ones), not just reasoning about the code.
+
+**Verified, not assumed, for the ship-model changes:** `py_compile` and `pyflakes` clean (still the same 87 pre-existing warnings, zero new). `selftest.py` — only `/3d` changed (expected), re-baselined, clean rerun. Real headless-Chromium test with 60 synthetic nodes (over the 40 cap): confirmed exactly 40 nodes rendered as real ships and 20 as spheres, and confirmed every ship-node's traffic share was greater than or equal to every sphere-node's — i.e., it's genuinely ranking by traffic, not splitting some arbitrary way that happens to add up to the right counts. `test_ship_model_nodes.py` extended with checks for: the old ambient spawn's construction/call/state being gone from the whole file (not just hidden in one script region), the raider/block-kill system staying intact, and the new per-node ranked-selection logic (`craftIdx`, the traffic sort, the top-N cutoff) being what actually gates `useCraft` now instead of the old whole-view node-count comparison.
+
+**Not done / your call:**
+
+- Didn't touch the raider/block-kill warp-in-and-destroy effect — flagged above, tell me if you want it gone too.
+- Couldn't verify the Ollama fix against your actual machine (no path from this sandbox to your live Ollama install) — the next time you hit this, the message itself should now tell you definitively whether the file is actually there or not, which is the concrete thing to look at.
+
+## Ship-model, take three: node substitution reverted for good, real ship now flies by instead (build `b-9cfc3b65`)
+
+**What happened:** after the top-N-by-traffic build shipped, your video showed the real ship model sitting statically on top of your busiest, most-labelled nodes — "where are my orbs," "old ships still there," "why do the new ones hang around like flys round shit when they should fly in and fly out like the old ones." I pulled frames from the video a couple seconds apart and compared exact pixel positions: the ships genuinely weren't moving. That's the top-N-by-traffic feature working exactly as I built it — busiest nodes get a real ship instead of a sphere, pinned at that node's position like every other node mesh — but built wrong for what you actually wanted. Replacing a node's flag/colour sphere with a ship hides the one piece of identity you use to eyeball a host at a glance, and it was doing that hardest on precisely the hosts you care most about.
+
+**1. Real ship model is no longer a node substitute, full stop.** Not re-tuned, not gated differently — gone from `rebuildGeometry` entirely. Every node is always the plain flag sphere now; `useCraft` is a hardcoded `false` at the one call site that matters, not derived from node count or traffic rank. This is the second LOD scheme I've tried and reverted here (all-or-nothing, then top-N-by-traffic), so rather than tune a third variant, the node-substitution idea itself is retired. The pooling/tagging/recursive-raycasting plumbing (`_craftPool`, `userData._kind`, `.traverse()` for nodeIdx) is left in place rather than ripped out — it's inert with `useCraft` always false, but ripping it out was a bigger, riskier change than the actual ask, and it's needed again below anyway.
+
+**2. The real ship model now powers an ambient "flyby" instead.** This reuses the exact fly-in/drift-across/exit motion your old low-poly `_mkCruiser` had (removed two builds ago) — same spawn geometry (crosses in from one side at `dist=46`, `z` between -26 and -42), same generic drift/exit code in `_shipsUpdate` (already had a non-raider speed branch left over from the cruiser days), same off-screen removal once it drifts past `|x|>52` — except it's a clone of the real GLB model instead of a low-poly placeholder, and it's triggered by discovering a new host rather than looping forever. Concretely:
+   - `_mkFlyby()` clones `_NC_TEMPLATE` (the loaded real ship). If the template hasn't finished loading yet, it returns nothing — no placeholder fallback, no queuing the spawn for later, it's just skipped for that host.
+   - `_shipSpawn(kind, label)` now builds a raider via `_mkRaider()` for real block events (unchanged) and a flyby via `_mkFlyby()` for everything else, checking template availability *before* it burns the existing 900ms spawn-rate throttle, so a flyby attempt that finds the template still loading doesn't delay the next real spawn.
+   - `_shipsScanHosts(d)` is called once per poll tick (same place the old cruiser's host-scan used to live). The first tick primes a `_shipHosts` set with every host already in the capture, without spawning anything — otherwise resuming on a busy real network would spawn a whole flock of "new" hosts in the first second. After that, a host this session has genuinely never seen before triggers exactly one flyby.
+
+**Verified, not assumed:** `py_compile`/`pyflakes` clean (same 87 pre-existing warnings, zero new). `selftest.py` — only `/3d` changed, as expected; re-baselined, clean rerun. `test_ship_model_nodes.py` rewritten: the top-N-by-traffic checks (`craftIdx`, the traffic sort, the ranked cutoff) are gone, replaced with checks that `useCraft` is unconditionally `false` at the node call site, that `_mkFlyby`/`_shipsScanHosts`/the restored `_shipHosts`/`_shipPrimed` state all exist, that `_shipSpawn` routes non-raider kinds through `_mkFlyby` and bails cleanly (before the throttle) when the template isn't ready, and that the raider dramatization is untouched — 55 checks, all passing. Beyond static checks, I drove this live in a real headless Chromium browser: since the actual 125MB ship model takes minutes to parse under this sandbox's software-rendering fallback (a known, already-flagged environment quirk, not a bug — your real GPU won't have this problem), I built a tiny synthetic GLB fixture (a single triangle, same feature shape the hand-written parser expects) purely to drive the new *logic* fast, and confirmed against a live page: (1) a host injected into the topology feed after the first poll tick spawns exactly one flyby tagged `userData.kind==='flyby'`; (2) sampling its position five times over several seconds shows it moving consistently in its assigned direction, not sitting still — direct proof against the exact "hang around like flys round shit" complaint; (3) with the real template loaded, every node ray target is still `kind==='sphere'` — the revert holds even once a real ship model is available to use.
+
+**Not done / your call:**
+
+- Didn't touch the raider/block-kill warp-in-and-destroy effect again — still a deliberate, separate dramatization for real firewall blocks, untouched by any of this.
+- The flyby reuses the old cruiser's exact scale (1.0) and rotation logic as a starting point, since that's the last positioning that actually looked right to you for a background ship. If the real model's proportions or facing look off at that scale once you see it live (it's a different mesh than the low-poly cruiser was), tell me what's wrong and I'll tune it — I didn't want to guess-tune it blind again after two misses in a row on this feature.
