@@ -143,10 +143,6 @@ Section "Vanguard Flow NetSentinel (monitor app)" SecMain
     SetOutPath "$INSTDIR"
     File "dist\${APP_EXE}"
     File /nonfatal "bg.jpg"
-    ; Real ship-model asset for the /3d topology view's node meshes. /nonfatal
-    ; so a build run without it still produces a working installer — the
-    ; view just falls back to plain sphere nodes (see _serve_shipmodel).
-    File /nonfatal "glb.glb"
     ; Ookla's speedtest CLI is deliberately NOT redistributed: its licence
     ; restricts commercial redistribution. The app finds whichever CLI is
     ; installed (librespeed-cli, speedtest-cli or Ookla) at runtime.
@@ -637,7 +633,6 @@ Section "Uninstall"
     Delete "$INSTDIR\${APP_EXE}"
     Delete "$INSTDIR\NetworkMonitorClient.exe"
     Delete "$INSTDIR\bg.jpg"
-    Delete "$INSTDIR\glb.glb"
     Delete "$INSTDIR\speedtest.exe"
     Delete "$INSTDIR\librespeed-cli.exe"
     Delete "$INSTDIR\SpeedtestAgent.exe"

@@ -2740,7 +2740,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-9cfc3b65'
+_NM_BUILD_ID = 'b-d35f0af4'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -27694,34 +27694,6 @@ class _ThreeDServer:
             return
         handler._send(200, 'application/javascript', data)
 
-    def _serve_shipmodel(self, handler):
-        """Serve the bundled real ship-model GLB for the /3d view's node
-        meshes (see the _NC_ loader in the page script). The asset is
-        bundled locally by the PyInstaller spec (glb.glb, next to bg.jpg) —
-        never fetched from a URL, so this is a simple file read, not a
-        cache-or-download like _serve_vendor above.
-
-        Missing/unreadable file must never break the page: the client-side
-        loader already treats a failed fetch as "stay on sphere nodes"
-        (see _NC_startLoad's .catch), so a 404 here is a graceful no-op.
-        """
-        try:
-            fp = _nm_resource_path('glb.glb')
-        except Exception:
-            fp = None
-            _exc_debug('_serve_shipmodel resource lookup')
-        if not fp:
-            handler._json(404, {'error': 'ship model not bundled'}); return
-        try:
-            import pathlib as _pl
-            data = _pl.Path(fp).read_bytes()
-        except Exception:
-            _exc_debug('_serve_shipmodel read')
-            handler._json(404, {'error': 'ship model unreadable'}); return
-        if not data:
-            handler._json(404, {'error': 'ship model empty'}); return
-        handler._send(200, 'model/gltf-binary', data)
-
     def _serve_flag(self, handler, cc):
         """Proxy + cache country-flag PNGs for the 3D view's flag spheres.
         Missing this route is why the flag spheres vanished — every /flag/<cc>
@@ -29011,40 +28983,6 @@ scene.add(new THREE.AmbientLight(0x112244,2));
 const dlight=new THREE.DirectionalLight(0x4488ff,1.2);
 dlight.position.set(5,10,8);scene.add(dlight);
 
-// ── Studio env map for the real ship-model nodes (see _NC_ below) ─────────
-// The sphere nodes use MeshPhongMaterial, which never reads scene.environment
-// at all -- adding this is purely additive and has zero effect on them, on
-// the walls, the starfield, or anything else already tuned and approved.
-// It exists because the ship model uses MeshStandardMaterial with real
-// metallic-roughness maps, and a physically-based metal surface with no
-// environment to reflect renders almost black no matter how bright the
-// direct lights are -- confirmed the hard way in a standalone test before
-// this ever touched the real app. A small hand-built studio probe (sky
-// gradient + one bright "sun" highlight + a cool fill) gives it something
-// real to reflect without shipping an external HDRI file.
-(function(){
-  const pmrem=new THREE.PMREMGenerator(renderer);
-  pmrem.compileEquirectangularShader();
-  const W=512,H=256, cv=document.createElement('canvas'); cv.width=W;cv.height=H;
-  const cx=cv.getContext('2d');
-  const g=cx.createLinearGradient(0,0,0,H);
-  g.addColorStop(0,'#5d7688'); g.addColorStop(0.4,'#28313c');
-  g.addColorStop(0.6,'#12161d'); g.addColorStop(1,'#020305');
-  cx.fillStyle=g; cx.fillRect(0,0,W,H);
-  let sun=cx.createRadialGradient(W*0.7,H*0.22,0, W*0.7,H*0.22,W*0.22);
-  sun.addColorStop(0,'rgba(255,248,232,0.95)'); sun.addColorStop(1,'rgba(255,248,232,0)');
-  cx.fillStyle=sun; cx.fillRect(0,0,W,H);
-  let fill=cx.createRadialGradient(W*0.15,H*0.6,0, W*0.15,H*0.6,W*0.2);
-  fill.addColorStop(0,'rgba(120,170,255,0.3)'); fill.addColorStop(1,'rgba(120,170,255,0)');
-  cx.fillStyle=fill; cx.fillRect(0,0,W,H);
-  const tex=new THREE.CanvasTexture(cv);
-  tex.mapping=THREE.EquirectangularReflectionMapping;
-  tex.encoding=THREE.sRGBEncoding;
-  const rt=pmrem.fromEquirectangular(tex);
-  scene.environment=rt.texture;
-  tex.dispose(); pmrem.dispose();
-})();
-
 // Floor removed on purpose (you asked to get rid of it so the starfield reads
 // as open space rather than a room with a lit surface underneath). There used
 // to be a GridHelper floor grid plus a solid PlaneGeometry fill mesh sitting
@@ -29207,169 +29145,11 @@ const MAX_NODES=500, MAX_FLOWS=2000, CPS=20, MAX_PARTS=MAX_FLOWS*2;
 let _topN=500;
 function onTopN(v){_topN=parseInt(v);document.getElementById('topN-val').textContent=_topN>=500?'ALL':_topN+'';}
 
-// ── Real ship-model nodes (loaded once, cloned per node) ───────────────────
-// Trevor supplied a real, licensed 3D asset (glb.glb -- ~2.6M tris, full
-// baseColor/normal/metallic-roughness/emission PBR textures baked in
-// Blender) to replace the plain spheres below with something that actually
-// looks like a spacecraft. Deliberately NOT a straight swap:
-//   - Parsed with a small hand-written GLB reader below, not the full
-//     three.js GLTFLoader addon -- this page already self-hosts three.js +
-//     the postprocessing addons by downloading them once to ~/.nm_vendor
-//     (see _serve_vendor server-side), and pulling in a full generic glTF
-//     loader on top of that for one specific, already-inspected file
-//     wasn't worth it. This reader only handles what glb.glb actually
-//     contains -- a single scene, plain TRS node transforms, no skinning/
-//     animation/morph targets, non-interleaved float accessors, uint32
-//     indices, standard metallicRoughness materials -- verified against
-//     the real file before writing this, not written as a generic parser
-//     and hoped for the best.
-//   - Loaded ONCE into a template Group and reused via .clone() (which
-//     shares geometry/material references, not real copies) for every
-//     node -- never re-parsed or re-decoded per node.
-//   - Only used up to _NC_MAX_SHIP_NODES active nodes at a time. MAX_NODES
-//     below allows up to 500 simultaneous nodes; even ignoring draw-call
-//     cost, 500 x 2.6M triangles is not a real-time triangle budget on any
-//     GPU. Past the threshold this falls back to the existing sphere path,
-//     completely untouched -- the same "flat/simple material past a size
-//     or count threshold" LOD call any game engine makes, just keyed on
-//     node COUNT here instead of on-screen size.
-//   - Deliberately does NOT tint the ship's material per node the way the
-//     sphere's protocol/blocked colour does. Doing that safely would need
-//     every clone to carry its own cloned material instead of sharing the
-//     template's (mutating a shared material would recolour every ship at
-//     once), and even then a flat colour multiply over a baked, weathered
-//     PBR texture looks worse than leaving it alone. Blocked/protocol
-//     status is already carried by two things that don't touch the mesh
-//     itself -- the existing red ring instance for blocked nodes, and the
-//     node's label sprite colour -- both keep working unchanged.
-//   - If the model 404s, fails to parse, or the fetch throws for any
-//     reason, _NC_TEMPLATE just stays null forever and every node quietly
-//     stays a sphere -- this never breaks the page.
-let _NC_TEMPLATE = null;            // THREE.Group once loaded, else null
-let _NC_LOAD_STARTED = false;
-const _NC_MAX_SHIP_NODES = 40;      // see rationale above
-const _NC_COMPONENT_CTORS = {5120:Int8Array,5121:Uint8Array,5122:Int16Array,5123:Uint16Array,5125:Uint32Array,5126:Float32Array};
-const _NC_TYPE_SIZES = {SCALAR:1,VEC2:2,VEC3:3,VEC4:4,MAT4:16};
-
-function _NC_parseGLB(arrayBuffer){
-  const dv=new DataView(arrayBuffer);
-  if(dv.getUint32(0,true) !== 0x46546C67) throw new Error('bad glb magic');
-  let offset=12, json=null, bin=null;
-  while(offset < arrayBuffer.byteLength){
-    const len=dv.getUint32(offset,true), type=dv.getUint32(offset+4,true), start=offset+8;
-    if(type===0x4E4F534A) json=JSON.parse(new TextDecoder('utf-8').decode(new Uint8Array(arrayBuffer,start,len)));
-    else if(type===0x004E4942) bin=arrayBuffer.slice(start,start+len);
-    offset = start+len;
-  }
-  if(!json || !bin) throw new Error('incomplete glb (missing JSON or BIN chunk)');
-  return {json,bin};
-}
-function _NC_accessorArray(json,bin,i){
-  const acc=json.accessors[i], bv=json.bufferViews[acc.bufferView];
-  const Ctor=_NC_COMPONENT_CTORS[acc.componentType], n=_NC_TYPE_SIZES[acc.type];
-  const off=(bv.byteOffset||0)+(acc.byteOffset||0);
-  return new Ctor(bin, off, acc.count*n);
-}
-function _NC_loadTexture(json,bin,imageIndex,srgb){
-  return new Promise((resolve)=>{
-    const img=json.images[imageIndex], bv=json.bufferViews[img.bufferView];
-    const bytes=new Uint8Array(bin,bv.byteOffset||0,bv.byteLength);
-    const blob=new Blob([bytes],{type:img.mimeType||'image/png'});
-    createImageBitmap(blob,{imageOrientation:'none'}).then(bitmap=>{
-      const tx=new THREE.Texture(bitmap);
-      tx.flipY=false;    // glTF UVs assume a non-flipped image, unlike three.js's own default
-      tx.wrapS=tx.wrapT=THREE.RepeatWrapping;
-      if(srgb) tx.encoding=THREE.sRGBEncoding;
-      tx.anisotropy=renderer.capabilities.getMaxAnisotropy();
-      tx.needsUpdate=true;
-      resolve(tx);
-    }).catch(()=>resolve(null));
-  });
-}
-async function _NC_buildTemplate(arrayBuffer){
-  const {json,bin}=_NC_parseGLB(arrayBuffer);
-  const texCache={};
-  async function tex(i,srgb){
-    if(i===undefined||i===null) return null;
-    const key=i+'_'+(srgb?'s':'l');
-    if(!texCache[key]) texCache[key]=await _NC_loadTexture(json,bin,json.textures[i].source,srgb);
-    return texCache[key];
-  }
-  const materials=[];
-  for(const m of json.materials){
-    const pbr=m.pbrMetallicRoughness||{};
-    const baseColorTex = pbr.baseColorTexture ? await tex(pbr.baseColorTexture.index,true) : null;
-    const mrTex = pbr.metallicRoughnessTexture ? await tex(pbr.metallicRoughnessTexture.index,false) : null;
-    const normalTex = m.normalTexture ? await tex(m.normalTexture.index,false) : null;
-    const emissiveTex = m.emissiveTexture ? await tex(m.emissiveTexture.index,true) : null;
-    const ef = m.emissiveFactor || [0,0,0];
-    materials.push(new THREE.MeshStandardMaterial({
-      map:baseColorTex, roughnessMap:mrTex, metalnessMap:mrTex,
-      roughness: mrTex?1.0:(pbr.roughnessFactor!==undefined?pbr.roughnessFactor:0.6),
-      metalness: mrTex?1.0:(pbr.metallicFactor!==undefined?pbr.metallicFactor:0.2),
-      normalMap:normalTex, emissiveMap:emissiveTex,
-      emissive: emissiveTex ? new THREE.Color(ef[0],ef[1],ef[2]) : new THREE.Color(0,0,0),
-      emissiveIntensity: emissiveTex?1.0:0,
-      side: m.doubleSided?THREE.DoubleSide:THREE.FrontSide,
-      envMapIntensity: 1.1
-    }));
-  }
-  const group=new THREE.Group();
-  for(const node of json.nodes){
-    if(node.mesh===undefined) continue;
-    const meshDef=json.meshes[node.mesh];
-    for(const prim of meshDef.primitives){
-      const geo=new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.attributes.POSITION),3));
-      if(prim.attributes.NORMAL!==undefined)
-        geo.setAttribute('normal', new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.attributes.NORMAL),3));
-      if(prim.attributes.TEXCOORD_0!==undefined)
-        geo.setAttribute('uv', new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.attributes.TEXCOORD_0),2));
-      if(prim.indices!==undefined)
-        geo.setIndex(new THREE.BufferAttribute(_NC_accessorArray(json,bin,prim.indices),1));
-      const mat = prim.material!==undefined ? materials[prim.material] : new THREE.MeshStandardMaterial();
-      const m3=new THREE.Mesh(geo,mat);
-      if(node.translation) m3.position.fromArray(node.translation);
-      if(node.rotation) m3.quaternion.fromArray(node.rotation);
-      if(node.scale) m3.scale.fromArray(node.scale);
-      group.add(m3);
-    }
-  }
-  // Normalise so the ship occupies roughly the same footprint as a unit
-  // sphere -- the raw model is tens of units long, but every call site
-  // below scales node meshes as if starting from a unit-radius sphere
-  // (mesh.scale.setScalar(r) with r roughly 0.3-0.8).
-  group.updateMatrixWorld(true);
-  const box=new THREE.Box3().setFromObject(group);
-  const size=box.getSize(new THREE.Vector3());
-  const center=box.getCenter(new THREE.Vector3());
-  const maxDim=Math.max(size.x,size.y,size.z) || 1;
-  const wrapper=new THREE.Group();
-  group.position.sub(center);
-  group.scale.setScalar(2/maxDim);   // longest axis -> 2 units, matching a unit sphere's diameter
-  wrapper.add(group);
-  return wrapper;
-}
-function _NC_startLoad(){
-  if(_NC_LOAD_STARTED) return;
-  _NC_LOAD_STARTED = true;
-  fetch('/api/shipmodel').then(r=>{
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    return r.arrayBuffer();
-  }).then(buf=>_NC_buildTemplate(buf)).then(tpl=>{
-    _NC_TEMPLATE = tpl;
-  }).catch(err=>{
-    console.warn('[3d] ship model unavailable, staying on sphere nodes:', err);
-  });
-}
-_NC_startLoad();
-
 // ── Flag sphere system ──────────────────────────────────────────────────────
 const _texLoader = new THREE.TextureLoader();
 const _texCache  = {};          // cc → THREE.Texture
 const _nodeMeshes = [];         // active meshes this frame
 const _meshPool   = [];         // reusable sphere mesh pool
-const _craftPool  = [];         // reusable ship-model group pool (see _NC_ above)
 const _fallbackMat = new THREE.MeshStandardMaterial({roughness:0.35,metalness:0.6});
 
 function _getFlagTex(cc){
@@ -29386,23 +29166,7 @@ function _getFlagTex(cc){
   return t;
 }
 
-function _getNodeMesh(r, cc, col, isBlocked, isLocal, useCraft){
-  // Real ship model, up to _NC_MAX_SHIP_NODES active nodes -- see the _NC_
-  // block above for why this doesn't get a flag texture or a colour tint
-  // the way the sphere below does.
-  if(useCraft){
-    let obj = _craftPool.pop();
-    if(!obj){
-      obj = _NC_TEMPLATE.clone();
-      obj.userData._kind = 'craft';
-      scene.add(obj);
-    }
-    obj.scale.setScalar(r);
-    obj.visible = true;
-    _nodeMeshes.push(obj);
-    return obj;
-  }
-
+function _getNodeMesh(r, cc, col, isBlocked, isLocal){
   let mesh = _meshPool.pop();
 
   if(!mesh){
@@ -29410,7 +29174,6 @@ function _getNodeMesh(r, cc, col, isBlocked, isLocal, useCraft){
     const geo = new THREE.SphereGeometry(1, 24, 16);
     const mat = new THREE.MeshPhongMaterial({shininess:180});
     mesh = new THREE.Mesh(geo, mat);
-    mesh.userData._kind = 'sphere';
 
     // No glow sub-mesh — emissive channel handles self-illumination
 
@@ -29454,8 +29217,7 @@ function _returnNodeMeshes(){
   while(_nodeMeshes.length){
     const m = _nodeMeshes.pop();
     m.visible = false;
-    if(m.userData && m.userData._kind === 'craft') _craftPool.push(m);
-    else _meshPool.push(m);
+    _meshPool.push(m);
   }
 }
 
@@ -30126,24 +29888,6 @@ function rebuildGeometry(nodes,flows){
 
   const N=Math.min(nodes.length,MAX_NODES);
   let ringCount=0;
-  // Node meshes are ALWAYS the plain flag sphere -- never the real ship
-  // model. Two earlier attempts at substituting the real ship model onto
-  // node positions (first an all-or-nothing whole-view node-count gate,
-  // then a top-N-by-traffic ranking) both got the same real complaint once
-  // Trevor actually saw them live: the ship replacing a node hid the
-  // flag/colour "orb" identity he relies on to eyeball a host at a glance,
-  // and losing it was worst for exactly the busiest/most-labelled hosts he
-  // cares about most. Per his explicit call, the real ship model is no
-  // longer a node substitute at all -- see the ambient real-ship flyby
-  // below (search _mkFlyby, spawned via _shipSpawn('flyby',...) from
-  // _shipsScanHosts) for where it actually lives now: a transient
-  // background pass, same fly-in/fly-out motion the old low-poly cruiser
-  // had, never pinned to a node's position. useCraft
-  // stays as a parameter on _getNodeMesh (and the pooling/raycast-recursion
-  // work stays, since it's inert but harmless) only so this isn't a bigger,
-  // riskier rip-out than necessary -- it is simply never passed true from
-  // here any more.
-  const useCraft=false;
 
   for(let i=0;i<N;i++){
     const nd=nodes[i];
@@ -30151,16 +29895,9 @@ function rebuildGeometry(nodes,flows){
     const sx=nd.x*spreadFactor, sy=nd.y*spreadFactor, sz=nd.z*spreadFactor;
     const col=nodeColor(nd);
 
-    const mesh=_getNodeMesh(r, nd.cc, col, nd.blocked, nd.local, useCraft);
+    const mesh=_getNodeMesh(r, nd.cc, col, nd.blocked, nd.local);
     mesh.position.set(sx,sy,sz);
     mesh.userData.nodeIdx=i;
-    if(useCraft){
-      // The ship model is a Group of many child meshes -- raycasting hits
-      // whichever child mesh the ray actually touches (see the two
-      // intersectObjects(_rayTargets, true) call sites below), so every
-      // descendant needs its own copy of nodeIdx, not just the group root.
-      mesh.traverse(o=>{ o.userData.nodeIdx=i; });
-    }
     _rayTargets.push(mesh);
 
     if(nd.blocked){
@@ -30820,12 +30557,6 @@ function _realBlockEvents(d){
                          label:e.city||e.ip,real:true});
       _attackKills++;
       _sonarPing(false);
-      // A rule was actually written: warp a raider in and destroy it.
-      try{
-        _shipSpawn('raider', e.ip);
-        const _s=_ships[_ships.length-1];
-        if(_s && _s.kind==='raider') setTimeout(function(){ _shipKill(_s); }, 1400);
-      }catch(err){}
     });
     if(_seenBlockEvents.size>500)_seenBlockEvents=new Set();
   }catch(err){}
@@ -32328,185 +32059,6 @@ function sampleCurve(pts,u){
   return{x:pts[i].x+(pts[i+1].x-pts[i].x)*tf,y:pts[i].y+(pts[i+1].y-pts[i].y)*tf,z:pts[i].z+(pts[i+1].z-pts[i].z)*tf};
 }
 
-// ── Data-driven traffic (original designs, no licensed IP) ────────────────
-// A raider warps in and is destroyed when the firewall actually writes a
-// block rule — the same event stream that detonates the radar. There used
-// to also be a low-poly patrol cruiser that made a slow pass whenever a host
-// we'd never seen before turned up; that got pulled earlier this session
-// (see history) because on a busy real capture it read as constant
-// background clutter of leftover-looking ships right next to the new real
-// ship-model node meshes -- a genuinely separate, working-as-designed
-// feature that just looked broken by association.
-//
-// It's back now as a *flyby*, not a node substitute: same host-discovery
-// trigger, same fly-in-from-one-side/drift-across/exit-off-screen motion the
-// old cruiser had (that motion code below was never removed -- only the
-// low-poly mesh and its trigger were), but built from the real GLB ship
-// template (_NC_TEMPLATE, see above) instead of a placeholder box-and-sphere
-// mesh. If the template hasn't finished loading yet, the spawn is just
-// skipped for that host -- no placeholder fallback, no queueing it for
-// later. See _mkFlyby()/_shipsScanHosts() below.
-let _ships=[], _shipLast=0, _shipHosts=new Set(), _shipPrimed=false;
-const SHIP_MAX=4;
-
-function _mkRaider(){
-  const T=THREE, g=new T.Group();
-  const body=new T.MeshPhongMaterial({color:0x4a1414,emissive:0x2a0604,
-                                      emissiveIntensity:1.1,shininess:30});
-  const core=new T.Mesh(new T.OctahedronGeometry(0.42,0),body);
-  core.scale.set(1.7,0.55,0.9); g.add(core);
-  for(const sgn of [-1,1]){
-    const w=new T.Mesh(new T.BoxGeometry(0.5,0.05,0.55),body);
-    w.position.set(-0.1,0,sgn*0.42); w.rotation.x=sgn*0.35; g.add(w);
-  }
-  const eye=new T.Mesh(new T.SphereGeometry(0.13,10,8),
-    new T.MeshBasicMaterial({color:0xff3b1f}));
-  eye.position.set(0.62,0,0); g.add(eye);
-  const gl=new T.Mesh(new T.SphereGeometry(0.34,10,8),
-    new T.MeshBasicMaterial({color:0xff3b1f,transparent:true,opacity:0.22,
-                             depthWrite:false}));
-  gl.position.set(0.62,0,0); g.add(gl);
-  g.userData.kind='raider';
-  return g;
-}
-
-// A background pass using the real ship model, for the "new host discovered"
-// ambient flyby. Unlike the per-node craft path in _getNodeMesh (which pools
-// clones because it swaps them in and out every rebuildGeometry tick), each
-// flyby is a one-shot: clone, fly across, get removed by _shipsUpdate's own
-// off-screen check below -- same lifecycle a raider has, just no explosion.
-// Returns null (never throws) if the template isn't loaded yet, so callers
-// can skip the spawn cleanly instead of falling back to a placeholder mesh.
-function _mkFlyby(){
-  if(!_NC_TEMPLATE) return null;
-  let obj;
-  try{ obj = _NC_TEMPLATE.clone(); }catch(e){ return null; }
-  obj.userData.kind='flyby';
-  return obj;
-}
-
-function _shipSpawn(kind,label){
-  if(_ships.length>=SHIP_MAX) return;
-  // Check template availability BEFORE the throttle below consumes its
-  // window -- otherwise a flyby attempt that finds _NC_TEMPLATE still
-  // loading would eat the 900ms cooldown for nothing and delay the very
-  // next (possibly real, raider) spawn.
-  if(kind!=='raider' && !_NC_TEMPLATE) return;
-  const now=performance.now();
-  if(now-_shipLast<900) return;       // never a swarm
-  _shipLast=now;
-  let obj;
-  try{ obj = (kind==='raider') ? _mkRaider() : _mkFlyby(); }catch(e){ return; }
-  if(!obj) return;
-  // Cross the view well behind the network, so it never obscures the data.
-  const side = Math.random()<0.5 ? -1 : 1;
-  const y = 6 + Math.random()*9;
-  const z = -26 - Math.random()*16;
-  const dist = 46;
-  obj.position.set(-side*dist, y, z);
-  obj.rotation.y = side>0 ? 0 : Math.PI;
-  obj.scale.setScalar(kind==='raider' ? 1.25 : 1.0);
-  scene.add(obj);
-  const sh={obj:obj, kind:kind, vx: side*(kind==='raider'?3.4:2.1),
-            born:now, life:0, dying:0, label:label||'', sparks:null};
-  if(kind==='raider'){ obj.scale.setScalar(0.01); }   // warp-in
-  _ships.push(sh);
-}
-
-// Triggers the ambient flyby: called once per poll() tick with the live
-// topology payload. The first tick just primes _shipHosts with every host
-// already in the capture -- otherwise resuming on a busy real network would
-// spawn a whole flock of "new" hosts in the first second. After that, only a
-// host this session has genuinely never seen before queues a flyby.
-function _shipsScanHosts(d){
-  const hosts=(d.nodes||[]).map(n=>n.ip||n.id).filter(Boolean);
-  if(!_shipPrimed){
-    hosts.forEach(h=>_shipHosts.add(h));
-    _shipPrimed=true;
-    return;
-  }
-  for(const h of hosts){
-    if(_shipHosts.has(h)) continue;
-    _shipHosts.add(h);
-    _shipSpawn('flyby', h);
-    break;   // _shipSpawn's own 900ms throttle + SHIP_MAX already cap the
-             // rate; this just avoids burning the whole loop on a tick that
-             // discovers a dozen hosts at once (e.g. right after a scan).
-  }
-}
-
-function _shipKill(sh){
-  if(sh.dying) return;
-  sh.dying=1; sh.dieT=0;      // measured in frame deltas, not wall clock, so the
-                              // wreck always clears regardless of frame rate
-  try{
-    const T=THREE, geo=new T.BufferGeometry(), N=90;
-    const pos=new Float32Array(N*3), vel=[];
-    for(let i=0;i<N;i++){
-      pos[i*3]=sh.obj.position.x; pos[i*3+1]=sh.obj.position.y; pos[i*3+2]=sh.obj.position.z;
-      const th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1), sp=2+Math.random()*7;
-      vel.push([Math.sin(ph)*Math.cos(th)*sp, Math.sin(ph)*Math.sin(th)*sp, Math.cos(ph)*sp]);
-    }
-    geo.setAttribute('position', new T.BufferAttribute(pos,3));
-    // Round mask, else each debris particle is a hard square.
-    let _dbTex=null;
-    try{
-      const cv=document.createElement('canvas'); cv.width=cv.height=32;
-      const c2=cv.getContext('2d');
-      const gg=c2.createRadialGradient(16,16,0,16,16,16);
-      gg.addColorStop(0,'rgba(255,255,255,1)');
-      gg.addColorStop(0.45,'rgba(255,255,255,0.5)');
-      gg.addColorStop(1,'rgba(255,255,255,0)');
-      c2.fillStyle=gg; c2.fillRect(0,0,32,32);
-      _dbTex=new T.CanvasTexture(cv);
-    }catch(e){}
-    const pts=new T.Points(geo, new T.PointsMaterial({color:0xffb066,size:0.30,
-      transparent:true, opacity:1, depthWrite:false, blending:T.AdditiveBlending,
-      map:_dbTex||undefined, alphaMap:_dbTex||undefined, alphaTest:0.02}));
-    scene.add(pts); sh.sparks={pts:pts, vel:vel};
-  }catch(e){}
-}
-
-function _shipsUpdate(dt){
-  for(let i=_ships.length-1;i>=0;i--){
-    const sh=_ships[i];
-    sh.life+=dt;
-    if(sh.dying){
-      sh.dieT=(sh.dieT||0)+dt;
-      const t=sh.dieT/1.2;                       // 1.2 s of debris
-      if(sh.sparks){
-        const p=sh.sparks.pts.geometry.attributes.position;
-        for(let k=0;k<sh.sparks.vel.length;k++){
-          p.array[k*3]+=sh.sparks.vel[k][0]*dt;
-          p.array[k*3+1]+=sh.sparks.vel[k][1]*dt-2.2*dt*t;
-          p.array[k*3+2]+=sh.sparks.vel[k][2]*dt;
-        }
-        p.needsUpdate=true;
-        sh.sparks.pts.material.opacity=Math.max(0,1-t);
-      }
-      sh.obj.scale.multiplyScalar(0.88);
-      if(t>=1){
-        scene.remove(sh.obj);
-        if(sh.sparks) scene.remove(sh.sparks.pts);
-        _ships.splice(i,1);
-      }
-      continue;
-    }
-    // warp-in for raiders (~0.35 s regardless of frame rate)
-    if(sh.kind==='raider' && sh.obj.scale.x<1.25){
-      sh.obj.scale.multiplyScalar(1+3.2*dt*12);
-      if(sh.obj.scale.x>1.25) sh.obj.scale.setScalar(1.25);
-    }
-    sh.obj.position.x += sh.vx*dt;
-    sh.obj.position.y += Math.sin(sh.life*0.8)*0.004;
-    sh.obj.rotation.z  = Math.sin(sh.life*0.6)*0.05;
-    if(Math.abs(sh.obj.position.x)>52){
-      scene.remove(sh.obj);
-      _ships.splice(i,1);
-    }
-  }
-}
-
 function animate(){
   requestAnimationFrame(animate);
   t+=0.016;
@@ -32578,8 +32130,6 @@ function animate(){
     if(s.material.depthTest!==WORLD_ON)s.material.depthTest=WORLD_ON;
   });
 
-  // ── Data-driven ships ───────────────────────────────────────────────────
-  try{ _shipsUpdate(0.016); }catch(e){}
   // ── World view: slow spin until the user clicks ──────────────────────────
   if(WORLD_ON&&WORLD_SPIN){ rotY += 0.0016; }   // ~1 revolution / 65s
   if(WORLD_ON&&worldMesh&&worldMesh.material.uniforms){
@@ -32674,7 +32224,6 @@ async function poll(){
            if(d.attack_sim!==_attackOn){_attackOn=d.attack_sim;_attackPaintBtn();}
            if(d.attack_sim!==ATK_ON){ATK_ON=d.attack_sim;paintAtkMain();} } }catch(ae){}
     try{ _realBlockEvents(d); }catch(be){}
-    try{ _shipsScanHosts(d); }catch(se){}
     try{ if(_talkersOpen) _buildTalkers(); }catch(tbe){ console.warn('talkers rebuild error:',tbe); }
     // VPN banner + wall pulse
     _vpnActive = !!d.vpn_active;
@@ -35972,8 +35521,6 @@ ol.steps li{margin:6px 0}
                         server_self._serve_topology3d(self)
                     elif path.startswith('/vendor/'):
                         server_self._serve_vendor(self, path[8:])
-                    elif path == '/api/shipmodel':
-                        server_self._serve_shipmodel(self)
                     elif path.startswith('/flag/'):
                         server_self._serve_flag(self, path[6:])
                     elif path == '/api/whois':

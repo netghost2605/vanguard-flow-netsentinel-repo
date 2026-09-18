@@ -89,8 +89,8 @@
       "status": 200
     },
     "/3d": {
-      "bytes": 220432,
-      "sha256": "e6bc7050e69b7e01160193b8fc2cc8bce3b010bee2c60dedacf0ae49c8971e26",
+      "bytes": 199465,
+      "sha256": "093d3298f384760f11cb821b626330061ae0399af4d5c263f9c19150e9d3b61c",
       "status": 200
     },
     "/agents": {
