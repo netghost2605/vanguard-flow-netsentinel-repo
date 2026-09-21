@@ -79,8 +79,27 @@ def load_module():
 
 
 class _FakeMonitor:
-    """Minimal stand-in so the web server can start without a live capture."""
-    config = {"web_bind": "127.0.0.1"}
+    """Minimal stand-in so the web server can start without a live capture.
+
+    config mirrors the shape of SpeedTestMonitor._load_config()'s real
+    defaults (trimmed to what _ThreeDServer and the routes it serves
+    actually read), not just the one key (web_bind) it happened to need
+    when this was first written. If _ThreeDServer ever grows a new config
+    lookup that isn't a .get(key, default) -- or is, but this fake doesn't
+    carry that key either -- that should show up here as a loud, obvious
+    failure, which is the whole point of a regression harness; a bare
+    {"web_bind": ...} would instead have silently handed back None.
+    """
+    def __init__(self, **overrides):
+        self.config = {
+            "web_bind":         "127.0.0.1",
+            "web_port":         8765,
+            "theme":            "Ocean",
+            "custom":           None,
+            "advertised_down":  0,
+            "advertised_up":    0,
+        }
+        self.config.update(overrides)
     data = {"timestamps": [], "download": [], "upload": [], "ping": []}
     _db = None
 
@@ -519,8 +538,12 @@ def main():
     print("\nserved surface")
     mod = load_module()
     port = free_port()
-    srv = mod._ThreeDServer(_FakeMonitor())
-    srv._port = port
+    # Drive the port through the same config path a real monitor would use
+    # (_ThreeDServer.__init__ reads config['web_port']) instead of poking the
+    # private _port attribute after construction -- that bypassed the
+    # constructor's own port-selection logic entirely, so this harness was
+    # never actually exercising it.
+    srv = mod._ThreeDServer(_FakeMonitor(web_port=port))
     threading.Thread(target=srv.serve, daemon=True).start()
     time.sleep(2.5)
 

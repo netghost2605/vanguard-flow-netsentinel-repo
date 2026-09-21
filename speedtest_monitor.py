@@ -616,19 +616,6 @@ def _nm_open_path(target):
     return False
 
 
-# ── Speed-test engine adapter ────────────────────────────────────────────────
-# Ookla's speedtest CLI is proprietary and its licence restricts redistribution,
-# which blocks commercial packaging. These are the drop-in open alternatives:
-#
-#   librespeed-cli   LGPL   github.com/librespeed/speedtest-cli   (Mbps in JSON)
-#   speedtest-cli    Apache github.com/sivel/speedtest-cli        (bits/sec)
-#   ookla speedtest  proprietary                                  (bytes/sec)
-#
-# All three are supported and normalised to one result shape, so the app works
-# with whichever is installed and nothing proprietary has to be shipped.
-_NM_ST_ENGINES = ('librespeed', 'sivel', 'ookla')
-
-
 def _nm_st_find():
     """Locate any supported speed-test CLI. Returns (path, engine) or ('','')."""
     for name, engine in (('librespeed-cli', 'librespeed'),
@@ -750,18 +737,6 @@ def _nm_st_measure(exe, engine='', timeout=180):
     if not out['ok'] and not out['error']:
         out['error'] = 'the test returned a zero result'
     return out
-
-
-# ── Firewall adapter ─────────────────────────────────────────────────────────
-# Every firewall operation in the app reduces to six things: add a block rule,
-# delete one, test whether one exists, list ours, read the logging state, and
-# turn logging on. Windows does this through netsh; Linux through nftables.
-# Callers use these helpers and never touch either directly.
-#
-# On Linux we keep everything inside our OWN table (inet nm_sentinel) so the
-# user's existing ruleset is never modified, and we tag each rule with a
-# comment carrying the rule name, which gives us netsh's name-based semantics.
-_NM_FW_TABLE = 'nm_sentinel'
 
 
 def _nm_fw_backend():
@@ -1132,11 +1107,6 @@ def _nm_admin_debug():
                 except Exception:
                     pass
     return out
-
-
-# winget returns these when the package is already present. They are success
-# for our purposes, not failure.
-_NM_WINGET_OK = {0, 2316632107, 2316632161, -1978335189, -1978335135}
 
 
 def _nm_docker_exe():
@@ -1698,17 +1668,6 @@ def _nm_pihole_deploy(log, web_port=8081, password='', install_missing=True):
     return True
 
 
-# ── Platform shim ────────────────────────────────────────────────────────────
-import os          # noqa: E402  (this block sits above the main import section)
-import sys         # noqa: E402
-# The app was written Windows-first. These helpers isolate the handful of
-# genuinely platform-specific calls so the rest of the code can stay unchanged.
-# Only ~0.7% of the file touches the platform at all, and most of that is here.
-_NM_IS_WIN = (os.name == 'nt')
-_NM_IS_MAC = (sys.platform == 'darwin')
-_NM_IS_LINUX = (not _NM_IS_WIN and not _NM_IS_MAC)
-
-
 def _nm_flags():
     """subprocess creationflags that hide a console window on Windows.
 
@@ -1780,15 +1739,29 @@ def _exc_debug(context: str = ''):
         msg = (f'{context}: {traceback.format_exc().strip()}'
                if context else traceback.format_exc().strip())
         log.debug(msg)
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.animation import FuncAnimation
-from matplotlib.dates import DateFormatter
-import matplotlib.dates as mdates
-import matplotlib.widgets as mwidgets
-import matplotlib.gridspec as gridspec
-from matplotlib.colors import to_rgba
+try:
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from matplotlib.animation import FuncAnimation
+    from matplotlib.dates import DateFormatter
+    import matplotlib.dates as mdates
+    import matplotlib.widgets as mwidgets
+    import matplotlib.gridspec as gridspec
+    from matplotlib.colors import to_rgba
+except ImportError as _req_imp_err:
+    # Unlike mplcursors just below (a nice-to-have with a working None
+    # fallback everywhere it's used), numpy and matplotlib are load-bearing:
+    # charts, heatmaps, and report generation import them directly with no
+    # fallback path. Left unguarded, a missing install just means the app
+    # dies at startup with a raw ImportError pointing at some
+    # "import matplotlib.pyplot" deep in this file, instead of a message
+    # that says what to actually do about it.
+    print(f"Missing required package: {_req_imp_err.name or _req_imp_err}\n"
+          f"Network Monitor needs numpy and matplotlib to run. Install them with:\n"
+          f"    pip install numpy matplotlib\n"
+          f"then start the app again.", file=sys.stderr)
+    sys.exit(1)
 try:
     import mplcursors
 except ImportError:
@@ -2740,7 +2713,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-d35f0af4'
+_NM_BUILD_ID = 'b-63de2be2'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -4223,7 +4196,7 @@ def generate_report(monitor, report_types, period_hours, custom_start=None, cust
         try:
             if ts_from <= datetime.fromisoformat(t) <= ts_to:
                 dns_ii.append(i)
-        except Exception: _exc('chrome_bar')
+        except Exception: _exc('generate_report.dns_period_filter')
     dns_vals = [dns_val_all[i] for i in dns_ii]
     dns_ts   = [dns_ts_all[i]  for i in dns_ii]
 
@@ -4350,7 +4323,7 @@ mkChart('ping-chart','line',{lbl_json},[
                 for host, ms in host_dict.items():
                     if ms is not None:
                         host_avgs.setdefault(host, []).append(ms)
-            except Exception: _exc('chrome_bar')
+            except Exception: _exc('generate_report.dns_per_host')
 
         host_rows = ''
         for host, vals in sorted(host_avgs.items()):
@@ -4842,7 +4815,7 @@ def _do_generate(monitor, report_types, period_hours):
         _kf = _P.home() / '.nm_anthropic_key'
         if _kf.exists(): saved_key = _kf.read_text().strip()
     except Exception:
-        _exc('_fw_row')
+        _exc('_do_generate')
     return generate_report(monitor, report_types, period_hours, saved_key=saved_key)
 
 
@@ -8420,7 +8393,6 @@ class SpeedTestMonitor:
             return float(v) if v else None
         return None
 
-    @staticmethod
     # ── Licence manager ─────────────────────────────────────────────────────────
     def _open_license_manager(self, parent=None):
         """Generate and review floating, perpetual client licence keys."""
@@ -22144,10 +22116,11 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
                         "antivirus/EDR deleting it post-install, not just "
                         "blocking it once). Add an explicit exclusion for "
                         "the Ollama install folder in your antivirus BEFORE "
-                        "reinstalling again, then reinstall -- checking "
-                        "quarantine history after the fact won't help if "
-                        "it's being silently deleted rather than quarantined "
-                        "where you can see it.")
+                        "reinstalling again, then get a clean copy from "
+                        "https://ollama.com/download -- checking quarantine "
+                        "history after the fact won't help if it's being "
+                        "silently deleted rather than quarantined where you "
+                        "can see it.")
                 elif found_paths and any_present:
                     verdict = (
                         "The file actually exists on disk right now, at a "

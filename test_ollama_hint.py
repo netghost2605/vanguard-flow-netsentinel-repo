@@ -22,7 +22,7 @@ import sys
 import tempfile
 import threading
 
-TARGET = "/tmp/work/extracted/speedtest_monitor.py"
+TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "speedtest_monitor.py")
 
 spec = importlib.util.spec_from_file_location("stm_under_test", TARGET)
 mod = importlib.util.module_from_spec(spec)

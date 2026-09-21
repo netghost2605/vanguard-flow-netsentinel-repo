@@ -62,6 +62,17 @@ _lock        = threading.RLock()
 _start_time  = time.time()
 _running_test = False
 _running_dns  = False
+# _running_test/_running_dns used to be claimed with a plain
+# "if _running_x: return" followed by a separate "_running_x = True" --
+# two statements, not one atomic operation. A POST /run request landing at
+# the same instant as the scheduler's own tick (see _schedule_loop) could
+# see the flag as False in both places before either set it, and both then
+# launch a speedtest.exe/DNS-check pass at once. This is the same race
+# speedtest_monitor.py already closes with its own _try_start_test() (see
+# stress_test_lock.py) -- _state_lock below makes the check-and-claim
+# atomic here too, at every entry point (the scheduler loop and both POST
+# handlers) instead of just one of them.
+_state_lock  = threading.Lock()
 
 DNS_HOSTS = [
     'google.com', 'cloudflare.com', 'microsoft.com',
@@ -279,11 +290,36 @@ def run_dns_check() -> dict:
 #  Background workers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _worker_speedtest(cfg):
+def _try_start_test():
+    """Atomically check-and-claim the speed-test slot. Returns True if this
+    caller may proceed (having claimed _running_test), False if a test is
+    already in flight."""
     global _running_test
-    if _running_test:
+    with _state_lock:
+        if _running_test:
+            return False
+        _running_test = True
+        return True
+
+
+def _try_start_dns():
+    """Same as _try_start_test(), for the DNS-check slot."""
+    global _running_dns
+    with _state_lock:
+        if _running_dns:
+            return False
+        _running_dns = True
+        return True
+
+
+def _worker_speedtest(cfg, claim=True):
+    """Run one speed test. `claim` is False when the caller (do_POST) has
+    already atomically claimed _running_test via _try_start_test() -- the
+    scheduler loop below calls this with the default True instead, since it
+    has no earlier point at which to claim."""
+    global _running_test
+    if claim and not _try_start_test():
         return
-    _running_test = True
     ts = datetime.now().strftime('%H:%M:%S')
     print(f'[{ts}] Running speed test…', flush=True)
 
@@ -310,14 +346,15 @@ def _worker_speedtest(cfg):
               f'UL {result["upload"]} Mbps  '
               f'Ping {result["ping"]} ms', flush=True)
     finally:
-        _running_test = False
+        with _state_lock:
+            _running_test = False
 
 
-def _worker_dns():
+def _worker_dns(claim=True):
+    """Same as _worker_speedtest(), for the DNS check."""
     global _running_dns
-    if _running_dns:
+    if claim and not _try_start_dns():
         return
-    _running_dns = True
     try:
         result = run_dns_check()
         if result['error']:
@@ -337,7 +374,8 @@ def _worker_dns():
         print(f'  DNS ✓ {avg:.1f} ms  '
               f'({result["n_hosts"]}/{len(DNS_HOSTS)} hosts)', flush=True)
     finally:
-        _running_dns = False
+        with _state_lock:
+            _running_dns = False
 
 
 def _schedule_loop(cfg):
@@ -464,19 +502,25 @@ def _make_handler(cfg):
                 self._unauth(); return
 
             if path == '/run':
-                if _running_test:
+                # Claim the slot here, atomically, rather than checking
+                # _running_test and launching the thread as two separate
+                # steps -- two concurrent POST /run requests could otherwise
+                # both see it False and both get a 202. claim=False below
+                # tells the worker this call already holds the claim.
+                if not _try_start_test():
                     self._json(409, {'error': 'test already running'})
                     return
-                threading.Thread(target=_worker_speedtest, args=(cfg,),
+                threading.Thread(target=_worker_speedtest, args=(cfg, False),
                                  daemon=True).start()
                 self._json(202, {'queued': True, 'message': 'speed test started'})
                 return
 
             if path == '/dns':
-                if _running_dns:
+                if not _try_start_dns():
                     self._json(409, {'error': 'DNS check already running'})
                     return
-                threading.Thread(target=_worker_dns, daemon=True).start()
+                threading.Thread(target=_worker_dns, args=(False,),
+                                 daemon=True).start()
                 self._json(202, {'queued': True, 'message': 'DNS check started'})
                 return
 
