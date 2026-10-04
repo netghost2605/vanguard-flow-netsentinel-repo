@@ -2713,7 +2713,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-63de2be2'
+_NM_BUILD_ID = 'b-65001f47'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -38572,6 +38572,26 @@ if __name__ == "__main__":
     # https://pyinstaller.org/en/stable/common-issues-and-pitfalls.html#multi-processing
     import multiprocessing
     multiprocessing.freeze_support()
+
+    # Clean up a capture file left behind if the app didn't get a chance to
+    # shut down cleanly last time (crash, Task Manager kill, power loss).
+    # _nm_shutdown_all already deletes this on every normal close (see its
+    # step 5b), but that only runs when the app gets to run anything at all
+    # on the way out -- an abnormal exit skips it entirely, and until now the
+    # file just sat in temp forever. Doing the same delete here, before
+    # anything in this launch could start a new capture, means a leftover
+    # never survives past the next launch either way. If it's still locked,
+    # that's a second instance of the app genuinely using it right now --
+    # unlink() fails on Windows against an open file, so this can't step on
+    # a real capture in progress; just leave it for that instance to clean up.
+    try:
+        import tempfile
+        _stale_pcap = Path(tempfile.gettempdir()) / 'nm_wireshark.pcap'
+        if _stale_pcap.exists():
+            _stale_pcap.unlink()
+            log.info('[startup] deleted a capture file left from a previous run')
+    except Exception:
+        _exc_debug('startup pcap cleanup')
 
     monitor = SpeedTestMonitor()
     _nm_set_debug_logging(bool(monitor.config.get('debug_logging')))
