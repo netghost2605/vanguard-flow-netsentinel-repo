@@ -2713,7 +2713,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-65001f47'
+_NM_BUILD_ID = 'b-2d84f0a6'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -23226,6 +23226,258 @@ def _nm_list_blocked():
     return out
 
 
+# ── 3D world view: hi-res Earth textures + this PC's real location ────────
+# The embedded globe textures are only 2048/1440 px wide (a 2048 px map is
+# ~19 km per pixel at the equator on a 40 000 km globe, and it is stretched
+# over a sphere the user zooms into). On first use the app fetches NASA's
+# public-domain Blue Marble / Black Marble maps once, downsizes them to
+# 8192x4096 and caches them in ~/.nm_vendor. Until then (or if the network is
+# unavailable) the embedded maps keep working exactly as before.
+_NM_EARTH_SRC = {
+    'day':   {'file': 'earth_day_hi.jpg',
+              'big':   'https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73909/'
+                       'world.topo.bathy.200412.3x21600x10800.jpg',
+              'small': 'https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73909/'
+                       'world.topo.bathy.200412.3x5400x2700.jpg'},
+    'night': {'file': 'earth_night_hi.jpg',
+              'big':   'https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144898/'
+                       'BlackMarble_2016_3km.jpg',
+              'small': 'https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144898/'
+                       'BlackMarble_2016_01deg.jpg'},
+}
+_NM_EARTH_W, _NM_EARTH_H = 8192, 4096
+_NM_EARTH = {'busy': False, 'last': 0.0, 'err': '', 'ver': {}, 'dims': {}}
+_NM_EARTH_LOCK = threading.Lock()
+
+
+def _nm_earth_path(kind):
+    return Path.home() / '.nm_vendor' / _NM_EARTH_SRC[kind]['file']
+
+
+def _nm_earth_ready(kind):
+    try:
+        return _nm_earth_path(kind).stat().st_size > 100_000
+    except Exception:
+        return False
+
+
+def _nm_earth_marker(kind):
+    p = _nm_earth_path(kind)
+    return p.with_name(p.name + '.lowres')
+
+
+def _nm_earth_lowres(kind):
+    """True if the cached map is only the medium-size fallback (the big NASA
+    original failed), so a later attempt should try for the 8192 version."""
+    try:
+        if _nm_earth_marker(kind).exists():
+            return True
+        p = _nm_earth_path(kind)
+        if not p.exists():
+            return False
+        key = (str(p), p.stat().st_mtime)
+        hit = _NM_EARTH['dims'].get(key)
+        if hit is None:                      # maps cached before markers existed
+            try:
+                from PIL import Image
+                with Image.open(p) as im:
+                    hit = im.width < _NM_EARTH_W - 200
+            except Exception:
+                hit = False
+            _NM_EARTH['dims'] = {key: hit}   # one entry per file is plenty
+        return hit
+    except Exception:
+        return False
+
+
+def _nm_earth_status():
+    out = {'day': _nm_earth_ready('day'), 'night': _nm_earth_ready('night'),
+           'busy': bool(_NM_EARTH['busy']), 'err': _NM_EARTH['err'],
+           'day_lowres': _nm_earth_lowres('day'), 'night_lowres': _nm_earth_lowres('night')}
+    for k in ('day', 'night'):
+        try:
+            out[k + '_v'] = int(_nm_earth_path(k).stat().st_mtime)
+        except Exception:
+            out[k + '_v'] = 0
+    return out
+
+
+def _nm_earth_download(url, dest, cap=80 * 1024 * 1024):
+    """Stream url -> dest (atomic via .part). Returns True if a JPEG landed."""
+    part = dest.with_name(dest.name + '.part')
+    req = urllib.request.Request(url, headers={'User-Agent': 'NetworkMonitor/1.0'})
+    total = 0
+    with urllib.request.urlopen(req, timeout=30) as r, open(part, 'wb') as f:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > cap:
+                raise IOError('earth texture larger than %d MB, aborting' % (cap >> 20))
+            f.write(chunk)
+    with open(part, 'rb') as f:
+        magic = f.read(3)
+    if magic != b'\xff\xd8\xff' or total < 100_000:
+        part.unlink(missing_ok=True)
+        raise IOError('not a JPEG (%d bytes)' % total)
+    part.replace(dest)
+    return True
+
+
+def _nm_earth_mark(kind, tier):
+    """Remember whether the cached map came from the big original or the
+    medium fallback, so a fallback gets upgraded on a later run."""
+    try:
+        m = _nm_earth_marker(kind)
+        if tier == 'big':
+            m.unlink(missing_ok=True)
+        else:
+            m.write_text('medium fallback', encoding='utf-8')
+    except Exception:
+        _exc_debug('_nm_earth_mark')
+
+
+def _nm_earth_fetch_one(kind):
+    src = _NM_EARTH_SRC[kind]
+    dest = _nm_earth_path(kind)
+    dest.parent.mkdir(exist_ok=True)
+    try:
+        from PIL import Image
+    except Exception:
+        Image = None
+    raw = dest.with_name(dest.name + '.src')
+    # Preferred: the huge original, downsized here to a GPU-friendly 8192x4096.
+    # Without Pillow the pre-sized medium map is used as-is. When a (low-res)
+    # map is already cached, only the big original is worth trying again.
+    have = _nm_earth_ready(kind)
+    tiers = (('big',) if have else ('big', 'small')) if Image else (() if have else ('small',))
+    for tier in tiers:
+        try:
+            _nm_earth_download(src[tier], raw)
+            if Image is None:
+                raw.replace(dest)
+                _nm_earth_mark(kind, tier)
+                return True
+            Image.MAX_IMAGE_PIXELS = None          # trusted NASA host, one-off
+            im = Image.open(raw)
+            if im.width <= _NM_EARTH_W:            # already GPU-sized: keep byte-for-byte
+                im.close()
+                raw.replace(dest)
+                _nm_earth_mark(kind, tier)
+                return True
+            if tier == 'big':
+                im.draft('RGB', (_NM_EARTH_W, _NM_EARTH_H))  # cheap 1/2 decode
+            im = im.convert('RGB')
+            if im.width > _NM_EARTH_W:
+                im = im.resize((_NM_EARTH_W, _NM_EARTH_H), Image.LANCZOS)
+            tmp = dest.with_name(dest.name + '.tmp')
+            im.save(tmp, 'JPEG', quality=90, subsampling=0)
+            im.close()
+            tmp.replace(dest)
+            _nm_earth_mark(kind, tier)
+            return True
+        except Exception as e:
+            _NM_EARTH['err'] = '%s %s: %r' % (kind, tier, e)
+            log.warning('[earth] %s %s map failed: %r', kind, tier, e)
+            _exc_debug('_nm_earth_fetch_one %s %s' % (kind, tier))
+        finally:
+            try:
+                raw.unlink(missing_ok=True)
+            except Exception:
+                pass
+    return False
+
+
+def _nm_earth_kick():
+    """Start the one-off background fetch if a map is missing. Cheap to call."""
+    with _NM_EARTH_LOCK:
+        if _NM_EARTH['busy']:
+            return
+        if (_nm_earth_ready('day') and _nm_earth_ready('night')
+                and not _nm_earth_lowres('day') and not _nm_earth_lowres('night')):
+            return
+        if time.time() - _NM_EARTH['last'] < 600:     # failed recently: back off
+            return
+        _NM_EARTH['busy'] = True
+        _NM_EARTH['last'] = time.time()
+
+    def _run():
+        try:
+            for kind in ('day', 'night'):
+                if not _nm_earth_ready(kind) or _nm_earth_lowres(kind):
+                    _nm_earth_fetch_one(kind)
+            if (_nm_earth_ready('day') and _nm_earth_ready('night')
+                    and not _nm_earth_lowres('day') and not _nm_earth_lowres('night')):
+                _NM_EARTH['err'] = ''
+        finally:
+            _NM_EARTH['busy'] = False
+    threading.Thread(target=_run, daemon=True, name='earth-textures').start()
+
+
+_NM_HOME = {'geo': None, 'at': 0.0, 'busy': False, 'loaded': False}
+
+
+def _nm_home_geo():
+    """Where this PC really is, for placing LAN hosts on the globe.
+
+    LAN addresses have no geolocation, and the 3D view used to park them on
+    whichever remote host happened to be geolocated first - i.e. somewhere
+    arbitrary. Order of preference:
+      1. ~/.nm_home_location  ("lat,lon" - exact, wins over everything)
+      2. this connection's public IP geolocated via ip-api.com (cached 6 h)
+    Never blocks: returns the last known value (or None) and refreshes in the
+    background."""
+    try:
+        p = Path.home() / '.nm_home_location'
+        if p.exists():
+            m = re.findall(r'-?\d+(?:\.\d+)?', p.read_text(encoding='utf-8', errors='ignore'))
+            if len(m) >= 2:
+                la, lo = float(m[0]), float(m[1])
+                if -90 <= la <= 90 and -180 <= lo <= 180:
+                    return {'lat': la, 'lon': lo, 'city': 'home (set by you)', 'src': 'file'}
+    except Exception:
+        _exc_debug('_nm_home_geo override')
+    cache = Path.home() / '.nm_home_geo.json'
+    if not _NM_HOME['loaded']:
+        _NM_HOME['loaded'] = True
+        try:
+            d = json.loads(cache.read_text(encoding='utf-8'))
+            if isinstance(d.get('lat'), (int, float)) and isinstance(d.get('lon'), (int, float)):
+                _NM_HOME['geo'] = d
+                _NM_HOME['at'] = cache.stat().st_mtime
+        except Exception:
+            pass
+    if time.time() - _NM_HOME['at'] > 6 * 3600 and not _NM_HOME['busy'] \
+            and time.time() - _NM_HOME.get('try', 0) > 120:
+        _NM_HOME['busy'] = True
+        _NM_HOME['try'] = time.time()
+
+        def _fetch():
+            try:
+                req = urllib.request.Request(
+                    'http://ip-api.com/json/?fields=status,lat,lon,city,country',
+                    headers={'User-Agent': 'NetworkMonitor/1.0'})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    d = json.loads(r.read().decode())
+                if d.get('status') == 'success':
+                    g = {'lat': float(d['lat']), 'lon': float(d['lon']),
+                         'city': d.get('city') or d.get('country') or '',
+                         'src': 'public-ip'}
+                    _NM_HOME['geo'] = g
+                    _NM_HOME['at'] = time.time()
+                    try:
+                        cache.write_text(json.dumps(g), encoding='utf-8')
+                    except Exception:
+                        pass
+            except Exception:
+                _exc_debug('_nm_home_geo fetch')
+            finally:
+                _NM_HOME['busy'] = False
+        threading.Thread(target=_fetch, daemon=True, name='home-geo').start()
+    return _NM_HOME['geo']
+
+
 # ── Attack drill (server-side) ───────────────────────────────────────────────
 # Single source of truth so every view — web 3D/radar, web Sankey and the
 # desktop EtherApe window — shows the same synthetic hostiles. Addresses come
@@ -27955,6 +28207,7 @@ class _ThreeDServer:
             _vpn0 = _nm_vpn_status()   # VPN state is independent of capture
             handler._json(200, {'nodes': _an, 'flows': _af, 'tick': 0,
                                 'open': bool(_an),
+                                'home': _nm_home_geo(),
                                 'block_events': _nm_block_events_geo({}),
                                 'attack_sim': _NM_ATTACK_ON,
                                 'vpn_active': bool(_vpn0.get('active')),
@@ -28229,6 +28482,7 @@ class _ThreeDServer:
             'total_blocked': len(blocked),
             'vpn_active': vpn_active,
             'vpn': _vpn,          # provider / iface / reason / rx_rate
+            'home': _nm_home_geo(),   # this PC's real location (LAN hosts sit here)
 
             'visited_urls': visited_urls[:120],
             'dns_map': dns_map,
@@ -28553,7 +28807,7 @@ html,body{max-width:100%;overflow-x:hidden}
 <div id="hud">
   <a href="/" style="text-decoration:none;color:#39ff14;font-weight:bold;font-size:12px;padding:4px 11px;margin-right:8px;border:1px solid #1a4a2a;border-radius:6px;background:rgba(57,255,20,0.10);white-space:nowrap;pointer-events:auto;-webkit-tap-highlight-color:transparent" title="Back to dashboard">&#8592; Back</a>
   <button id="bloomBtn" onclick="_cycleBloom(1)" oncontextmenu="_cycleBloom(-1);return false;" style="color:#3ec6ff;font-weight:bold;font-size:12px;padding:4px 11px;margin-right:8px;border:1px solid #1d5b80;border-radius:6px;background:rgba(62,198,255,0.10);cursor:pointer;white-space:nowrap;pointer-events:auto;-webkit-tap-highlight-color:transparent" title="Click to cycle bloom intensity (right-click to go back)">&#10022; Bloom: Normal</button>
-  <span>EtherApe <b>3D</b></span>
+  <span>EtherApe <b>3D</b> <b id="bldid" style="font-weight:400;opacity:.5;font-size:10px" title="Which build is serving this page">@@NMBUILD@@</b></span>
   <span>nodes <b id="hn">0</b></span>
   <span>flows <b id="hf">0</b></span>
   <span>pkts/s <b id="hp">0</b></span>
@@ -29376,8 +29630,15 @@ function makeSprite(text,hex){
   const ctx=cv.getContext('2d');
   const c=new THREE.Color(hex);
   ctx.font='500 13px monospace';
+  // Centre the text on the sprite. It used to be drawn from the sprite's LEFT
+  // edge (x=2), so every label sat up to 1.3 units left of its orb - ~12 degrees
+  // of arc on the globe, which read as the orb being in the wrong place.
+  ctx.textAlign='center';
+  ctx.lineJoin='round'; ctx.lineWidth=4;
+  ctx.strokeStyle='rgba(2,8,18,0.85)';      // dark halo: legible over the bright day side
+  ctx.strokeText(text,128,24);
   ctx.fillStyle=`rgb(${(c.r*255)|0},${(c.g*255)|0},${(c.b*255)|0})`;
-  ctx.fillText(text,2,24);
+  ctx.fillText(text,128,24);
   const tex=new THREE.CanvasTexture(cv);
   const mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false});
   const sp=new THREE.Sprite(mat);
@@ -29660,6 +29921,17 @@ let nodeData=[], flowData=[], lastTick=-1, flowCurves=[];
 // hit-testing all keep working through the existing code paths untouched.
 let WORLD_ON=false, WORLD_SPIN=true, worldMesh=null;
 const WORLD_R=6.2;
+// Orbs on the globe are drawn at WORLD_ORB_K of their normal size and sit as a
+// bead half-sunk into the surface. Full-size orbs (up to ~1 unit radius on a
+// 6.2 unit planet) covered ~9 degrees of arc each and, because their centre was
+// lifted a whole radius above the ground, appeared to slide away from the true
+// spot as the globe turned - that was most of the "orbs aren't in the right
+// place" error.
+const WORLD_ORB_K=0.45;
+let homeGeo=null;            // this PC's real location, from /api/topology3d
+let _labelByNode=[];         // node index -> its label sprite (never assume they line up)
+let _worldPins=null;         // exact-location dots + leader lines for stacked hosts
+let _worldHiTimer=null, _worldHiTries=0;
 function _latLonToXYZ(lat,lon,r){
   // Matches THREE.SphereGeometry's UV layout, so a host sits on its country.
   const phi=(90-lat)*Math.PI/180, theta=(lon+180)*Math.PI/180;
@@ -29667,36 +29939,54 @@ function _latLonToXYZ(lat,lon,r){
            y: r*Math.cos(phi),
            z: r*Math.sin(phi)*Math.sin(theta)};
 }
+function _worldBase(n){ return 0.28+(n.frac||0)*0.48; }
 function _worldNodeR(n){
-  // Matches the animate loop: unit sphere scaled by base, breathing up to +22%.
-  return (0.28+(n.frac||0)*0.48)*1.25;
+  // Matches the animate loop: unit sphere scaled by base*WORLD_ORB_K, breathing up to +22%.
+  return _worldBase(n)*WORLD_ORB_K*1.25;
 }
 function _vnorm(v){const l=Math.hypot(v.x,v.y,v.z)||1;return{x:v.x/l,y:v.y/l,z:v.z/l};}
 function _vcross(a,b){return{x:a.y*b.z-a.z*b.y,y:a.z*b.x-a.x*b.z,z:a.x*b.y-a.y*b.x};}
-function _worldPlace(nodes){
-  if(!WORLD_ON||!nodes||!nodes.length)return;
-  let hl=null;
+function _worldHome(nodes){
+  // Where LAN / multicast hosts (no geolocation of their own) are drawn: this
+  // PC's real position if the server knows it, else the first geolocated peer.
+  if(homeGeo&&typeof homeGeo.lat==='number'&&typeof homeGeo.lon==='number')return homeGeo;
   for(const n of nodes){
-    if(typeof n.lat==='number'&&typeof n.lon==='number'&&!n.local){hl=n;break;}
+    if(typeof n.lat==='number'&&typeof n.lon==='number'&&!n.local)return n;
   }
-  // 1. Every node needs a coordinate. LAN hosts have none, so they sit at the
-  //    first geolocated peer — "home".
+  return {lat:51.5,lon:-0.12};
+}
+function _worldClearPins(){
+  if(!_worldPins)return;
+  try{ scene.remove(_worldPins);
+       _worldPins.traverse(function(o){
+         if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); });
+  }catch(e){}
+  _worldPins=null;
+}
+function _worldPlace(nodes){
+  if(!WORLD_ON||!nodes||!nodes.length){ _worldClearPins(); return; }
+  const home=_worldHome(nodes);
+  // 1. Every node needs a coordinate. LAN hosts have none, so they sit at home.
   const res=nodes.map(function(n){
     let lat=n.lat, lon=n.lon;
     if(typeof lat!=='number'||typeof lon!=='number'||n.local){
-      lat=hl?hl.lat:51.5; lon=hl?hl.lon:-0.12;
+      lat=home.lat; lon=home.lon;
     }
-    return {n:n,lat:lat,lon:lon,r:_worldNodeR(n)};
+    return {n:n,lat:lat,lon:lon,r:_worldNodeR(n),
+            alt:WORLD_R+_worldBase(n)*WORLD_ORB_K*0.7};   // centre 0.7 r up: a bead on the surface
   });
   // 2. Bucket hosts sharing a location (a data centre, or the whole LAN).
+  //    ~0.1 degree (~11 km) buckets: coarser ones merged different cities.
   const groups={};
   res.forEach(function(o){
-    const k=Math.round(o.lat*2)+'|'+Math.round(o.lon*2);
+    const k=Math.round(o.lat*10)+'|'+Math.round(o.lon*10);
     (groups[k]=groups[k]||[]).push(o);
   });
-  // 3. Fan each stack out in the tangent plane at that point. Working in 3D
-  //    rather than lat/lon degrees keeps it correct at the poles, where
-  //    meridians converge and degree offsets explode.
+  const T=window.THREE;
+  const dotPts=[], linePts=[];
+  // 3. The busiest host of a stack sits exactly on the true point; the rest
+  //    fan out around it in the tangent plane. Working in 3D rather than
+  //    lat/lon degrees keeps it correct at the poles.
   Object.keys(groups).forEach(function(k){
     const g=groups[k];
     g.sort(function(a,b){return b.r-a.r;});
@@ -29705,13 +29995,14 @@ function _worldPlace(nodes){
     const u=_vnorm(_vcross(ref,c));
     const v=_vnorm(_vcross(c,u));
     function put(o,dir){
-      const surf=WORLD_R+o.r+0.05;   // clear the surface by the orb's own radius
-      o.n.x=dir.x*surf/spreadFactor;
-      o.n.y=dir.y*surf/spreadFactor;
-      o.n.z=dir.z*surf/spreadFactor;
+      o.n.x=dir.x*o.alt/spreadFactor;
+      o.n.y=dir.y*o.alt/spreadFactor;
+      o.n.z=dir.z*o.alt/spreadFactor;
+      o.dir=dir;
     }
-    if(g.length===1){ put(g[0],c); return; }
-    let idx=0, ring=1, prevTheta=0, prevR=g[0].r;
+    put(g[0],c);
+    if(g.length===1) return;
+    let idx=1, ring=1, prevTheta=0, prevR=g[0].r;
     while(idx<g.length){
       const take=Math.min(Math.max(1,Math.round(5*ring)), g.length-idx);
       const slice=g.slice(idx,idx+take);
@@ -29737,13 +30028,39 @@ function _worldPlace(nodes){
       prevTheta=theta; prevR=big;
       idx+=take; ring++;
     }
+    // Stacked hosts: mark the TRUE location with a dot and tie each displaced
+    // orb back to it, so a fanned-out cluster still reads as "all here".
+    const gx=c.x*(WORLD_R+0.02), gy=c.y*(WORLD_R+0.02), gz=c.z*(WORLD_R+0.02);
+    dotPts.push(gx,gy,gz);
+    for(let q=1;q<g.length;q++){
+      const o=g[q];
+      linePts.push(gx,gy,gz, o.dir.x*o.alt, o.dir.y*o.alt, o.dir.z*o.alt);
+    }
   });
+  _worldClearPins();
+  if(T&&(dotPts.length||linePts.length)){
+    const grp=new T.Group();
+    if(dotPts.length){
+      const pg=new T.BufferGeometry();
+      pg.setAttribute('position',new T.Float32BufferAttribute(dotPts,3));
+      grp.add(new T.Points(pg,new T.PointsMaterial({
+        color:0xffffff,size:0.16,sizeAttenuation:true,transparent:true,opacity:0.95,depthWrite:false})));
+    }
+    if(linePts.length){
+      const lg=new T.BufferGeometry();
+      lg.setAttribute('position',new T.Float32BufferAttribute(linePts,3));
+      grp.add(new T.LineSegments(lg,new T.LineBasicMaterial({
+        color:0xffffff,transparent:true,opacity:0.35,depthWrite:false})));
+    }
+    grp.renderOrder=1;
+    scene.add(grp); _worldPins=grp;
+  }
 }
 function _worldBuild(){
   const T=window.THREE; if(!T||worldMesh)return;
-  const geo=new T.SphereGeometry(WORLD_R,96,64);
+  const geo=new T.SphereGeometry(WORLD_R,192,128);
   const ld=new T.TextureLoader();
-  const dayTex=ld.load('/day-map.jpg'), nightTex=ld.load('/world-map.jpg');
+  const dayTex=_worldTexSetup(ld.load('/day-map.jpg')), nightTex=_worldTexSetup(ld.load('/world-map.jpg'));
   // Day/night terminator driven by the real sun position. Opaque and
   // depth-writing so the far side of the network is properly hidden.
   const mat=new T.ShaderMaterial({
@@ -29766,7 +30083,7 @@ function _worldBuild(){
       '  float k=smoothstep(-0.12,0.22,d);',            // soft terminator
       '  vec3 day=texture2D(dayTex,vUv).rgb;',
       '  vec3 night=texture2D(nightTex,vUv).rgb;',
-      '  day*=0.55+0.65*clamp(d,0.0,1.0);',             // sun angle shading
+      '  day*=0.45+0.55*clamp(d,0.0,1.0);',             // sun angle shading (max 1.0: no clipping)
       '  night*=1.25;',                                  // lift the city lights
       '  vec3 col=mix(night,day,k);',
       '  float rim=pow(1.0-abs(dot(n,vec3(0.0,0.0,1.0))),3.0);',
@@ -29778,6 +30095,37 @@ function _worldBuild(){
   worldMesh.renderOrder=-1;        // draw before the flows so depth is laid down
   worldMesh.userData.isWorld=true;
   scene.add(worldMesh);
+  _worldHiTries=0; _worldUpgradeTextures();   // swap in NASA 8k maps once cached
+}
+function _worldTexSetup(tex){
+  // Sharp at grazing angles and when zoomed: mipmaps + max anisotropy.
+  try{ tex.anisotropy=Math.min(16,renderer.capabilities.getMaxAnisotropy()); }catch(e){}
+  return tex;
+}
+function _worldUpgradeTextures(){
+  // The server downloads NASA's Blue/Black Marble maps in the background the
+  // first time (it answers /earth-hires.json with what is ready). Until then
+  // the small embedded maps are shown; each hi-res map swaps in when it lands.
+  clearTimeout(_worldHiTimer);
+  if(!WORLD_ON||!worldMesh)return;
+  const T=window.THREE, mesh=worldMesh;
+  fetch('/earth-hires.json',{cache:'no-store'}).then(function(r){return r.json();}).then(function(st){
+    ['day','night'].forEach(function(k){
+      const flag='hi_'+k+'_'+(st[k+'_v']||0);
+      if(!st[k]||mesh.userData[flag])return;
+      mesh.userData[flag]=true;
+      new T.TextureLoader().load('/earth-'+k+'-hi.jpg?v='+(st[k+'_v']||0),function(tex){
+        if(worldMesh!==mesh)return;                    // world view closed meanwhile
+        _worldTexSetup(tex);
+        const u=mesh.material.uniforms[k+'Tex'], old=u.value;
+        u.value=tex; try{old.dispose();}catch(e){}
+      },undefined,function(){ mesh.userData[flag]=false; });
+    });
+    if(!(st.day&&st.night&&!st.day_lowres&&!st.night_lowres)&&_worldHiTries++<150&&worldMesh===mesh)
+      _worldHiTimer=setTimeout(_worldUpgradeTextures,4000);
+  }).catch(function(){
+    if(_worldHiTries++<20&&worldMesh===mesh)_worldHiTimer=setTimeout(_worldUpgradeTextures,15000);
+  });
 }
 function _worldSunDir(){
   // Subsolar point: longitude from UTC, declination from the day of year.
@@ -29804,8 +30152,12 @@ function _worldDepthFix(){
   }catch(e){}
 }
 function _worldDestroy(){
+  clearTimeout(_worldHiTimer);
+  _worldClearPins();
   if(worldMesh){scene.remove(worldMesh);
-    try{worldMesh.geometry.dispose();worldMesh.material.dispose();}catch(e){}
+    try{ const u=worldMesh.material.uniforms;
+         u.dayTex.value.dispose(); u.nightTex.value.dispose();
+         worldMesh.geometry.dispose();worldMesh.material.dispose(); }catch(e){}
     worldMesh=null;}
 
 }
@@ -29848,6 +30200,16 @@ function nodeColor(nd){
   return COLORS[nd.proto]||COLORS.other;
 }
 
+// Label anchor: straight up in the flat views; on the globe, straight OUT from
+// the planet's centre so it floats over the orb instead of sliding sideways.
+function _worldLabelPos(sp,x,y,z,rad){
+  if(WORLD_ON){
+    const l=Math.hypot(x,y,z)||1, off=rad+0.4;
+    sp.position.set(x+x/l*off, y+y/l*off, z+z/l*off);
+  }else{
+    sp.position.set(x, y+rad+0.55, z);
+  }
+}
 // ── rebuild geometry ───────────────────────────────────────────────────────
 function rebuildGeometry(nodes,flows){
   _worldPlace(nodes);   // world view: rewrite x/y/z to real positions on the globe
@@ -29857,7 +30219,7 @@ function rebuildGeometry(nodes,flows){
 
   // Remove old label sprites
   labelSprites.forEach(s=>scene.remove(s));
-  labelSprites.length=0;
+  labelSprites.length=0; _labelByNode=[];
 
   const N=Math.min(nodes.length,MAX_NODES);
   let ringCount=0;
@@ -29868,13 +30230,18 @@ function rebuildGeometry(nodes,flows){
     const sx=nd.x*spreadFactor, sy=nd.y*spreadFactor, sz=nd.z*spreadFactor;
     const col=nodeColor(nd);
 
+    const rw=WORLD_ON?r*WORLD_ORB_K:r;     // on-screen radius
     const mesh=_getNodeMesh(r, nd.cc, col, nd.blocked, nd.local);
+    // Correct from the first frame. animate() re-applies it every frame, but a
+    // page whose animation loop is paused (hidden/throttled tab, a stalled GPU
+    // frame) would otherwise keep showing the full-size creation scale.
+    mesh.scale.setScalar(rw);
     mesh.position.set(sx,sy,sz);
     mesh.userData.nodeIdx=i;
     _rayTargets.push(mesh);
 
     if(nd.blocked){
-      _mat.makeScale(r*1.1,r*1.1,r*1.1); _mat.setPosition(sx,sy,sz);
+      _mat.makeScale(rw*1.1,rw*1.1,rw*1.1); _mat.setPosition(sx,sy,sz);
       ringIM.setMatrixAt(ringCount++,_mat);
     }
 
@@ -29882,7 +30249,8 @@ function rebuildGeometry(nodes,flows){
       const threshold = nodes.length > 20 ? 0.02 : 0;
       if(nd.local || nd.blocked || nd.frac > threshold){
         const sp=makeSprite(nd.label||nd.id, col);
-        sp.position.set(sx, sy+r+0.55, sz);
+        _worldLabelPos(sp,sx,sy,sz,rw);
+        sp.userData.nodeIdx=i; _labelByNode[i]=sp;
         scene.add(sp); labelSprites.push(sp);
         if(WORLD_ON)sp.material.depthTest=true;
       }
@@ -32046,7 +32414,8 @@ function animate(){
     const isHov=(i===hoveredIdx);
     // Breathing pulse
     const breath = base*(1+(isHov?0.22:0.06)*Math.sin(t*2.2+i*0.7));
-    mesh.scale.setScalar(breath);
+    const _wk=WORLD_ON?WORLD_ORB_K:1;       // orbs are smaller on the globe
+    mesh.scale.setScalar(breath*_wk);
     // Sinusoidal position drift (organic feel). Damped hard in world view so
     // orbs stay pinned to their country instead of wandering off the surface.
     const _dk=WORLD_ON?0.12:1.0;
@@ -32056,7 +32425,7 @@ function animate(){
     const sx=nd.x*spreadFactor, sy=nd.y*spreadFactor, sz=nd.z*spreadFactor;
     mesh.position.set(sx+ox, sy+oy, sz+oz);
     // Sync label sprite to drifted position
-    if(labelSprites[i]) labelSprites[i].position.set(sx+ox, sy+oy+breath+0.55, sz+oz);
+    if(_labelByNode[i]) _worldLabelPos(_labelByNode[i], sx+ox, sy+oy, sz+oz, breath*_wk);
   }
 
   // ── Flow line shimmer ─────────────────────────────────────────────────────
@@ -32187,6 +32556,7 @@ async function poll(){
     try{ updateProtoBars(_allFlows); }catch(e){}   // bars reflect ALL traffic
     try{ _pktEmit(_allFlows); }catch(e){}          // console: new rows from real traffic
     if(d.dns_map) Object.assign(_dnsMap, d.dns_map);
+    if(d.home&&typeof d.home.lat==='number'&&typeof d.home.lon==='number') homeGeo=d.home;
     // Also extract rdns from nodeData — this is the most reliable source
     if(d.nodes) d.nodes.forEach(n=>{ if(n.rdns && n.rdns !== n.id) _dnsMap[n.id]=n.rdns; });
     try{ rebuildGeometry(nodeData,flowData); }catch(rge){ console.warn('rebuildGeometry error:',rge); }
@@ -32312,7 +32682,7 @@ poll();
         _ui = _nm_theme_ui(self._monitor)
         for _tok, _val in (('@@3DBG@@', _ui['bg']), ('@@3DPANEL@@', _ui['panel']),
                             ('@@3DBORDER@@', _ui['border']), ('@@3DTEXT2@@', _ui['text2']),
-                            ('@@3DACCENT@@', _ui['accent'])):
+                            ('@@3DACCENT@@', _ui['accent']), ('@@NMBUILD@@', _NM_BUILD_ID)):
             html = html.replace(_tok, _val)
         # 'mr' (middle-right) not 'br' -- this page's own bottom row is
         # already wall-to-wall with #legend/#info/#killbtn/#atkbtn/
@@ -34730,7 +35100,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
     def _build_sw(self):
         # >>>ASSET:sw.js  — edit web/sw.js, then run:
         #    python tools/build_assets.py     (verify with: python selftest.py)
-        return r'''const CACHE='nm-shell-v21';
+        return r'''const CACHE='nm-shell-v22';
 const SHELL=['/','/manifest.webmanifest','/icon-192.png','/icon-512.png'];
 self.addEventListener('install',function(e){
   e.waitUntil(caches.open(CACHE).then(function(c){return c.addAll(SHELL);}).then(function(){return self.skipWaiting();}));
@@ -34743,7 +35113,7 @@ self.addEventListener('activate',function(e){
 self.addEventListener('fetch',function(e){
   var u=new URL(e.request.url);
   if(u.pathname.indexOf('/api/')===0||u.pathname==='/3d'||u.pathname.indexOf('/flag/')===0
-     ||u.pathname==='/sonar.mp3'||u.pathname==='/radar-map.png'||u.pathname==='/world-map.jpg'||u.pathname==='/day-map.jpg'
+     ||u.pathname==='/sonar.mp3'||u.pathname==='/radar-map.png'||u.pathname==='/world-map.jpg'||u.pathname==='/day-map.jpg'||u.pathname.indexOf('/earth-')===0
      ||u.pathname==='/guide-shot'||u.pathname==='/talkers'||u.pathname==='/sankey'){return;}
   /* live data, 3D, flags and embedded binaries: always straight to network.
      The cache-first branch below falls back to caches.match('/'), which
@@ -35333,6 +35703,21 @@ ol.steps li{margin:6px 0}
                         self._send(200, 'audio/mpeg',
                                    _b64s.b64decode(_SONAR_MP3_B64),
                                    extra={'Cache-Control': 'public, max-age=86400'})
+                    elif path == '/earth-hires.json':
+                        _nm_earth_kick()
+                        self._json(200, _nm_earth_status())
+                    elif path in ('/earth-day-hi.jpg', '/earth-night-hi.jpg'):
+                        try:
+                            _ep = _nm_earth_path('day' if '-day-' in path else 'night')
+                            _ed = _ep.read_bytes() if _nm_earth_ready(
+                                'day' if '-day-' in path else 'night') else None
+                        except Exception:
+                            _ed = None
+                        if _ed:
+                            self._send(200, 'image/jpeg', _ed,
+                                       extra={'Cache-Control': 'public, max-age=86400'})
+                        else:
+                            self._json(404, {'error': 'hi-res map not downloaded yet'})
                     elif path == '/day-map.jpg':
                         import base64 as _b64d
                         self._send(200, 'image/jpeg',
