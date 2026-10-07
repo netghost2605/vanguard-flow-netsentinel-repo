@@ -1,165 +1,168 @@
-# Changes this session — build `b-2d84f0a6`
+# Changes this session — build `b-e5b30c18`
 
-One hundred and four things this session. Build IDs for reference:
-1. `b-2d84f0a6` — follow-up to the globe work after you reported it "reverted to the old way" following a capture stop and app restart: I could not reproduce a revert in the code (installed build confirmed new, capture stop/restart simulated, real host data replayed), so this build hardens the likely weak points and makes the cause visible next time — orbs now get their correct globe size the instant they are created (previously only the per-frame animation applied it, so a page whose animation loop was paused showed full-size orbs), the 3D header now shows which build is serving the page, map download failures are written to the app log, and a cached medium-size fallback map is upgraded to 8192 on a later run instead of staying soft forever.
-2. `b-7a3e91c4` — the 3D globe's textures are now high-resolution and the orbs sit on their real coordinates: the first time World view is opened the app fetches NASA's public-domain Blue Marble (day) and Black Marble (night) maps once, downsizes them to 8192×4096 and caches them in `~/.nm_vendor` (the small embedded 2048/1440 px maps show until then, or permanently if the download can't happen); orbs are drawn at 45% size as a bead resting on the surface instead of a full-size ball floating a whole radius above it; the busiest host in a stack sits exactly on the true point with a dot and leader lines for the rest; LAN hosts now sit at this PC's real location instead of the first remote host that happened to geolocate; and host labels are now centred on their orb (they were drawn from the sprite's left edge, ~12° of arc to the left on the globe).
-3. `b-65001f47` — capture files are now cleaned up unconditionally, not just on a graceful shutdown: the app already deleted the shared `nm_wireshark.pcap` scratch file when you closed it normally (via the QUIT button or the window's X), but that step never ran if the app exited abnormally (crash, Task Manager kill, power loss) -- the file would just sit in temp forever. Startup now does the same delete for any capture file left behind by a previous run, before this launch could ever start a new one. See the section below for the full writeup.
-4. `b-63de2be2` — fixed the real findings from a pasted third-party code-review report, after independently verifying each one against the live source first (one of the eight, BUG-1, turned out to have the right diagnosis but the wrong reason — see the writeup below for what's actually going on). Covers: the licence-manager dialog's misplaced `@staticmethod`, six duplicated module-level blocks that could silently drift, three exception logs tagged with the wrong function name, unguarded numpy/matplotlib imports that used to crash with a raw traceback, a real race condition in the standalone agent script, four tests with a hardcoded CI-only path, and a fragile test double for the 3D server. One claim (BUG-7, a Playwright test needing a real browser + a cached vendor file) was confirmed accurate but isn't something to "fix" -- it's an environment requirement, not a bug. See the section below for the full writeup.
-5. `b-d35f0af4` — removed every spaceship: the raider that warped in and exploded on a real firewall block, the ambient flyby from the previous build, and the entire real ship-model GLB pipeline (parser, `/api/shipmodel` route, build-time bundling, the dormant per-node substitution plumbing) that only existed to feed them. The real block-event detonation (radar boom, kill counter, sonar ping) is untouched -- it just no longer also spawns a ship as a side effect. See the section below for the full writeup.
-6. `b-9cfc3b65` — the real ship model is no longer a per-node substitute at all (reverted the top-N-by-traffic LOD from the previous build after you reported it hid the flag/colour orb identity on your busiest nodes); it now powers an ambient "flyby" instead — a transient background pass that flies in, drifts across, and exits, the same motion the old low-poly cruiser had, triggered by newly-discovered hosts. See the section below for the full writeup.
+One hundred and seven things this session. Build IDs for reference:
+1. `b-e5b30c18` — Time-of-Day Heatmap window restyled as a dark glass dashboard, after you sent two reference images (a rainbow thermal-field dashboard, then a neon world-map dashboard with glass panels): the blocky teal grid is now a smooth rainbow heat field (deep blue → cyan → green → yellow → orange → hot red, warm = good, so latency is reversed) with contour lines, glowing best/worst markers and a glowing "now" box, sitting in a glass panel with radar rings; around it are a best-slot orb (with the worst slot), spectrum bar charts for speed by hour of day and by day of week (current hour/day highlighted), a gradient daily-trend area chart, a colour-scale legend with Excellent/Good/Fair/Poor swatches, and a summary panel (swing %, best/worst hour, best/worst day). The window opens larger (1260×740) and re-lays itself out when resized. Three new top-bar switches — Dashboard, Smooth, Vivid colours — all on by default; untick all three for the old classic theme-accent table. Hover tooltips, click-to-pin, metric/window selectors and theme re-render are unchanged. `test_heatmap_theme.py` now checks the new defaults as well as the classic path.
+2. `b-91a4d2f6` — Geo Map window (the matplotlib world map opened from the GEO MAP rail button) is no longer a 1440×720 image stretched across the screen: it now loads the NASA Black Marble night map that the 3D globe already caches in `~/.nm_vendor` (8192×4096), downsized to about 1.25× the screen width (2560–4096 px), instead of the embedded 1440×720 image; if that map is not cached yet it shows the old image straight away, starts the download in the background and swaps the sharp map in as soon as it lands; and when you zoom in or pan, a native-resolution crop of the 8192 map is layered over the base map (about 0.4 s after the zoom settles) so detail keeps up with the zoom instead of going blurry.
+3. `b-7c15e3d9` — Top Flow Talkers (the ribbon panel in the 3D view) redesigned: remote ends now line up with a column of host cards on the right (country chip, name, org/IP, protocol, volume, share, trend arrow, ⛔/⚠ flags) instead of tiny labels scattered over the ribbons; the loud circuit-trace wallpaper is now a quiet, rounded, much longer-repeating texture; ribbons have a gradient surface, sheen and glowing rim; the moving bits are glowing comet pulses (busiest three get a light sweep and faint binary); the layout fits the window (the bottom of the Incoming section was being clipped, because the legend row was not counted in the canvas height) with soft sqrt volume weighting and fixed-height remote ends so small flows stay readable; hovering a ribbon or card focuses it and dims the rest, with a tooltip on ribbons; the title, legend and subtitle text is larger; the end caps on incoming ribbons now sit where the ribbon actually ends (they were drawn with the other end's size); and a leftover debug GB-flag image in the corner of the 3D page was removed.
+4. `b-2d84f0a6` — follow-up to the globe work after you reported it "reverted to the old way" following a capture stop and app restart: I could not reproduce a revert in the code (installed build confirmed new, capture stop/restart simulated, real host data replayed), so this build hardens the likely weak points and makes the cause visible next time — orbs now get their correct globe size the instant they are created (previously only the per-frame animation applied it, so a page whose animation loop was paused showed full-size orbs), the 3D header now shows which build is serving the page, map download failures are written to the app log, and a cached medium-size fallback map is upgraded to 8192 on a later run instead of staying soft forever.
+5. `b-7a3e91c4` — the 3D globe's textures are now high-resolution and the orbs sit on their real coordinates: the first time World view is opened the app fetches NASA's public-domain Blue Marble (day) and Black Marble (night) maps once, downsizes them to 8192×4096 and caches them in `~/.nm_vendor` (the small embedded 2048/1440 px maps show until then, or permanently if the download can't happen); orbs are drawn at 45% size as a bead resting on the surface instead of a full-size ball floating a whole radius above it; the busiest host in a stack sits exactly on the true point with a dot and leader lines for the rest; LAN hosts now sit at this PC's real location instead of the first remote host that happened to geolocate; and host labels are now centred on their orb (they were drawn from the sprite's left edge, ~12° of arc to the left on the globe).
+6. `b-65001f47` — capture files are now cleaned up unconditionally, not just on a graceful shutdown: the app already deleted the shared `nm_wireshark.pcap` scratch file when you closed it normally (via the QUIT button or the window's X), but that step never ran if the app exited abnormally (crash, Task Manager kill, power loss) -- the file would just sit in temp forever. Startup now does the same delete for any capture file left behind by a previous run, before this launch could ever start a new one. See the section below for the full writeup.
+7. `b-63de2be2` — fixed the real findings from a pasted third-party code-review report, after independently verifying each one against the live source first (one of the eight, BUG-1, turned out to have the right diagnosis but the wrong reason — see the writeup below for what's actually going on). Covers: the licence-manager dialog's misplaced `@staticmethod`, six duplicated module-level blocks that could silently drift, three exception logs tagged with the wrong function name, unguarded numpy/matplotlib imports that used to crash with a raw traceback, a real race condition in the standalone agent script, four tests with a hardcoded CI-only path, and a fragile test double for the 3D server. One claim (BUG-7, a Playwright test needing a real browser + a cached vendor file) was confirmed accurate but isn't something to "fix" -- it's an environment requirement, not a bug. See the section below for the full writeup.
+8. `b-d35f0af4` — removed every spaceship: the raider that warped in and exploded on a real firewall block, the ambient flyby from the previous build, and the entire real ship-model GLB pipeline (parser, `/api/shipmodel` route, build-time bundling, the dormant per-node substitution plumbing) that only existed to feed them. The real block-event detonation (radar boom, kill counter, sonar ping) is untouched -- it just no longer also spawns a ship as a side effect. See the section below for the full writeup.
+9. `b-9cfc3b65` — the real ship model is no longer a per-node substitute at all (reverted the top-N-by-traffic LOD from the previous build after you reported it hid the flag/colour orb identity on your busiest nodes); it now powers an ambient "flyby" instead — a transient background pass that flies in, drifts across, and exits, the same motion the old low-poly cruiser had, triggered by newly-discovered hosts. See the section below for the full writeup.
 
-7. `b-6b7e63f5` — three fixes after you flagged the ship-model build as broken: removed the old ambient background patrol-ship spawn (kept the real-block raider kill effect), changed the real ship-model LOD from all-or-nothing to top-N-by-traffic, and made the Ollama "llama-server binary not found" diagnostic actually check the disk instead of repeating canned advice. See the section below for the full writeup.
-8. `b-def7f507` — real ship-model GLB (`glb.glb`, ~125MB) replaces
+10. `b-6b7e63f5` — three fixes after you flagged the ship-model build as broken: removed the old ambient background patrol-ship spawn (kept the real-block raider kill effect), changed the real ship-model LOD from all-or-nothing to top-N-by-traffic, and made the Ollama "llama-server binary not found" diagnostic actually check the disk instead of repeating canned advice. See the section below for the full writeup.
+11. `b-def7f507` — real ship-model GLB (`glb.glb`, ~125MB) replaces
    plain sphere node meshes in the /3d topology view when the node
    count is small enough (<=40) to afford the triangle budget; falls
    back to spheres above that, or if the model fails to load. See the
    section below for the full writeup.
-9. `b-346cdf46` — corrupt speed data purge (see note further down).
-10. `b-86b6ab2d` — honeypot tarpit.
-11. `b-dd991374` — attacker-seconds wasted, surfaced in the report + AI
+12. `b-346cdf46` — corrupt speed data purge (see note further down).
+13. `b-86b6ab2d` — honeypot tarpit.
+14. `b-dd991374` — attacker-seconds wasted, surfaced in the report + AI
    assessment.
-12. `b-78978af4` — "Stuck now: 0" investigation + live "Held total" stat.
-13. `b-48119510` — guide updated to cover all of the above.
-14. `b-6446ed81` — Classic view removed entirely; guide rewritten to match.
-15. `b-248b00b4` — firewall rules: search bar + host names, on every
+15. `b-78978af4` — "Stuck now: 0" investigation + live "Held total" stat.
+16. `b-48119510` — guide updated to cover all of the above.
+17. `b-6446ed81` — Classic view removed entirely; guide rewritten to match.
+18. `b-248b00b4` — firewall rules: search bar + host names, on every
    surface that lists them.
-16. `b-d363c5f7` — merged the two `_NM_OUI` vendor tables into one.
-17. `b-7b6beaf3` — 3D view: sparkle-flare starfield + glass walls.
-18. `b-54bce347` — 3D view: traveling light pulses on the protocol bars
+19. `b-d363c5f7` — merged the two `_NM_OUI` vendor tables into one.
+20. `b-7b6beaf3` — 3D view: sparkle-flare starfield + glass walls.
+21. `b-54bce347` — 3D view: traveling light pulses on the protocol bars
     (superseded by #11 below — you didn't like the look).
-19. `b-2a88d56c` — 3D view: protocol bars redone as scrolling neon circuit
+22. `b-2a88d56c` — 3D view: protocol bars redone as scrolling neon circuit
     traces.
-20. `b-6cefa676` — 3D view: floor animated with glowing flow-path lines
+23. `b-6cefa676` — 3D view: floor animated with glowing flow-path lines
     (superseded by #13 below — you wanted a packet-capture table instead).
-21. `b-bdecb4b1` — 3D view: floor redone as a live scrolling packet-capture
+24. `b-bdecb4b1` — 3D view: floor redone as a live scrolling packet-capture
     console (superseded by #14 below — you wanted it on the wall instead).
-22. `b-a8335452` — 3D view: packet-capture console moved off the floor onto
+25. `b-a8335452` — 3D view: packet-capture console moved off the floor onto
     the left wall (superseded by #15 below — you wanted it lower).
-23. `b-61579561` — 3D view: packet console lowered on the left wall.
-24. `b-1fb06fce` — honeypot: higher tarpit capacity/hold time, five more
+26. `b-61579561` — 3D view: packet console lowered on the left wall.
+27. `b-1fb06fce` — honeypot: higher tarpit capacity/hold time, five more
     decoy ports.
-25. `b-ca2ce494` — 3D view: GRID toggle button.
-26. `b-c954532e` — Wireshark Monitor: Clear now actually deletes the
+28. `b-ca2ce494` — 3D view: GRID toggle button.
+29. `b-c954532e` — Wireshark Monitor: Clear now actually deletes the
     capture file instead of sometimes leaving it behind.
-27. `b-d4a95b9d` — ISP Evidence Pack PDF: fixed a crash ("x and y must
+30. `b-d4a95b9d` — ISP Evidence Pack PDF: fixed a crash ("x and y must
     have same first dimension") when any download/upload/ping reading in
     the period was missing or implausible (this one, current).
-28. (no build ID — this is the installer script, not the app) —
+31. (no build ID — this is the installer script, not the app) —
     `installer.nsi`/`build_installer.bat`: Npcap download URL was pinned
     to a stale version; bumped, plus a stale build-script banner fixed
     (this one, current).
-29. (no build ID — build script only) — `build_installer.bat` now
+32. (no build ID — build script only) — `build_installer.bat` now
     downloads and installs the NSIS inetc plugin automatically instead
     of requiring a manual download/extract/copy (could not be run
     end-to-end — no Windows box here, see caveat further down).
-30. `b-4431b665` — installer now auto-installs a speed-test CLI
+33. `b-4431b665` — installer now auto-installs a speed-test CLI
     (librespeed-cli) instead of requiring you to find one yourself; the
     app's own CLI-discovery code updated to match.
-31. (no build ID — installer script only) — the auto-installed inetc
+34. (no build ID — installer script only) — the auto-installed inetc
     plugin from #21 failed on your machine ("Plugin not found, cannot
     call inetc::get"); removed the inetc dependency from `installer.nsi`
     entirely instead of patching the plugin-installer further.
-32. `b-b2a464b9` — added a Settings field for the advertised download/
+35. `b-b2a464b9` — added a Settings field for the advertised download/
     upload speed the ISP Evidence Pack compares against (previously
     config-file-only); also fixed the in-app guide's stale "five preset
     colour themes" line — it's actually twelve.
-33. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
+36. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
     rest of the app, using your active colour theme's download/upload/
     ping colours for the charts.
-34. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
+37. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
     moved off the middle of the canvas onto the actual blocked external
     server it refers to.
-35. `b-8834f5f5` — EtherApe window: new "LAN SCAN" button — active subnet
+38. `b-8834f5f5` — EtherApe window: new "LAN SCAN" button — active subnet
     scan with full name resolution, MAC/vendor, and open ports, shown as
     both a table and a live network map.
-36. `b-738e198c` — LAN Scan map redone as an icon topology diagram (router
+39. `b-738e198c` — LAN Scan map redone as an icon topology diagram (router
     hub + connected device icons with name/IP/ports underneath), replacing
     the plain dot-grid from #27.
-37. `b-340c4b04` — LAN Scan is now several times faster: hosts are scanned
+40. `b-340c4b04` — LAN Scan is now several times faster: hosts are scanned
     concurrently instead of one at a time.
-38. `b-a1d0e459` — LAN Scan map icons are now real device artwork, cropped
+41. `b-a1d0e459` — LAN Scan map icons are now real device artwork, cropped
     from the Visio stencil screenshot you sent, instead of hand-drawn
     shapes.
-39. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
+42. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
     glowing hardware-monitor-style waveform, updating on its own faster
     timer.
-40. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
+43. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
     removed; new "System" button opens a full System Monitor window built
     after watching Dave Plummer's Task Manager OG demo.
-41. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
+44. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
     / Performance / Processes) after watching the actual video instead of
     working from a transcript alone.
-42. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
+45. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
     full-window rebuild on every page/tab click that was making it feel
     slow and clunky.
-43. `b-a1d07a24` — System Monitor: full 13-page rebuild to match the real
+46. `b-a1d07a24` — System Monitor: full 13-page rebuild to match the real
     TMOG app you screen-recorded (System Info, App history, Startup apps,
     Users, Services, Power & Freq, Connections, Installed Apps, Disk
     Space, Benchmarks — the 8 pages the video has that the 3-page rebuild
     in #33 didn't), plus `nvidia-ml-py` now bundled into the installer
     build automatically.
-44. `b-028de0ed` — CRITICAL FIX: the CPU benchmark added in #35 was
+47. `b-028de0ed` — CRITICAL FIX: the CPU benchmark added in #35 was
     launching a full new copy of the entire app (new window, new threads,
     everything) once per CPU core every time it ran, because of a
     Windows/PyInstaller multiprocessing pitfall I didn't catch in the
     Linux sandbox. Fixed — see the entry above this one.
-45. `b-5cbb9230` — "System" button now launches the real Task Manager
+48. `b-5cbb9230` — "System" button now launches the real Task Manager
     TMOG app (bundled + silently installed by the installer) instead of
     the from-scratch rebuild from #33-#35.
-46. (no build ID — installer script only) — installer now installs and
+49. (no build ID — installer script only) — installer now installs and
     configures WSL, then installs Kali Linux, as a pen-testing
     environment. Step 1 of 2 — GUI panels to drive specific tools inside
     it are a planned follow-up, not built yet.
-47. (no build ID — installer script only) — CRITICAL FIX: #38's WSL
+50. (no build ID — installer script only) — CRITICAL FIX: #38's WSL
     detection reported "not found" on a machine that genuinely had WSL
     installed and working, because of a 32-bit-installer/WOW64 path bug.
     Fixed.
-48. `b-5ecee4c5` — new "Pen Test" button next to "System" on the main
+51. `b-5ecee4c5` — new "Pen Test" button next to "System" on the main
     dashboard, runs `wsl -d kali-linux -- kex --sl -s`.
-49. `b-b6a3a1fb` + installer script — "Pen Test" now opens an Nmap scanner
+52. `b-b6a3a1fb` + installer script — "Pen Test" now opens an Nmap scanner
     GUI with an AI box that crafts scans and recommends next steps; Kali
     desktop is still one click away inside it.
-50. `b-30771036` — Nmap GUI: new "Report" button generates a self-contained
+53. `b-30771036` — Nmap GUI: new "Report" button generates a self-contained
     HTML report of the scan.
-51. `b-6e2b823c` — "Kali Desktop" button now runs `wsl -d kali-linux` then
+54. `b-6e2b823c` — "Kali Desktop" button now runs `wsl -d kali-linux` then
     plain `kex` — dropped the `--sl -s` (seamless mode + sound) flags.
-52. `b-c4249a31` — CRITICAL FIX: #43's button crashed Xfce on your real
+55. `b-c4249a31` — CRITICAL FIX: #43's button crashed Xfce on your real
     machine ("Unable to start notification daemon ... wlr-layer-shell")
     even though typing the same two steps by hand worked fine. Fixed by
     running `kex` through a login shell.
-53. `b-c6e3c79a` — CRITICAL FIX: #44's Xfce crash was gone, but the button
+56. `b-c6e3c79a` — CRITICAL FIX: #44's Xfce crash was gone, but the button
     still didn't work — console popped up and closed immediately, no
     desktop. Bare `kex` has no mode flag; switched to Kali's own
     documented `kex --win -s` recipe.
-54. `b-0618aa6b` — CORRECTION to #45: you pasted the real `kex --help`
+57. `b-0618aa6b` — CORRECTION to #45: you pasted the real `kex --help`
     output — window mode IS the default, so #45's "needs a mode flag"
     diagnosis was wrong. The real remaining gap was interactive vs
     non-interactive shell (`~/.bashrc` only loads for interactive shells);
     switched from `bash -lc` to `bash -lic`.
-55. `b-c71b6fc3` — "Kali Desktop" button simplified back to bare
+58. `b-c71b6fc3` — "Kali Desktop" button simplified back to bare
     `wsl -d kali-linux`, no `kex` at all — you asked to just get a shell
     and type `kex` yourself.
-56. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
+59. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
     stale System-button description rewritten to match what it actually
     does now.
-57. `b-6790beaa` — Guide: rewrote the Kali Desktop button paragraph —
+60. `b-6790beaa` — Guide: rewrote the Kali Desktop button paragraph —
     you called the previous version "very badly written" and pasted it
     back at me.
-58. `b-52b7391c` — CRITICAL FIX: the gauge cards (Download/Upload/Ping/
+61. `b-52b7391c` — CRITICAL FIX: the gauge cards (Download/Upload/Ping/
     DNS strip at the top of the dashboard) never picked up a Colour Theme
     change — only the historical charts further down did.
-59. (no build ID — `build_installer.bat` only, not the app) — Step 1 of
+62. (no build ID — `build_installer.bat` only, not the app) — Step 1 of
     the build (`SpeedtestMonitor.exe` itself) now wipes the old exe first
     and refuses loudly if it's locked, instead of possibly rebuilding
     over it silently.
-60. `b-a3b670a8` — CRITICAL FIX (two bugs, one report): the Live traffic
+63. `b-a3b670a8` — CRITICAL FIX (two bugs, one report): the Live traffic
     panel's title was gone for good the moment it had real data, and
     Colour Theme only ever reached three of the six chart panels — DNS
     history, the DNS gauge, and the DNS row in Statistics were always a
     fixed colour no matter the theme. Also found and fixed a second,
     unrelated theme bug while in there: 7 of the app's 12 themes could
     never survive an app restart.
-61. `b-ef1e7021` — CRITICAL FIX: found the actual reason the System
+64. `b-ef1e7021` — CRITICAL FIX: found the actual reason the System
     button / Task Manager TMOG content wasn't showing up in the Guide,
     and it wasn't the Guide text — it was that the "? GUIDE" button never
     opens the Tkinter guide I'd been editing all session; it opens a web
@@ -167,7 +170,7 @@ One hundred and four things this session. Build IDs for reference:
     un-synced list that had never heard of "Pen Test." System (Task
     Manager TMOG) now gets its own page too, and both new pages have a
     real embedded screenshot.
-62. `b-09f33cdb` — you (Trevor) added HTTPS support to the embedded web
+65. `b-09f33cdb` — you (Trevor) added HTTPS support to the embedded web
     server and the remote client yourself — `speedtest_monitor.py` now
     wraps its socket in TLS when `ssl_cert`/`ssl_key` are configured,
     and `nm_client.py` now trusts the server's cert (or falls back to
@@ -176,30 +179,30 @@ One hundred and four things this session. Build IDs for reference:
     HTML report both still hardcoded `http://`, so they'd have silently
     broken the moment HTTPS was actually on — fixed both, plus synced
     everything.
-63. `b-464af3fd` — fixed the IDS report's hardcoded `http://localhost:8765`
+66. `b-464af3fd` — fixed the IDS report's hardcoded `http://localhost:8765`
     (flagged last build as a known, pre-existing, unrelated gap) now that
     you sent your real `netsentinel.crt`/`.key` and I could verify the
     whole HTTPS chain against your actual files instead of a throwaway
     test cert.
-64. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
+67. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
     found (and fixed) the same hardcoded-`http://` bug in three more
     places my previous "check all the others" pass missed entirely.
-65. `b-fe30eb24` — colour themes now apply to all 11 web-served pages
+68. `b-fe30eb24` — colour themes now apply to all 11 web-served pages
     (Guide, Monitor, Threat Radar, Honeypot, Remote Agents, Top Talkers,
     Topology, VDI, Analytics, the mobile dashboard, and the 3D view's 2D
     HUD) — previously the 12 themes only touched the main dashboard's
     gauges, the Remote Agents chart, and the Evidence Pack PDF.
-66. `b-d3604f66` — captured-traffic pcap file is now actually deleted when
+69. `b-d3604f66` — captured-traffic pcap file is now actually deleted when
     the app closes, instead of only being wiped at the *next* launch.
-67. `b-1fbadf59` — the Wireshark Monitor window itself now stops capture
+70. `b-1fbadf59` — the Wireshark Monitor window itself now stops capture
     and deletes the pcap when just that window is closed (X button), not
     only when the whole app quits — closes the gap flagged in the last
     entry.
-68. `b-e787ec87` — you reported "reporting is broken"; found and
+71. `b-e787ec87` — you reported "reporting is broken"; found and
     fixed the actual crash — `_fmt_ms()` had no `None` guard, so any HTML
     report over a period with no ping or DNS readings threw
     `TypeError: unsupported format string passed to NoneType.__format__`.
-69. `b-ed99f4cc` — EtherApe toolbar redesign: the old two-row,
+72. `b-ed99f4cc` — EtherApe toolbar redesign: the old two-row,
     ~55-control toolbar (the "mess" you flagged, that needed full-screen to
     see half of it) is replaced with a left icon rail + collapsible bottom
     filters drawer (the "Option B" mockup you picked). Plus two real,
@@ -208,11 +211,11 @@ One hundred and four things this session. Build IDs for reference:
     button permanently stuck disabled, and a window-packing order bug that
     could make the bottom status bar and the LIVE/REPLAY scrubber bar
     invisible whenever the window's content needed more height than it had.
-70. `b-c368fa76` — rail button text was too small to read (your report);
+73. `b-c368fa76` — rail button text was too small to read (your report);
     bumped the rail icon buttons from 6pt to 8pt and re-verified nothing
     gets squeezed. Also traced your "DNS is broken" report — turned out to
     be two different panels, one working as designed (see entry 63).
-71. `b-e0c512dc` — found and fixed the real bug behind "Visited
+74. `b-e0c512dc` — found and fixed the real bug behind "Visited
     Hosts" staying empty: it was reading the *shortened* display name
     ("Google", "Amazon" — no dot) instead of the actual resolved domain,
     so real hostnames for every well-known provider — which is most real
@@ -220,26 +223,26 @@ One hundred and four things this session. Build IDs for reference:
     (`'ip'` vs `'id'`) that meant the panel's own backup DNS-resolution
     kick-off never actually ran. Turned out not to be the whole story —
     see entry 64.
-72. `b-7118b630` — the actual root cause of "Visited Hosts" is empty,
+75. `b-7118b630` — the actual root cause of "Visited Hosts" is empty,
     confirmed against your real machine: nothing was resolving *at all*
     for external hosts, DNS or PTR, VPN on or off. Added TLS SNI sniffing
     as a second, independent hostname source that doesn't depend on DNS
     working at all — see the section below for why plain DNS sniffing was
     never going to be enough in 2026. It worked — `api.telegram.org`
     showed up in your very next screenshot.
-73. `b-25adc03e` — found and fixed the real bug behind the Sankey legend
+76. `b-25adc03e` — found and fixed the real bug behind the Sankey legend
     not listing every colour actually on screen (your "green ribbons, no
     legend entry" report): the legend and the ribbons were reading two
     different fields — a node's single, last-packet-wins protocol tag vs.
     each flow's own, more specific protocol — so a protocol like TLS
     could colour a ribbon without ever being any node's tag, and the
     legend simply never knew it existed.
-74. `b-7ee49e69` — moved the MIN TRAFFIC (flow-size) slider out
+77. `b-7ee49e69` — moved the MIN TRAFFIC (flow-size) slider out
     of the collapsed FILTERS & BLOCKING drawer and onto the always-visible
     top toolbar, and fixed a real bug in the slider itself: its handle was
     drawn in the exact same colour as the toolbar background, so even
     with the drawer open the handle was effectively invisible.
-75. `b-85909778` — 3D view: the VPN status pill (shows
+78. `b-85909778` — 3D view: the VPN status pill (shows
     "○ VPN" when idle, "🔒 TAILSCALE"/"🔒 NORDVPN"/etc. when a tunnel is
     actually carrying traffic) was independently centred over the top
     header, with no awareness of the nodes/flows/pkts stats and toolbar
@@ -247,14 +250,14 @@ One hundred and four things this session. Build IDs for reference:
     at your screen's approximate width and confirmed it collides.
     Repositioned it to sit below both header rows instead, verified with
     the same real-browser test at three window widths.
-76. `b-0517e611` — Top Flow Talkers: gave the ribbons the same
+79. `b-0517e611` — Top Flow Talkers: gave the ribbons the same
     scrolling neon circuit-trace overlay the 3D view's protocol bars use,
     and fixed the real reason incoming flows looked like an unreadable
     blur — a particle speed/count calculation that only ever measured
     against the biggest OUTGOING flow, so any incoming flow bigger than
     that (a big download vs. a tiny request — normal, everyday asymmetric
     traffic) blew way past its intended bounds.
-77. `b-58cf88ca` — the new Top Flow Talkers trace overlay from
+80. `b-58cf88ca` — the new Top Flow Talkers trace overlay from
     #68 was gated at 20px of band thickness (copied from an unrelated
     effect that needed that floor to avoid strobing), which silently
     excluded most flows in any capture with one dominant host and a long
@@ -265,7 +268,7 @@ One hundred and four things this session. Build IDs for reference:
     straight from the WebGL 3D bars, which look right there because
     WebGL adds its own bloom on top; a flat 2D canvas has no bloom, so
     the same numbers just looked dim.
-78. `b-4edd6c7a` — switched the default local AI model from llama3.2 to
+81. `b-4edd6c7a` — switched the default local AI model from llama3.2 to
     deepseek-r1:7b everywhere it's referenced in the app (Flow Detail AI
     box, Settings, the Guide, and the actual Ollama call itself), and
     added the handling a reasoning model like deepseek-r1 actually needs
@@ -274,62 +277,62 @@ One hundred and four things this session. Build IDs for reference:
     before the text reaches any panel or JSON parser, and the reply token
     budget was raised so that reasoning doesn't eat the whole allowance
     and leave nothing for the actual answer.
-79. `b-abb8c4b4` — added a floating "AI QUERY" button to every one of the
+82. `b-abb8c4b4` — added a floating "AI QUERY" button to every one of the
     11 web-served pages (previously the only free-form "ask the AI" boxes
     lived in the desktop app; the web pages only had a couple of
     single-purpose canned-prompt buttons).
-80. `b-2433c0ac` — clicking RUN TEST on the main dashboard now pops up a
+83. `b-2433c0ac` — clicking RUN TEST on the main dashboard now pops up a
     live speed-test gauge, needle and all, like Ookla's own app. See the
     section below for how it actually gets "live" numbers, since the real
     speed-test CLI turned out not to offer any.
-81. `b-36cc030b` — investigated the "dashboard still shows 5.0 Mbps while
+84. `b-36cc030b` — investigated the "dashboard still shows 5.0 Mbps while
     the log says 27.57" report; hardened the dashboard's DB read against
     the most plausible cause found at the time (see the section below —
     this turned out not to be the actual cause, but the hardening is
     harmless and stays in).
-82. `b-8854f5c0` — found and fixed the REAL cause of the above: the
+85. `b-8854f5c0` — found and fixed the REAL cause of the above: the
     automatic scheduled speed test and a manually-triggered one could run
     at the same time, each corrupting the other's reading. Confirmed fixed
     on your machine.
-83. `b-8cef6209` — the "web" and "SQLite" status-bar dots at the bottom of
+86. `b-8cef6209` — the "web" and "SQLite" status-bar dots at the bottom of
     the dashboard were stuck on the same dim grey they're created with,
     forever, regardless of whether the web server or database were actually
     up. See the section below.
-84. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
+87. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
     turns a glow/bloom effect on and off for every chart on the main
     dashboard. See the section below.
-85. `b-c5d3c0c0` — embedded guide (desktop "? GUIDE" window and
+88. `b-c5d3c0c0` — embedded guide (desktop "? GUIDE" window and
     the web `/guide` page) updated to document everything new this
     session: the BLOOM button, the status bar's now-real dots, the
     live speed-test gauge popup, and the web AI Query button. See the
     section below.
-86. `b-bf352903` — new "⇪ PUSH" button on the main dashboard:
+89. `b-bf352903` — new "⇪ PUSH" button on the main dashboard:
     deploys the agent to a remote Windows (WinRM) or Linux (SSH) box
     given login credentials, starts it immediately, and installs it to
     auto-run on every reboot. Guide updated with a dedicated "Push
     Agent" section; the Push Agent window itself also explains what it
     does before you use it. See the section below.
-87. (no build ID — build scripts only) — real-world Push Agent deploy hit
+90. (no build ID — build scripts only) — real-world Push Agent deploy hit
     "paramiko isn't installed in this build" even after the #78 fix; root
     cause was two layers deeper than the first patch (see the follow-up
     under the Push Agent section below) — `build.bat`/`build_installer.bat`
     now resolve one Python consistently and self-heal a missing `pip` via
     `ensurepip`. Confirmed working by you on the Linux deploy path.
-88. `b-5385a8bb` (current) — client (`nm_client.py`) rework: dashboard,
+91. `b-5385a8bb` (current) — client (`nm_client.py`) rework: dashboard,
     Latency and Quality tabs now actually draw graphs (a matplotlib
     packaging bug was silently killing every chart in the built .exe);
     Agents tab rebuilt to match the desktop app's own agent detail;
     firewall "not elevated" message rewritten to explain the real UAC
     cause; look-and-feel restyled (Command Deck discipline + single
     accent colour). See the section below.
-89. `b-7a2f19cc` — proof the elevation disagreement is a real
+92. `b-7a2f19cc` — proof the elevation disagreement is a real
     bug, not you: the status bar's own "⚡ ELEVATED" tag now also shows
     its PID, and `/api/firewall` now returns the PID of whichever process
     actually answered the request, shown right in the firewall tab's
     warning — so a mismatched PID (a stale second instance still bound
     to the port) is directly visible instead of argued about. See the
     section below.
-90. `b-9c41e7d0` — the actual root cause, found from the PID/
+93. `b-9c41e7d0` — the actual root cause, found from the PID/
     error-message data you sent back: the "improved" `TokenElevation`
     check was failing on your real machine every single time with
     `OSError: [WinError 6] The handle is invalid`, silently falling back
@@ -337,28 +340,28 @@ One hundred and four things this session. Build IDs for reference:
     just happened to fall back to the right answer. Cause was a bug on my
     end (missing ctypes type declarations, not a UAC/account issue), now
     fixed. See the section below.
-91. `b-2f8e6a51` — after that fix, the client showed the exact
+94. `b-2f8e6a51` — after that fix, the client showed the exact
     same warning again post-rebuild. Added a `build` field to
     `/api/firewall` and to the firewall tab's warning so this stops being
     guesswork: the raw response now proves whether the machine actually
     answering that request is running current code at all, instead of
     theorizing about it. See the section below.
-92. `b-71c4a08e` — "the real cause" above came back: dashboard
+95. `b-71c4a08e` — "the real cause" above came back: dashboard
     vs. console mismatch again, mostly after the app's been running a
     while. The `_running_manual`/`_running_auto` guard from `b-8854f5c0`
     was real and did help, but it was a plain check-then-set with a gap
     two of the four start points could still both slip through in the
     same instant — closed that gap with an actual lock. See the section
     below.
-93. `b-f4e5ec66` (current) — Time-of-Day Heatmap now uses your actual
+96. `b-f4e5ec66` (current) — Time-of-Day Heatmap now uses your actual
     selected theme's colours instead of a fixed viridis/magma_r palette,
     and re-colours live if you change theme while it's open. See the
     section below.
-94. `b-f4e5ec66` (current) — AI briefing's "Ollama has no model" error was
+97. `b-f4e5ec66` (current) — AI briefing's "Ollama has no model" error was
     genuinely undiagnosable when you'd already pulled the model — it never
     said which Ollama it actually asked or what that Ollama has installed.
     Now it names both. See the section below.
-95. (no separate build — bundled into `b-f4e5ec66`) — found and removed a
+98. (no separate build — bundled into `b-f4e5ec66`) — found and removed a
     dead, unreachable `return rows` line in `_windowed_pids()` while
     running the full test suite for #85/#86 (a stray leftover statement
     after the function's real `return pids`, referencing a variable that
@@ -367,49 +370,49 @@ One hundred and four things this session. Build IDs for reference:
     actually available to run it). Unrelated to anything you asked for
     this session; fixed because it was sitting right there failing a test
     I was running anyway.
-96. `b-51d3ca67` — you pasted the #86 fix's own error message
+99. `b-51d3ca67` — you pasted the #86 fix's own error message
     back at me showing "no model" for a model that its own "Installed
     there" list said WAS installed at the right endpoint — meaning #86
     correctly diagnosed the situation but hadn't actually closed it. See
     the section below.
-97. `b-46815a9c` — "same message your getting on my tits fix
+100. `b-46815a9c` — "same message your getting on my tits fix
     it" — #88's fix didn't stop it recurring either. Rather than guess a
     fourth cause blind, made the error itself carry enough forensic detail
     (build id, Ollama's raw response, proof of whether the retry used a
     byte-identical name) that whatever happens next is diagnosable from
     the error text alone, without another round trip. See the section
     below.
-98. `b-ee1cd001` — #89's diagnostic did its job on the very next
+101. `b-ee1cd001` — #89's diagnostic did its job on the very next
     try: your pasted error revealed the real cause was never a model
     problem at all — Ollama's own `llama-server.exe` engine binary is
     missing on your machine. Fixed the app's own bug that misdiagnosed
     this as "has no model" and pointed you at a useless `ollama pull`, and
     replaced it with the actual cause and fix. See the section below.
-99. `b-5239b070` — "update the guide please": the embedded
+102. `b-5239b070` — "update the guide please": the embedded
     in-app guide's Troubleshooting → "AI Query returns an error" section
     now covers the enriched "has no model" diagnostics and the
     "llama-server.exe missing" / antivirus-quarantine case from #89-#90,
     and the Time-of-Day Heatmap section now mentions that its colours
     follow your theme (#85). No behaviour change — text only.
-100. `b-00aa1a4b` — "under what section is the wsl setup" / "yes
+103. `b-00aa1a4b` — "under what section is the wsl setup" / "yes
     i do" — the guide had no real Pi-hole/WSL section at all (just one
     sidebar-button bullet) and the Kali Desktop entry was one line. Added
     a full Pi-hole (WSL/Docker) section and expanded Kali Desktop with
     what it actually does and its real first-run-setup requirement. See
     the section below.
-101. `b-105b6e8a` — "in the 3d view get rid of the floor and make
+104. `b-105b6e8a` — "in the 3d view get rid of the floor and make
     the space background a deep black so the stars stand out more" — floor
     grid + its solid fill mesh are gone entirely (not just hidden), the sky
     gradient/fog/clear-colour are now all near-black, and the GRID button
     now only controls the (untouched) wall grids. See the section below.
-102. `b-b0d1c6df` — you sent a video: "floor is a different black
+105. `b-b0d1c6df` — you sent a video: "floor is a different black
     to the sides and there is a weird moire effect going on. make the sides
     the same colour as the floor" — the walls (#93 left them untouched) were
     still pinned to the old, now-removed floor's colour, which is why they
     stood out against the new deep-black backdrop. Walls now pull their
     colour from the exact same constant the backdrop's fog uses, and the
     wall grid lines were darkened to match. See the section below.
-103. `b-c385dd98` — "moire still there" (with screenshots) — #94's
+106. `b-c385dd98` — "moire still there" (with screenshots) — #94's
     diagnosis was wrong: the moire wasn't the walls at all, it was the deep-
     black SKY GRADIENT itself banding (values so close to 0 that most of its
     512 rows round to identical 8-bit colour and step in hard rings once
@@ -417,7 +420,7 @@ One hundred and four things this session. Build IDs for reference:
     Fixed by dithering the gradient before it's quantized. Confirmed the bug
     and the fix in a real headless-Chromium canvas, not just reasoning about
     it. See the section below.
-104. `b-a4056eca` (current) — "you've made it worse, stop guessing and fix it
+107. `b-a4056eca` (current) — "you've made it worse, stop guessing and fix it
     once and for all" (with a much more visible ripple pattern in the
     screenshot) — #95's dithering fix was real and measured, but dithering
     an 8x512 texture with no mipmaps that then gets minified onto a
@@ -7534,3 +7537,26 @@ Put those two facts together and the confusion made complete sense: you were loo
 
 **Not done / your call:** the exe has to be rebuilt and reinstalled for any of this to take effect (edits to the .py files do not change `C:\Program Files\NetworkMonitor`). The `MemoryError` in the main window's chart drawing is a separate pre-existing bug I have not touched.
 
+## Top Flow Talkers: a cleaner, more readable ribbon panel (build b-7c15e3d9)
+
+You asked for ideas on making the Top Flow Talkers view in the 3D page more aesthetically pleasing, then asked for all nine. What changed, in the panel's own terms:
+
+- **Calmer texture.** The circuit-trace pattern was rebuilt as a 1280×168 tile with rounded corners, thin lines and a faint glow, drawn at roughly a third of its old strength. It scrolls slowly in the flow direction (faster for busier flows) and no longer visibly repeats down wide ribbons.
+- **Ribbon surface.** Each ribbon has a horizontal gradient that stays visible all the way to its host card, a vertical sheen, and a glowing rim on both edges. Blocked flows keep their red warning stripes.
+- **Readable labels.** Host names moved off the ribbons into cards in a column on the right: country chip (LAN for local hosts), name (org when only an IP is known), org · IP · protocol · share, volume, a trend arrow, and ⛔ blocked / ⚠ suspicious markers. Cards are click targets and open the same details popup as a ribbon.
+- **Fits the window.** Remote ends are fixed-height slots aligned with the cards, so destinations never run off the right edge. Volume is shown by ribbon thickness at the source end using a soft sqrt blend. The canvas height now comes from its container, so the bottom of the Incoming section is no longer clipped.
+- **Light pulses.** The old diamond/ring shapes became glowing comet pulses with fading tails; count and speed still follow throughput. The three busiest ribbons also get a stronger light sweep and a faint binary string.
+- **Hover focus.** Hovering a ribbon or card brightens it, dims the rest and shows a tooltip on ribbons (name, org/country, direction, protocol, volume, share).
+- **Text sizes.** Title 12→15 px, subtitle 11→12 px (single line with ellipsis), legend 10→12 px.
+- **Not changed:** the Bloom button belongs to the globe scene and was left as it was; the volume figure is total bytes in the capture window rather than a live rate, because the bytes counters are not a clean cumulative total from which a rate can be derived honestly.
+
+## Geo Map: sharp map instead of a stretched 1440×720 image (build b-91a4d2f6)
+
+The Geo Map window loaded `~/.nm_world_map.jpg` (the embedded 1440×720 night-earth image) and explicitly resized it to 1440×720, then matplotlib stretched that across a maximised window, which looked soft on a large or high-DPI screen. Now `_load_world_map` first tries the NASA Black Marble night map cached by the 3D globe (`~/.nm_vendor/earth_night_hi.jpg`, 8192×4096), downsizing it to a screen-appropriate width (`_geo_target_width`, 2560–4096 px) with a cheap JPEG draft decode. If that file is not there yet it falls back to the old image, calls `_nm_earth_kick()` to fetch the sharp map in the background, and polls every 6 s (for about 10 minutes) to swap it in. While zoomed in (view narrower than 140° of longitude), a native-resolution crop with a 30% margin is decoded off the UI thread and layered over the base map; zooming back out hides it. The 8192 file is never held in memory in full: the base map is 4096 px wide and a crop is capped at 4096 px.
+
+
+## Time-of-Day Heatmap: dashboard look (build b-e5b30c18)
+
+**What you asked:** "make the heatmap look more like this" (rainbow thermal dashboard), previewed, then "no make it like this" (dark glass-panel dashboard with a rainbow world map and neon charts), previewed, approved.
+
+**What changed:** a world map does not fit a weekday-by-hour table, so the *style* was applied: deep-navy backdrop with coloured corner glows and faint flowing traces, glass panels, gradient-lit bar and area charts, a glowing orb for the best slot. Every side panel is computed from the same 7x24 median grid as the field (daily trend from a per-day median query), so the numbers always agree with the centre. The layout is computed in inches from the live figure size and re-run (debounced) on window resize. Code: `_nm_heatmap_dashboard`, `_nm_heatmap_daily`, `_nm_grad_bar`, `_NM_DASH`; `_nm_open_heatmap` gets the Dashboard switch. Verified by rendering the real window under xvfb with 60 days of synthetic readings for download and latency, and by `test_heatmap_theme.py`.

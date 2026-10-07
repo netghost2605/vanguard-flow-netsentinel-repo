@@ -2713,7 +2713,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-2d84f0a6'
+_NM_BUILD_ID = 'b-e5b30c18'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -4952,6 +4952,380 @@ def _nm_heatmap_cmap(theme, metric, higher_better):
     return cmap.reversed() if not higher_better else cmap
 
 
+# Vivid spectrum for the time-of-day heatmap: deep indigo -> blue -> cyan -> green
+# -> yellow -> orange -> hot red. This is the glowing "thermal field" look; the
+# older theme-accent ramp (_nm_heatmap_cmap) is still available via the window's
+# "Vivid colours" switch.
+_NM_VIVID_STOPS = [(0.00, '#0a1650'), (0.18, '#1e3fd0'), (0.36, '#14b8e0'),
+                   (0.52, '#2fe07a'), (0.68, '#f2e63c'), (0.84, '#ff9a1e'),
+                   (1.00, '#ff3d2e')]
+
+
+def _nm_vivid_cmap(higher_better=True):
+    """Warm end = the GOOD end, same convention as the theme ramp: high for
+    download/upload, low for latency."""
+    from matplotlib.colors import LinearSegmentedColormap
+    cm = LinearSegmentedColormap.from_list('nm_heat_vivid', _NM_VIVID_STOPS, N=512)
+    return cm if higher_better else cm.reversed()
+
+
+def _nm_heatmap_smooth(grid, sigma=0.75, U=16):
+    """Smooth the 7x24 median grid into a continuous field.
+
+    Normalised Gaussian convolution: each output pixel is the kernel-weighted
+    mean of the cells that HAVE data, so empty cells are neither treated as zero
+    nor invented from nothing -- 'coverage' says how much real data supports each
+    pixel, and the painter fades the field out where it is thin. Separable, so
+    it is two small matrix products. Cell i spans [i-0.5, i+0.5] on both axes.
+
+    Returns (field, coverage, xs, ys); field is NaN where coverage is ~0."""
+    D, H = grid.shape
+    valid = np.isfinite(grid)
+    vals = np.where(valid, grid, 0.0)
+    ys = (np.arange(D * U) + 0.5) / U - 0.5
+    xs = (np.arange(H * U) + 0.5) / U - 0.5
+    ky = np.exp(-0.5 * ((ys[:, None] - np.arange(D)[None, :]) / sigma) ** 2)
+    kx = np.exp(-0.5 * ((xs[:, None] - np.arange(H)[None, :]) / sigma) ** 2)
+    num = ky @ vals @ kx.T
+    den = ky @ valid.astype(float) @ kx.T
+    full = ky.sum(1)[:, None] * kx.sum(1)[None, :]          # coverage if every cell had data
+    with np.errstate(invalid='ignore', divide='ignore'):
+        field = np.where(den > 1e-6, num / den, np.nan)
+    cov = np.clip(den / np.maximum(full, 1e-9), 0.0, 1.0)
+    return field, cov, xs, ys
+
+
+def _nm_heatmap_paint(ax, grid, ui, theme, metric, higher_better, smooth=True, vivid=True):
+    """Draw the heatmap onto ax and return the mappable for the colourbar.
+
+    smooth=False: the classic one-flat-colour-per-cell table. smooth=True: a
+    glowing continuous field (soft bloom underneath, contour lines over it, a
+    glowing orb on the best and worst cells). Cell coordinates are unchanged
+    either way (cell i at x=i / y=i), so hover, pinning and the 'now' marker work
+    identically."""
+    from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
+    cmap = _nm_vivid_cmap(higher_better) if vivid else _nm_heatmap_cmap(theme, metric, higher_better)
+    D, H = grid.shape
+    lo = float(np.nanmin(grid)); hi = float(np.nanmax(grid))
+    if not hi > lo:
+        hi = lo + 1.0
+    norm = Normalize(lo, hi)
+    if not smooth:
+        masked = np.ma.masked_invalid(grid)
+        im = ax.imshow(masked, aspect='auto', cmap=cmap, origin='upper',
+                       interpolation='nearest')
+        im.cmap.set_bad(ui['bg'])
+        return im
+
+    ext = (-0.5, H - 0.5, D - 0.5, -0.5)
+
+    def _rgba(f, c, scale, thr):
+        a = np.clip((c - thr) / 0.35, 0.0, 1.0) * scale
+        out = np.asarray(cmap(norm(np.nan_to_num(f, nan=lo))), dtype=float)
+        out[..., 3] = np.where(np.isfinite(f), a, 0.0)
+        return out
+
+    f_bloom, c_bloom, _, _ = _nm_heatmap_smooth(grid, sigma=1.8)
+    f_main, c_main, xs, ys = _nm_heatmap_smooth(grid, sigma=0.75)
+    ax.imshow(_rgba(f_bloom, c_bloom, 0.55, 0.04), extent=ext, aspect='auto',
+              interpolation='bicubic', zorder=1)               # soft glow, bleeds past the data
+    ax.imshow(_rgba(f_main, c_main, 0.97, 0.14), extent=ext, aspect='auto',
+              interpolation='bicubic', zorder=2)               # the field itself
+
+    # Contour "flow lines" over the field, like a topographic / thermal map.
+    try:
+        m = np.ma.masked_where(~np.isfinite(f_main) | (c_main < 0.30), f_main)
+        if m.count() > 8 and hi > lo:
+            ax.contour(xs, ys, m, levels=np.linspace(lo, hi, 12)[1:-1], colors='white',
+                       linewidths=0.55, alpha=0.30, zorder=3)
+    except Exception:
+        _exc_debug('_nm_heatmap_paint contour')
+
+    # Glowing orbs: best cell (filled glow) and worst cell (ring).
+    try:
+        bi = np.unravel_index(np.nanargmax(grid) if higher_better else np.nanargmin(grid), grid.shape)
+        wi = np.unravel_index(np.nanargmin(grid) if higher_better else np.nanargmax(grid), grid.shape)
+        for (d, h), ring in ((bi, False), (wi, True)):
+            col = cmap(norm(grid[d, h]))
+            for sz, al in ((1500, 0.09), (560, 0.18), (170, 0.34)):
+                ax.scatter([h], [d], s=sz, color=col, alpha=al, linewidths=0, zorder=4)
+            if ring:
+                ax.scatter([h], [d], s=190, facecolors='none', edgecolors='white',
+                           linewidths=1.1, alpha=0.75, zorder=5)
+            else:
+                ax.scatter([h], [d], s=30, color='white', alpha=0.95, linewidths=0, zorder=5)
+    except Exception:
+        _exc_debug('_nm_heatmap_paint orbs')
+    ax.set_xlim(-0.5, H - 0.5); ax.set_ylim(D - 0.5, -0.5)
+    return ScalarMappable(norm=norm, cmap=cmap)
+
+
+# ── Dashboard styling for the heatmap window ─────────────────────────────────
+# Dark glass panels around the heat field: best/worst orb, hour-of-day and
+# day-of-week spectrum bars, a gradient daily-trend area, a colour-scale legend
+# and a short summary. Everything is drawn from the SAME 7x24 grid the heatmap
+# uses, so the numbers always agree with the field in the middle.
+_NM_DASH = {'bg': '#060a1c', 'panel': '#0d1630', 'edge': (0.45, 0.62, 0.95, 0.30),
+            'text': '#e8f1ff', 'text2': '#8fa8cc', 'tag': '#7fb0ff'}
+
+
+def _nm_heatmap_daily(db, metric, days):
+    """Median per calendar day over the window -> (dates, values)."""
+    conn = db._conn()
+    now = datetime.now()
+    rows = conn.execute(
+        f"SELECT ts, {metric} AS v FROM readings WHERE ts >= ? AND {metric} IS NOT NULL "
+        f"ORDER BY ts", ((now - timedelta(days=days)).isoformat(),)).fetchall()
+    by = {}
+    horizon = now + timedelta(minutes=1)
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(r['ts']); v = float(r['v'])
+        except Exception:
+            continue
+        if t > horizon or (v <= 0 and metric != 'ping'):
+            continue
+        by.setdefault(t.date(), []).append(v)
+    ks = sorted(by)
+    return ks, [float(np.median(by[k])) for k in ks]
+
+
+def _nm_grad_bar(ax, x0, x1, h, col, navy):
+    """One spectrum bar: dim at the base, glowing at the tip, with a bright cap."""
+    n = 48
+    t = np.linspace(0, 1, n)[:, None]
+    rgb = np.asarray(col[:3], dtype=float)
+    img = np.zeros((n, 1, 4))
+    img[:, 0, :3] = (0.30 + 0.70 * t) * rgb + (0.70 - 0.70 * t) * navy
+    img[:, 0, 3] = 0.50 + 0.50 * t[:, 0]
+    ax.imshow(img, extent=(x0, x1, 0, h), origin='lower', aspect='auto',
+              interpolation='bilinear', zorder=3)
+    ax.plot([x0, x1], [h, h], color=rgb, lw=1.3, alpha=0.95, zorder=4,
+            solid_capstyle='round')
+
+
+def _nm_heatmap_dashboard(fig, grid, counts, db, metric, label, unit, higher_better,
+                          days, theme, ui, smooth, vivid, DAYS):
+    """Lay out the dashboard on `fig`; returns (heat_axes, mappable)."""
+    from matplotlib.colors import Normalize
+    from matplotlib.patches import FancyBboxPatch, Circle, Polygon, Rectangle
+    D = _NM_DASH
+    W, H = fig.get_size_inches()
+    cmap = _nm_vivid_cmap(higher_better) if vivid else _nm_heatmap_cmap(theme, metric, higher_better)
+    lo = float(np.nanmin(grid)); hi = float(np.nanmax(grid))
+    if not hi > lo:
+        hi = lo + 1.0
+    norm = Normalize(lo, hi)
+    navy = np.array([0.024, 0.039, 0.11])
+
+    def rgb(v):
+        return np.array(cmap(norm(v))[:3])
+
+    def fmt(v):
+        return f'{v:,.0f}' if abs(v) >= 100 else f'{v:,.1f}'
+
+    # ── backdrop: deep navy with a soft centre glow and coloured corners ──
+    bga = fig.add_axes([0, 0, 1, 1], zorder=0)
+    bga.axis('off')
+    yy, xx = np.mgrid[0:1:140j, 0:1:220j]
+    r = np.sqrt(((xx - 0.5) * 1.5) ** 2 + (yy - 0.5) ** 2)
+    glow = np.clip(1 - r * 1.25, 0, 1) ** 1.6
+    img = navy[None, None, :] + (np.array([0.07, 0.12, 0.30]) - navy)[None, None, :] * glow[..., None]
+    for (cx, cy, c, s) in ((0.02, 0.02, (0.0, 0.40, 0.18), 0.05), (0.98, 0.04, (0.40, 0.10, 0.55), 0.05),
+                           (0.98, 0.98, (0.0, 0.25, 0.45), 0.04), (0.04, 0.96, (0.30, 0.08, 0.30), 0.03)):
+        a = np.exp(-(((xx - cx) * 1.6) ** 2 + (yy - cy) ** 2) / s)[..., None] * 0.55
+        img = img * (1 - a) + np.array(c)[None, None, :] * a
+    bga.imshow(np.clip(img, 0, 1), extent=(0, W, 0, H), origin='lower', aspect='auto',
+               interpolation='bilinear', zorder=0)
+
+    # ── geometry ──
+    m, g = 0.22, 0.14
+    sw = min(3.0, max(2.3, 0.225 * W))
+    cx0 = m + sw + g
+    cw = W - 2 * m - 2 * sw - 2 * g
+    usable = H - 2 * m
+
+    def stack(hs):
+        avail = usable - g * (len(hs) - 1); tot = sum(hs); y = H - m; out = []
+        for f in hs:
+            hh = avail * f / tot; y -= hh; out.append((y, hh)); y -= g
+        return out
+    L = stack([1.35, 1.75, 1.75])
+    R = stack([1.6, 2.1, 1.5])
+    rx = W - m - sw
+
+    # faint flowing lines behind the glass, like the reference's data traces
+    try:
+        tt = np.linspace(0, 1, 80)
+        for (y0, y1, c, ph) in ((0.30, 0.72, (0.2, 0.8, 1.0), 0.0), (0.55, 0.40, (1.0, 0.6, 0.2), 1.3),
+                                (0.78, 0.25, (0.7, 0.4, 1.0), 2.4)):
+            xs_ = m + sw * 0.5 + tt * (W - 2 * m - sw)
+            ys_ = (y0 + (y1 - y0) * (3 * tt ** 2 - 2 * tt ** 3)) * H + 0.18 * np.sin(tt * 6.3 + ph)
+            bga.plot(xs_, ys_, color=c, alpha=0.20, lw=0.9, zorder=0.6)
+    except Exception:
+        _exc_debug('heatmap dashboard traces')
+
+    def panel(x, y, w, h, title):
+        p = FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0,rounding_size=0.10',
+                           fc=(0.10, 0.17, 0.40, 0.20), ec=D['edge'], lw=0.9, zorder=1)
+        bga.add_patch(p)
+        bga.plot([x + 0.14, x + w - 0.14], [y + h - 0.006] * 2, color=(1, 1, 1, 0.10), lw=0.8, zorder=1.1)
+        bga.text(x + 0.15, y + h - 0.13, title.upper(), color=D['tag'], fontsize=6.8,
+                 fontweight='bold', va='top', ha='left', zorder=3, fontfamily='monospace')
+        return p
+
+    def sub(x, y, w, h):
+        a = fig.add_axes([x / W, y / H, w / W, h / H], zorder=2)
+        a.set_facecolor('none')
+        for sp in a.spines.values():
+            sp.set_visible(False)
+        a.tick_params(length=0, colors=D['text2'], labelsize=6)
+        return a
+
+    best = np.nanmax(grid) if higher_better else np.nanmin(grid)
+    worst = np.nanmin(grid) if higher_better else np.nanmax(grid)
+    bi = np.unravel_index(np.nanargmax(grid) if higher_better else np.nanargmin(grid), grid.shape)
+    wi = np.unravel_index(np.nanargmin(grid) if higher_better else np.nanargmax(grid), grid.shape)
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter('ignore', RuntimeWarning)      # an hour/day with no data at all
+        hour_med = np.nanmedian(grid, axis=0)
+        day_med = np.nanmedian(grid, axis=1)
+    now = datetime.now()
+
+    # ── LEFT 1: best slot orb ──
+    y, h = L[0]
+    panel(m, y, sw, h, 'Best slot')
+    ocx, ocy = m + 0.62, y + h / 2 - 0.10
+    bc = rgb(grid[bi])
+    for rad, al in ((0.52, 0.06), (0.38, 0.11), (0.26, 0.20), (0.15, 0.45)):
+        bga.add_patch(Circle((ocx, ocy), rad, fc=bc, ec='none', alpha=al, zorder=2))
+    bga.add_patch(Circle((ocx, ocy), 0.07, fc='white', ec='none', alpha=0.95, zorder=3))
+    bga.text(m + 1.25, ocy + 0.13, f'{DAYS[bi[0]]} {bi[1]:02d}:00', color=D['text'], fontsize=13,
+             fontweight='bold', va='center', zorder=3, fontfamily='monospace')
+    bga.text(m + 1.25, ocy - 0.12, f'{fmt(best)} {unit}', color=np.clip(bc * 0.4 + 0.6, 0, 1), fontsize=9,
+             va='center', zorder=3, fontfamily='monospace')
+    bga.add_patch(Circle((m + 0.22, y + 0.17), 0.055, fc='none', ec='white', lw=1.0, alpha=0.8, zorder=3))
+    bga.text(m + 0.36, y + 0.17, f'worst  {DAYS[wi[0]]} {wi[1]:02d}:00 · {fmt(worst)}', color=D['text2'],
+             fontsize=6.8, va='center', zorder=3, fontfamily='monospace')
+
+    # ── LEFT 2/3: spectrum bars ──
+    def bars(ax, vals, labels, ticks, now_i):
+        top = np.nanmax(vals) if np.isfinite(vals).any() else 1.0
+        for i, v in enumerate(vals):
+            if np.isfinite(v):
+                _nm_grad_bar(ax, i - 0.38, i + 0.38, v, rgb(v), navy)
+        ax.axvspan(now_i - 0.5, now_i + 0.5, color='white', alpha=0.07, zorder=1, lw=0)
+        for fr in (0.5, 1.0):
+            ax.axhline(top * 1.1 * fr, color=(1, 1, 1, 0.07), lw=0.6, zorder=0)
+        ax.set_xlim(-0.6, len(vals) - 0.4); ax.set_ylim(0, top * 1.1)
+        ax.set_yticks([]); ax.set_xticks(ticks); ax.set_xticklabels([labels[t] for t in ticks])
+    y, h = L[1]
+    panel(m, y, sw, h, 'Hour of day · median')
+    a = sub(m + 0.15, y + 0.24, sw - 0.30, h - 0.24 - 0.40)
+    bars(a, hour_med, [f'{i:02d}' for i in range(24)], [0, 4, 8, 12, 16, 20, 23], now.hour)
+    y, h = L[2]
+    panel(m, y, sw, h, 'Day of week · median')
+    a = sub(m + 0.15, y + 0.24, sw - 0.30, h - 0.24 - 0.40)
+    bars(a, day_med, DAYS, list(range(7)), now.weekday())
+
+    # ── RIGHT 1: daily trend, gradient area ──
+    y, h = R[0]
+    panel(rx, y, sw, h, f'Daily trend · {days}d')
+    a = sub(rx + 0.15, y + 0.24, sw - 0.30, h - 0.24 - 0.40)
+    try:
+        dts, dv = _nm_heatmap_daily(db, metric, days)
+    except Exception:
+        _exc_debug('heatmap daily'); dts, dv = [], []
+    if len(dv) >= 2:
+        xv = np.arange(len(dv)); yv = np.array(dv)
+        span = max(yv.max() - yv.min(), 1e-9)
+        base = max(0.0, yv.min() - 0.35 * span); ytop = yv.max() + 0.15 * span
+        n = 64
+        vals = np.linspace(base, ytop, n)
+        gimg = np.asarray(cmap(norm(vals)), dtype=float)
+        gimg[:, 3] = np.linspace(0.20, 0.85, n)
+        gim = a.imshow(gimg[:, None, :], extent=(0, len(dv) - 1, base, ytop), origin='lower',
+                       aspect='auto', interpolation='bilinear', zorder=2)
+        poly = Polygon([(0, base)] + list(zip(xv, yv)) + [(len(dv) - 1, base)], closed=True,
+                       fc='none', ec='none', transform=a.transData)
+        a.add_patch(poly); gim.set_clip_path(poly)
+        a.plot(xv, yv, color='#bfe6ff', lw=3.2, alpha=0.18, zorder=4)
+        a.plot(xv, yv, color='#e8f6ff', lw=1.1, alpha=0.95, zorder=5)
+        a.scatter([xv[-1]], [yv[-1]], s=26, color='white', zorder=6)
+        a.set_xlim(0, len(dv) - 1); a.set_ylim(base, ytop)
+        a.set_yticks([]); a.set_xticks([0, len(dv) - 1])
+        a.set_xticklabels([dts[0].strftime('%d %b'), dts[-1].strftime('%d %b')])
+        bga.text(rx + sw - 0.15, y + h - 0.13, f'{fmt(dv[-1])} {unit}', color=D['text'], fontsize=8,
+                 fontweight='bold', va='top', ha='right', zorder=3, fontfamily='monospace')
+    else:
+        a.axis('off')
+        bga.text(rx + sw / 2, y + h / 2 - 0.05, 'needs 2+ days of readings', color=D['text2'],
+                 fontsize=7, ha='center', va='center', zorder=3, fontfamily='monospace')
+
+    # ── RIGHT 2: colour scale + legend swatches ──
+    y, h = R[1]
+    panel(rx, y, sw, h, 'Colour scale')
+    a = sub(rx + 0.18, y + h - 0.78, sw - 0.36, 0.17)
+    a.imshow(np.linspace(lo, hi, 256)[None, :], cmap=cmap, norm=norm, extent=(lo, hi, 0, 1),
+             aspect='auto', interpolation='bilinear')
+    a.set_yticks([]); a.set_xticks([lo, (lo + hi) / 2, hi])
+    a.set_xticklabels([fmt(lo), fmt((lo + hi) / 2), fmt(hi)])
+    a.tick_params(axis='x', pad=2)
+    bga.text(rx + sw - 0.15, y + h - 0.13, ('higher = better' if higher_better else 'lower = better'),
+             color=D['text2'], fontsize=6.3, va='top', ha='right', zorder=3, fontfamily='monospace')
+    rows = (('Excellent', 0.875), ('Good', 0.625), ('Fair', 0.375), ('Poor', 0.125))
+    ry = y + h - 1.28
+    for nm, gq in rows:
+        val = lo + gq * (hi - lo) if higher_better else hi - gq * (hi - lo)
+        edge = (lo + (gq - 0.125) * (hi - lo)) if higher_better else (hi - (gq - 0.125) * (hi - lo))
+        bga.add_patch(FancyBboxPatch((rx + 0.18, ry - 0.07), 0.34, 0.14, boxstyle='round,pad=0,rounding_size=0.04',
+                                     fc=rgb(val), ec='none', alpha=0.95, zorder=3))
+        bga.text(rx + 0.64, ry, nm, color=D['text'], fontsize=7.2, va='center', zorder=3, fontfamily='monospace')
+        cmp_ = '≥' if higher_better else '≤'
+        if nm == 'Poor':
+            t = f'below {fmt(edge + (0 if not higher_better else 0))}' if higher_better else f'above {fmt(edge)}'
+        else:
+            t = f'{cmp_} {fmt(edge)}'
+        bga.text(rx + sw - 0.18, ry, t, color=D['text2'], fontsize=7, va='center', ha='right',
+                 zorder=3, fontfamily='monospace')
+        ry -= 0.215
+
+    # ── RIGHT 3: summary ──
+    y, h = R[2]
+    panel(rx, y, sw, h, 'Summary')
+    spread = abs(best - worst) / max(abs(best), 1e-9) * 100.0
+    hb = int(np.nanargmax(hour_med) if higher_better else np.nanargmin(hour_med))
+    hw = int(np.nanargmin(hour_med) if higher_better else np.nanargmax(hour_med))
+    db_ = int(np.nanargmax(day_med) if higher_better else np.nanargmin(day_med))
+    dw = int(np.nanargmin(day_med) if higher_better else np.nanargmax(day_med))
+    items = (('readings', f'{int(counts.sum()):,}'), ('swing', f'{spread:.0f}% best→worst'),
+             ('best hour', f'{hb:02d}:00'), ('worst hour', f'{hw:02d}:00'),
+             ('best / worst day', f'{DAYS[db_]} / {DAYS[dw]}'))
+    ry = y + h - 0.42
+    for k, v in items:
+        bga.text(rx + 0.18, ry, k, color=D['text2'], fontsize=7, va='center', zorder=3, fontfamily='monospace')
+        bga.text(rx + sw - 0.18, ry, v, color=D['text'], fontsize=7.4, fontweight='bold', va='center',
+                 ha='right', zorder=3, fontfamily='monospace')
+        ry -= 0.185
+
+    # ── CENTRE: the heat field in its own glass panel with radar rings ──
+    cp = panel(cx0, m, cw, usable, f'{label} · day × hour')
+    bga.text(cx0 + cw - 0.15, m + usable - 0.13, f'median of last {days} days', color=D['text2'],
+             fontsize=6.8, va='top', ha='right', zorder=3, fontfamily='monospace')
+    for rr in (1.1, 1.8, 2.5, 3.2, 3.9):
+        c = Circle((cx0 + cw / 2, m + usable / 2), rr, fc='none', ec=(0.5, 0.65, 1.0, 0.09), lw=0.8, zorder=1.2)
+        bga.add_patch(c); c.set_clip_path(cp)
+    ax = fig.add_axes([(cx0 + 0.55) / W, (m + 0.58) / H, (cw - 0.55 - 0.22) / W,
+                       (usable - 0.58 - 0.50) / H], zorder=3)
+    ax.set_facecolor('none')
+    im = _nm_heatmap_paint(ax, grid, ui, theme, metric, higher_better, smooth=smooth, vivid=vivid)
+    bga.set_xlim(0, W); bga.set_ylim(0, H)
+    return ax, im
+
+
+
 def _nm_heatmap_grid(db, metric='download', days=90):
     """7x24 grid (weekday x hour) of median values. NaN where no samples.
 
@@ -5241,7 +5615,8 @@ def _nm_open_heatmap(monitor):
     win = tk.Toplevel()
     win.title('Time-of-Day Heatmap')
     win.configure(bg=BG_)
-    win.geometry('1180x600')
+    win.geometry('1260x740')
+    win.minsize(980, 620)
     _nm_apply_ttk_theme(win)
 
     bar = _ttk.Frame(win)
@@ -5260,6 +5635,16 @@ def _nm_open_heatmap(monitor):
                              state='readonly', values=['7', '30', '90', '365'])
     days_cb.pack(side='left', padx=(0, 16))
 
+    smooth_var = tk.BooleanVar(value=True)
+    vivid_var  = tk.BooleanVar(value=True)
+    dash_var   = tk.BooleanVar(value=True)
+    _ttk.Checkbutton(bar, text='Smooth', variable=smooth_var,
+                     command=lambda: _render()).pack(side='left', padx=(0, 8))
+    _ttk.Checkbutton(bar, text='Vivid colours', variable=vivid_var,
+                     command=lambda: _render()).pack(side='left', padx=(0, 8))
+    _ttk.Checkbutton(bar, text='Dashboard', variable=dash_var,
+                     command=lambda: _render()).pack(side='left', padx=(0, 16))
+
     info = _ttk.Label(bar, text='')
     info.pack(side='left')
 
@@ -5267,11 +5652,13 @@ def _nm_open_heatmap(monitor):
     # doubles as the hover readout target.
     cap = tk.Label(win, bg=BG_, fg=_ui0['text2'], font=(_NM_MONO, 8), anchor='w',
                    text='Each cell = that weekday & hour across the whole window '
-                        '(e.g. every Sunday 13:00), not just today. '
-                        'White box = now. Hover a cell for its sample count & last reading.')
+                        '(e.g. every Sunday 13:00), not just today. Warm = best. '
+                        'White box = now. Smooth blends neighbouring cells for the glow; '
+                        'untick it for the exact cell-by-cell view. Hover a cell for its '
+                        'sample count & last reading.')
     cap.pack(fill='x', padx=18, pady=(0, 2))
 
-    fig    = _mf.Figure(figsize=(11.6, 4.7), facecolor=BG_)
+    fig    = _mf.Figure(figsize=(12.4, 6.1), facecolor=BG_)
     canvas = FigureCanvasTkAgg(fig, master=win)
     canvas.get_tk_widget().pack(fill='both', expand=True, padx=16, pady=(4, 16))
 
@@ -5284,6 +5671,10 @@ def _nm_open_heatmap(monitor):
         _ui    = _nm_theme_ui(monitor)
         bg, panel, border = _ui['bg'], _ui['panel'], _ui['border']
         fg, fg2 = _ui['text'], _ui['text2']
+        _dash = bool(dash_var.get())
+        if _dash:
+            bg, panel, border = _NM_DASH['bg'], _NM_DASH['panel'], _NM_DASH['edge']
+            fg, fg2 = _NM_DASH['text'], _NM_DASH['text2']
         win.configure(bg=bg)
         cap.configure(bg=bg, fg=fg2)
         fig.set_facecolor(bg)
@@ -5314,16 +5705,19 @@ def _nm_open_heatmap(monitor):
             canvas.draw_idle()
             return
 
-        ax  = fig.add_subplot(111)
-        ax.set_facecolor(bg)
         # Good = the metric's own theme accent colour; see _nm_heatmap_cmap
         # for why (ramps from the theme's panel tone up to that accent,
         # reversed for latency since lower is better there).
-        cmap = _nm_heatmap_cmap(_theme, metric, higher_better)
-        masked = np.ma.masked_invalid(grid)
-        im = ax.imshow(masked, aspect='auto', cmap=cmap, origin='upper',
-                       interpolation='nearest')
-        im.cmap.set_bad(bg)
+        _smooth = bool(smooth_var.get()); _vivid = bool(vivid_var.get())
+        if _dash:
+            ax, im = _nm_heatmap_dashboard(fig, grid, counts, _db, metric, label, unit,
+                                           higher_better, days, _theme, _ui, _smooth,
+                                           _vivid, DAYS)
+        else:
+            ax = fig.add_subplot(111)
+            ax.set_facecolor(bg)
+            im = _nm_heatmap_paint(ax, grid, _ui, _theme, metric, higher_better,
+                                   smooth=_smooth, vivid=_vivid)
 
         ax.set_xticks(range(0, 24, 2))
         ax.set_xticklabels([f'{h:02d}' for h in range(0, 24, 2)],
@@ -5333,12 +5727,18 @@ def _nm_open_heatmap(monitor):
         ax.set_xlabel('Hour of day', color=fg2, fontsize=9)
         ax.tick_params(colors=fg2, length=0)
         for sp in ax.spines.values():
-            sp.set_color(border)
+            if _dash:
+                sp.set_visible(False)
+            else:
+                sp.set_color(border)
 
         # Grid lines between cells make it read as a table, not a blur.
         ax.set_xticks(np.arange(-0.5, 24, 1), minor=True)
         ax.set_yticks(np.arange(-0.5, 7, 1), minor=True)
-        ax.grid(which='minor', color=bg, linewidth=1.2)
+        if _smooth:
+            ax.grid(which='minor', color=(1, 1, 1, 0.07), linewidth=0.6)
+        else:
+            ax.grid(which='minor', color=bg, linewidth=1.2)
         ax.tick_params(which='minor', length=0)
 
         # ── 'Now' marker: shows at a glance which cells are still to come ────
@@ -5350,6 +5750,10 @@ def _nm_open_heatmap(monitor):
         ax.add_patch(mpatches.Rectangle(
             (_now.hour - 0.5, _now.weekday() - 0.5), 1, 1,
             fill=False, edgecolor='#ffffff', linewidth=1.8, zorder=6))
+        if _smooth:
+            ax.add_patch(mpatches.Rectangle(
+                (_now.hour - 0.5, _now.weekday() - 0.5), 1, 1,
+                fill=False, edgecolor='#ffffff', linewidth=6, alpha=0.18, zorder=5))
         ax.text(_now.hour, _now.weekday() - 0.62, 'now', color='#ffffff',
                 fontsize=6.5, ha='center', va='bottom', zorder=7,
                 fontfamily='monospace')
@@ -5359,16 +5763,17 @@ def _nm_open_heatmap(monitor):
         # subplots_adjust() that used to run afterwards overrode that and pushed
         # the heatmap back over the bar — so the label was clipped at anything
         # less than full screen. Reserve the space explicitly instead.
-        fig.subplots_adjust(left=0.07, right=0.855, top=0.90, bottom=0.15)
-        cax = fig.add_axes([0.875, 0.15, 0.018, 0.75])
-        cb = fig.colorbar(im, cax=cax)
-        cb.set_label(f'median {label} ({unit})', color=fg, fontsize=8,
-                     rotation=270, labelpad=14)
-        cb.ax.tick_params(colors=fg2, labelsize=7)
-        cb.outline.set_edgecolor(border)
+        if not _dash:
+            fig.subplots_adjust(left=0.07, right=0.855, top=0.90, bottom=0.15)
+            cax = fig.add_axes([0.875, 0.15, 0.018, 0.75])
+            cb = fig.colorbar(im, cax=cax)
+            cb.set_label(f'median {label} ({unit})', color=fg, fontsize=8,
+                         rotation=270, labelpad=14)
+            cb.ax.tick_params(colors=fg2, labelsize=7)
+            cb.outline.set_edgecolor(border)
 
-        ax.set_title(f'{label} by day & hour — median of last {days} days',
-                     loc='left', color=fg, fontsize=11, fontweight='bold', pad=10)
+            ax.set_title(f'{label} by day & hour — median of last {days} days',
+                         loc='left', color=fg, fontsize=11, fontweight='bold', pad=10)
 
         vals = grid[np.isfinite(grid)]
         best = np.nanmax(grid) if higher_better else np.nanmin(grid)
@@ -5505,6 +5910,24 @@ def _nm_open_heatmap(monitor):
 
         canvas.draw_idle()
 
+    # The dashboard lays itself out in inches, so re-lay it out (debounced)
+    # when the window is resized instead of letting the panels stretch.
+    _rs = {'w': 0, 'h': 0, 'job': None}
+
+    def _on_cfg(ev):
+        try:
+            if ev.widget is not canvas.get_tk_widget() or not dash_var.get():
+                return
+            if abs(ev.width - _rs['w']) < 12 and abs(ev.height - _rs['h']) < 12:
+                return
+            _rs['w'], _rs['h'] = ev.width, ev.height
+            if _rs['job']:
+                win.after_cancel(_rs['job'])
+            _rs['job'] = win.after(240, _render)
+        except Exception:
+            _exc_debug('heatmap resize')
+    canvas.get_tk_widget().bind('<Configure>', _on_cfg, add='+')
+
     metric_cb.bind('<<ComboboxSelected>>', _render)
     days_cb.bind('<<ComboboxSelected>>', _render)
     _render()
@@ -5516,6 +5939,7 @@ def _nm_open_heatmap(monitor):
     # to walk the Tk widget tree to find the FigureCanvasTkAgg.
     win._nm_rerender = _render
     win._nm_fig = fig
+    win._nm_vars = {'smooth': smooth_var, 'vivid': vivid_var, 'dash': dash_var}   # test hook
     return win
 
 
@@ -15480,6 +15904,14 @@ class _EtherApeGeoWindow:
         self._pulse_t = 0.0
         self._host_scs  = []   # scatter artists for host dots
         self._info_ip   = None
+        # Sharp-map state: the base world image, an optional zoomed crop layered
+        # over it, and the debounce/worker flags for refreshing that crop.
+        self._hires_ok  = False
+        self._bg_im     = None
+        self._crop_im   = None
+        self._crop_job  = None
+        self._crop_busy = False
+        self._crop_key  = None
 
         import tkinter as tk
         import tkinter.ttk as ttk
@@ -15644,11 +16076,46 @@ class _EtherApeGeoWindow:
         self._schedule_animate()
         # Sync alerts from EtherApe every 2s
 
+    def _geo_target_width(self):
+        """Pixel width for the base map: ~1.25x the screen so a maximised window
+        is crisp, capped so the array stays modest (4096x2048 RGB is 25 MB)."""
+        try:
+            sw = int(self.root.winfo_screenwidth())
+        except Exception:
+            sw = 1920
+        return int(max(2560, min(4096, round(sw * 1.25 / 64) * 64)))
+
+    def _geo_hires_array(self, width):
+        """Night-Earth map from the NASA Black Marble cache that the 3D globe
+        already downloads (~/.nm_vendor/earth_night_hi.jpg, 8192x4096), sized for
+        this screen. Returns None when that file is not cached yet."""
+        if not _nm_earth_ready('night'):
+            return None
+        from PIL import Image as _PIL
+        import numpy as _np
+        _PIL.MAX_IMAGE_PIXELS = None
+        with _PIL.open(_nm_earth_path('night')) as im:
+            im.draft('RGB', (width, width // 2))     # cheap JPEG-level downscale
+            im = im.convert('RGB')
+            if im.width != width:
+                im = im.resize((width, width // 2), _PIL.LANCZOS)
+            return _np.asarray(im).copy()
+
     def _load_world_map(self):
-        """Load night-earth image from cache or embedded constant."""
+        """Load the night-earth image: the sharp NASA map when cached, else the
+        embedded/cached fallback now and a background fetch of the sharp one."""
         import pathlib, base64 as _b64, io as _io
-        cache = pathlib.Path.home() / '.nm_world_map.jpg'
         img_arr = None
+        try:
+            img_arr = self._geo_hires_array(self._geo_target_width())
+        except Exception:
+            _exc('_load_world_map hires')
+        if img_arr is not None:
+            self._hires_ok = True
+            self._world_img = img_arr
+            self.root.after(600, self._draw_background)
+            return
+        cache = pathlib.Path.home() / '.nm_world_map.jpg'
         # Write embedded image to cache if not already there
         if not cache.exists():
             try:
@@ -15675,21 +16142,160 @@ class _EtherApeGeoWindow:
                         continue
             if cache.exists():
                 from PIL import Image as _PIL
-                img = _PIL.open(cache).convert('RGB').resize((1440, 720))
+                img = _PIL.open(cache).convert('RGB')
+                if img.width > 4096:                 # keep its own detail, just bound the size
+                    img = img.resize((4096, 2048))
+                elif img.width < 1440:
+                    img = img.resize((1440, 720))
                 import numpy as _np
                 img_arr = _np.array(img)
         except Exception:
             _exc('_load_world_map')
         self._world_img = img_arr
         self.root.after(600, self._draw_background)  # let window maximise first
+        # Start the sharp-map download (shared with the 3D globe) and swap it in
+        # as soon as it lands.
+        try:
+            _nm_earth_kick()
+            self.root.after(8000, self._geo_poll_hires)
+        except Exception:
+            _exc('_load_world_map kick')
+
+    def _geo_poll_hires(self, tries=0):
+        if self._closed or self._hires_ok:
+            return
+        if _nm_earth_ready('night'):
+            def _w():
+                try:
+                    arr = self._geo_hires_array(self._geo_target_width())
+                except Exception:
+                    _exc('_geo_poll_hires'); arr = None
+                if arr is not None and not self._closed:
+                    try: self.root.after(0, lambda: self._geo_apply_hires(arr))
+                    except Exception: _exc_debug('_geo_poll_hires after')
+            threading.Thread(target=_w, daemon=True, name='geo-hires').start()
+            return
+        if tries < 100:                               # ~10 minutes, then leave it
+            try: self.root.after(6000, lambda: self._geo_poll_hires(tries + 1))
+            except Exception: _exc_debug('_geo_poll_hires resched')
+
+    def _geo_apply_hires(self, arr):
+        if self._closed:
+            return
+        self._world_img = arr
+        self._hires_ok = True
+        im = self._bg_im
+        if im is not None:                            # already drawn: swap the pixels
+            im.set_data(arr)
+            self._img_cache = None
+            self._bg_cache = None
+            try:
+                self._ax.set_xlim(*self._view_xlim)
+                self._ax.set_ylim(*self._view_ylim)
+                self._canvas.draw_idle()
+            except Exception:
+                _exc('_geo_apply_hires')
+        self._geo_schedule_crop()
+
+    # -- zoomed detail: a native-resolution crop layered over the base map ------
+    def _geo_schedule_crop(self):
+        if self._closed or not self._hires_ok or self._bg_im is None:
+            return
+        try:
+            if self._crop_job is not None:
+                self.root.after_cancel(self._crop_job)
+        except Exception:
+            _exc_debug('_geo_schedule_crop cancel')
+        try:
+            self._crop_job = self.root.after(400, self._geo_crop_now)
+        except Exception:
+            _exc_debug('_geo_schedule_crop')
+
+    def _geo_crop_array(self, xl, xr, yb, yt):
+        from PIL import Image as _PIL
+        import numpy as _np
+        if not _nm_earth_ready('night'):
+            return None
+        _PIL.MAX_IMAGE_PIXELS = None
+        mx = (xr - xl) * 0.30; my = (yt - yb) * 0.30     # margin so small pans stay sharp
+        lon0 = max(-180.0, xl - mx); lon1 = min(180.0, xr + mx)
+        lat0 = max(-90.0,  yb - my); lat1 = min(90.0,  yt + my)
+        with _PIL.open(_nm_earth_path('night')) as im:
+            W, H = im.size
+            l = int((lon0 + 180) / 360 * W); r = min(W, int(math.ceil((lon1 + 180) / 360 * W)))
+            t = int((90 - lat1) / 180 * H);  b = min(H, int(math.ceil((90 - lat0) / 180 * H)))
+            r = max(r, l + 8); b = max(b, t + 8)
+            c = im.crop((l, t, r, b)).convert('RGB')
+        if c.width > 4096:
+            c = c.resize((4096, max(1, round(c.height * 4096 / c.width))), _PIL.LANCZOS)
+        ex = (l / W * 360 - 180, r / W * 360 - 180, 90 - b / H * 180, 90 - t / H * 180)
+        return _np.asarray(c).copy(), ex
+
+    def _geo_crop_now(self):
+        self._crop_job = None
+        if self._closed or self._bg_im is None:
+            return
+        xl, xr = self._view_xlim; yb, yt = self._view_ylim
+        if (xr - xl) >= 140:                          # (nearly) whole world: base map is enough
+            if self._crop_im is not None and self._crop_im.get_visible():
+                self._crop_im.set_visible(False)
+                self._crop_key = None
+                self._img_cache = None; self._bg_cache = None
+                try: self._canvas.draw_idle()
+                except Exception: _exc_debug('_geo_crop_now hide')
+            return
+        key = (round(xl, 2), round(xr, 2), round(yb, 2), round(yt, 2))
+        if key == self._crop_key:
+            return
+        if self._crop_busy:
+            self._geo_schedule_crop(); return
+        self._crop_busy = True
+
+        def _w():
+            try:
+                res = self._geo_crop_array(xl, xr, yb, yt)
+            except Exception:
+                _exc('_geo_crop_now'); res = None
+
+            def _done():
+                self._crop_busy = False
+                if self._closed:
+                    return
+                if res is not None:
+                    self._geo_apply_crop(res, key)
+                if (self._view_xlim, self._view_ylim) != ((xl, xr), (yb, yt)):
+                    self._geo_schedule_crop()         # view moved while we were decoding
+            try: self.root.after(0, _done)
+            except Exception: self._crop_busy = False
+        threading.Thread(target=_w, daemon=True, name='geo-crop').start()
+
+    def _geo_apply_crop(self, res, key):
+        arr, ex = res
+        ext = [ex[0], ex[1], ex[2], ex[3]]
+        if self._crop_im is None:
+            self._crop_im = self._ax.imshow(arr, extent=ext, aspect='auto', zorder=0.5,
+                                            alpha=0.85, origin='upper')
+        else:
+            self._crop_im.set_data(arr)
+            self._crop_im.set_extent(ext)
+            self._crop_im.set_visible(True)
+        self._crop_key = key
+        try:
+            self._ax.set_xlim(*self._view_xlim)
+            self._ax.set_ylim(*self._view_ylim)
+        except Exception:
+            _exc_debug('_geo_apply_crop lim')
+        self._img_cache = None; self._bg_cache = None
+        try: self._canvas.draw_idle()
+        except Exception: _exc_debug('_geo_apply_crop draw')
 
     def _draw_background(self):
         ax = self._ax
         ax.set_facecolor('#010810')
 
         if getattr(self, '_world_img', None) is not None:
-            ax.imshow(self._world_img, extent=[-180, 180, -90, 90],
-                      aspect='auto', zorder=0, alpha=0.85, origin='upper')
+            self._bg_im = ax.imshow(self._world_img, extent=[-180, 180, -90, 90],
+                                    aspect='auto', zorder=0, alpha=0.85, origin='upper')
         else:
             # Fallback: generate a night-Earth style background with matplotlib
             import numpy as _np
@@ -16080,6 +16686,7 @@ class _EtherApeGeoWindow:
         self._img_cache = None  # zoom changes image crop
         self._bg_cache  = None
         self._canvas.draw_idle()
+        self._geo_schedule_crop()   # refresh native-resolution detail once the zoom settles
 
     def _on_pan_start(self, event):
         if event.button != 3 or event.xdata is None: return
@@ -16103,6 +16710,7 @@ class _EtherApeGeoWindow:
     def _on_pan_end(self, event):
         if event.button == 3:
             self._panning = False
+            self._geo_schedule_crop()
 
     def _on_resize(self, event):
         """Redraw cleanly after resize — invalidate caches and redraw."""
@@ -16123,6 +16731,7 @@ class _EtherApeGeoWindow:
         self._img_cache = None  # force full redraw after reset
         self._bg_cache  = None
         self._canvas.draw_idle()
+        self._geo_schedule_crop()
 
     def _on_click(self, event):
         if event.xdata is None or event.ydata is None: return
@@ -28847,8 +29456,8 @@ html,body{max-width:100%;overflow-x:hidden}
 <div id="talkersOverlay" style="display:none;position:fixed;inset:36px 0 0 0;z-index:40;
   background:rgba(4,10,24,0.96);backdrop-filter:blur(4px);overflow:hidden;flex-direction:column">
   <div style="display:flex;align-items:center;padding:8px 14px;gap:10px;flex-shrink:0">
-    <span style="font-family:monospace;font-size:12px;color:#4cc9f0;font-weight:bold;letter-spacing:1px">▦ TOP FLOW TALKERS</span>
-    <span style="font-family:monospace;font-size:11px;color:#2a5a7a;flex:1" id="talkersSubtitle"></span>
+    <span style="font-family:monospace;font-size:15px;color:#4cc9f0;font-weight:bold;letter-spacing:1.5px">▦ TOP FLOW TALKERS</span>
+    <span style="font-family:monospace;font-size:12px;color:#4a86a8;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" id="talkersSubtitle"></span>
     <button class="tbtn" id="btnAiScan" onclick="_runTalkersAiScan()" title="AI threat scan of current flows">⚠ AI SCAN</button>
     <button class="tbtn" id="btnIncoming" onclick="_toggleIncoming()" title="Show/hide incoming flows">↙ INCOMING</button>
     <button class="tbtn active" id="btnSonarSnd" onclick="_toggleSonarSound()" title="Sonar ping when a new connection appears">🔊 SONAR</button>
@@ -28857,24 +29466,24 @@ html,body{max-width:100%;overflow-x:hidden}
     <button class="tbtn" id="btn3DTalkers" onclick="_toggle3DTalkers()" title="Switch to 3D view">⬡ 3D</button>
     <button class="tbtn" onclick="toggleTalkers()" style="padding:2px 10px">✕ CLOSE</button>
   </div>
-  <div style="display:flex;align-items:center;padding:4px 14px 5px;gap:14px;flex-shrink:0;
+  <div style="display:flex;align-items:center;padding:6px 14px 7px;gap:16px;flex-shrink:0;
     border-bottom:1px solid #0a1e30;flex-wrap:wrap;row-gap:4px">
-    <span style="font-family:monospace;font-size:9px;color:#2a5a7a;letter-spacing:1px;text-transform:uppercase;margin-right:2px">Protocol</span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#00c8ff;margin-right:4px;vertical-align:middle"></span>TCP</span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff6b35;margin-right:4px;vertical-align:middle"></span>UDP</span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#bf5af2;margin-right:4px;vertical-align:middle"></span>TLS</span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#39ff14;margin-right:4px;vertical-align:middle"></span>HTTP</span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ffd700;margin-right:4px;vertical-align:middle"></span>DNS</span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff4444;margin-right:4px;vertical-align:middle"></span>ICMP</span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4dffff;margin-right:4px;vertical-align:middle"></span>Other</span>
+    <span style="font-family:monospace;font-size:11px;color:#2a5a7a;letter-spacing:1px;text-transform:uppercase;margin-right:2px">Protocol</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#00c8ff;margin-right:4px;vertical-align:middle"></span>TCP</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ff6b35;margin-right:4px;vertical-align:middle"></span>UDP</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#bf5af2;margin-right:4px;vertical-align:middle"></span>TLS</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#39ff14;margin-right:4px;vertical-align:middle"></span>HTTP</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ffd700;margin-right:4px;vertical-align:middle"></span>DNS</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ff4444;margin-right:4px;vertical-align:middle"></span>ICMP</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#4dffff;margin-right:4px;vertical-align:middle"></span>Other</span>
     <span style="width:1px;height:12px;background:#0d2030;flex-shrink:0"></span>
-    <span style="font-family:monospace;font-size:10px;color:#6a9ab8"><span style="display:inline-block;width:24px;height:4px;background:linear-gradient(90deg,#2a5a7a,#4cc9f0);border-radius:2px;margin-right:4px;vertical-align:middle"></span>Band width = traffic volume</span>
+    <span style="font-family:monospace;font-size:12px;color:#6a9ab8"><span style="display:inline-block;width:24px;height:4px;background:linear-gradient(90deg,#2a5a7a,#4cc9f0);border-radius:2px;margin-right:4px;vertical-align:middle"></span>Ribbon thickness at source = volume</span>
     <span style="width:1px;height:12px;background:#0d2030;flex-shrink:0"></span>
-    <span style="font-family:monospace;font-size:10px;color:#4cc9f0">↗ Outgoing</span>
-    <span style="font-family:monospace;font-size:10px;color:#a371f7">↙ Incoming</span>
+    <span style="font-family:monospace;font-size:12px;color:#4cc9f0">↗ Outgoing</span>
+    <span style="font-family:monospace;font-size:12px;color:#a371f7">↙ Incoming</span>
     <span style="width:1px;height:12px;background:#0d2030;flex-shrink:0"></span>
-    <span style="font-family:monospace;font-size:10px;color:#ff4444">⛔ Blocked</span>
-    <span style="font-family:monospace;font-size:10px;color:#2a5a7a;margin-left:auto">click band for details</span>
+    <span style="font-family:monospace;font-size:12px;color:#ff4444">⛔ Blocked</span>
+    <span style="font-family:monospace;font-size:12px;color:#2a5a7a;margin-left:auto">hover to focus · click for details</span>
   </div>
   <div style="display:flex;flex:1;min-height:0;overflow:hidden;position:relative">
     <canvas id="talkersCanvas" style="flex:1;display:block;min-width:0;min-height:0;align-self:stretch;cursor:pointer;will-change:transform"></canvas>
@@ -31074,6 +31683,7 @@ let _speedtestActive=false,_incomingAutoHidden=false,_talkersLastBuild=0,_talker
 let _talkers3DMode=false,_t3dRAF=null,_t3dRenderer=null,_t3dDrag=false,_t3dLX=0,_t3dLY=0;
 let _t3dRotX=0.28,_t3dRotY=0.12,_t3dZoom=17,_t3dParts=[];
 let _talkersBands=[],_talkersBandsTarget=[],_talkersEvents=[],_radarFlowsAll=[];
+let _talkHover=-1,_talkHoverBody=false,_talkMouse={x:0,y:0};   // ribbon hover focus
 let _dnsMap={},_dnsRequested={};
 
 /* Neon circuit-trace overlay for the Top Talkers ribbons -- the same
@@ -31086,36 +31696,38 @@ let _dnsMap={},_dnsRequested={};
    (traces zigzag in Y, repeat along X) since these ribbons flow left-right
    or right-left, unlike the 3D bars' vertical length axis. */
 function _makeTalkerCircuitCanvas(){
-  const W=640,H=72,cv=document.createElement('canvas');
+  // Calm texture, not a wallpaper: long runs, softly rounded corners, thin
+  // lines and a faint glow. The old tile (short 72px, hard right angles, heavy
+  // strokes) read as busy noise that fought the labels, and its short height
+  // made the same pattern visibly repeat down every wide ribbon. This one is
+  // taller and wider so repeats are far apart.
+  const W=1280,H=168,cv=document.createElement('canvas');
   cv.width=W;cv.height=H;
   const x=cv.getContext('2d');
   x.clearRect(0,0,W,H);
-  // Bolder + more saturated than the first pass -- Trevor asked for more
-  // vibrant colour after seeing this at its original (3D-bar-matching)
-  // strength, which reads dim on a 2D canvas ribbon that has no bloom/HDR
-  // the way the WebGL 3D scene does. Thicker lines and stronger glow
-  // passes here; the actual brightness boost is in the compositing alpha
-  // at the call site below (0.45-0.90 now, was 0.14-0.36).
-  const traces=[{y:H*0.28,hex:'#a6ecff',w:3.2},{y:H*0.52,hex:'#8fb4ff',w:2.7},
-                {y:H*0.74,hex:'#d7a8ff',w:2.2}];
+  const traces=[{y:H*0.20,hex:'#a6ecff',w:1.7},{y:H*0.42,hex:'#8fb4ff',w:1.4},
+                {y:H*0.65,hex:'#d7a8ff',w:1.2},{y:H*0.86,hex:'#8fe8ff',w:1.0}];
   traces.forEach(tr=>{
-    const N=14+Math.floor(Math.random()*5);      // right-angle step segments
+    const N=9+Math.floor(Math.random()*4);       // long right-angle step runs
     const yPos=[tr.y];
     for(let i=1;i<N;i++){
-      let vy=tr.y+(Math.random()<0.5?-1:1)*Math.random()*H*0.24;
-      yPos.push(Math.max(H*0.1,Math.min(H*0.9,vy)));
+      const vy=tr.y+(Math.random()<0.5?-1:1)*Math.random()*H*0.11;
+      yPos.push(Math.max(H*0.05,Math.min(H*0.95,vy)));
     }
     yPos.push(tr.y);                              // back to the start Y -- seamless tile
-    x.beginPath();x.moveTo(0,yPos[0]);
-    for(let i=1;i<yPos.length;i++){
+    const pts=[[0,yPos[0]]];
+    for(let i=1;i<=N;i++){
       const nx=Math.round(W*i/N);
-      x.lineTo(nx,yPos[i-1]);                     // horizontal run
-      x.lineTo(nx,yPos[i]);                       // right-angle jump to the next step
+      pts.push([nx,yPos[i-1]]);                   // horizontal run to the corner
+      pts.push([nx,yPos[i]]);                     // step to the next level
     }
-    x.lineJoin='miter';x.lineCap='square';x.strokeStyle=tr.hex;
-    x.globalAlpha=0.24;x.lineWidth=tr.w*7;x.stroke();
-    x.globalAlpha=0.45;x.lineWidth=tr.w*3;x.stroke();
-    x.globalAlpha=1.0; x.lineWidth=tr.w;x.stroke();
+    x.beginPath();x.moveTo(pts[0][0],pts[0][1]);
+    for(let k=1;k<pts.length-1;k++) x.arcTo(pts[k][0],pts[k][1],pts[k+1][0],pts[k+1][1],7);
+    x.lineTo(pts[pts.length-1][0],pts[pts.length-1][1]);
+    x.lineJoin='round';x.lineCap='round';x.strokeStyle=tr.hex;
+    x.globalAlpha=0.10;x.lineWidth=tr.w*6;x.stroke();
+    x.globalAlpha=0.22;x.lineWidth=tr.w*2.6;x.stroke();
+    x.globalAlpha=0.85;x.lineWidth=tr.w;x.stroke();
     x.globalAlpha=1;
   });
   return cv;
@@ -31280,6 +31892,29 @@ function toggleTalkers(){
   }
 }
 
+// Hover focus on the ribbons: the hovered ribbon / card lights up, the rest dim,
+// and a small tooltip follows the pointer while it is over a ribbon body.
+document.addEventListener('mousemove',function(e){
+  if(!_talkersOpen||_talkers3DMode||!_showIncoming){_talkHover=-1;return;}
+  const c=document.getElementById('talkersCanvas');
+  if(!c||e.target!==c){_talkHover=-1;return;}
+  const r=c.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  _talkMouse={x:mx,y:my};
+  let h=-1,hd=Infinity,body=false;
+  for(let i=0;i<_talkersBands.length;i++){
+    const cd=_talkersBands[i]._card;
+    if(cd&&mx>=cd.x&&mx<=cd.x+cd.w&&my>=cd.y&&my<=cd.y+cd.h){h=i;break;}
+  }
+  if(h<0){
+    for(let i=0;i<_talkersBands.length;i++){
+      const d=_bandHit(_talkersBands[i],mx,my);
+      if(d!==null&&d<hd){h=i;hd=d;body=true;}
+    }
+  }
+  _talkHover=h;_talkHoverBody=body&&h>=0;
+  c.style.cursor=h>=0?'pointer':'default';
+});
+
 // Click handler for block buttons on talkers canvas
 document.addEventListener('click',function(e){
   const popup=document.getElementById('talkersPopup');
@@ -31326,6 +31961,8 @@ document.addEventListener('click',function(e){
 
   let hit=null,hitD=Infinity;
   for(const b of _talkersBands){
+    const cd=b._card;                         // the host card on the right is a click target too
+    if(cd&&mx>=cd.x&&mx<=cd.x+cd.w&&my>=cd.y&&my<=cd.y+cd.h){hit=b;hitD=-1;break;}
     const d=_bandHit(b,mx,my);
     if(d!==null&&d<hitD){hit=b;hitD=d;}     // nearest band centre, not first bbox
   }
@@ -31480,7 +32117,12 @@ function _buildTalkers(){
   const _hdrEl=document.querySelector('#talkersOverlay > div');
   const _hdrH=_hdrEl?_hdrEl.offsetHeight:44;
   const W=window.innerWidth;  // full width — popup overlay used instead
-  const H=Math.max(200,window.innerHeight-36-_hdrH);
+  // Height comes from the canvas's own container, not window height minus the
+  // title row alone: the legend row below the title also takes space, and
+  // ignoring it made the canvas ~30px taller than its box, clipping the bottom
+  // of the Incoming ribbons off-screen.
+  const _par=canvas.parentElement,_parH=_par?_par.clientHeight:0;
+  const H=_parH>150?_parH:Math.max(200,window.innerHeight-36-_hdrH);
   const dpr=window.devicePixelRatio||1;
   // Only reset canvas dimensions when they genuinely change — setting canvas.width always
   // blanks the canvas mid-animation frame, causing a visible 600ms flash on every poll tick
@@ -31558,67 +32200,79 @@ function _buildTalkers(){
   _requestResolve([topSrc,...srcFlows.map(f=>f.dst),...inFlows.map(f=>f.src),
                    ..._radarFlows.slice(0,20).map(f=>f.ip)]);
 
-  const PAD={t:10,b:10,l:100,r:10},GAP=6;
+  // ── Layout ────────────────────────────────────────────────────────────────
+  // The remote end of every ribbon is a fixed-height slot that lines up with a
+  // host card in a column on the right, so destinations are always on screen,
+  // never crammed against the window edge, and tiny flows stay as readable as
+  // huge ones. Volume is encoded by the ribbon's thickness at the SOURCE end
+  // (soft sqrt blend so one dominant host cannot swamp the tail).
+  const cardW=Math.max(170,Math.min(260,Math.round(W*0.17)));
+  const PAD={t:16,b:12,l:150,r:cardW+34},GAP=4;
   const drawH=H-PAD.t-PAD.b;
   const xL=PAD.l,xR=W-PAD.r,cp=(xR-xL)*0.42;
-
-  // Sqrt scaling so dominant flow doesn't swamp others
-  const sqV=srcFlows.map(f=>Math.sqrt(f.bytes)),sqT=sqV.reduce((s,v)=>s+v,0);
-  const usableH=drawH*0.65-GAP*(srcFlows.length-1);
-  const srcSpan=usableH*0.4,srcStart=PAD.t+(usableH-srcSpan)/2;
+  const nOut=srcFlows.length,nIn=_showIncoming?inFlows.length:0;
+  const DIVH=nIn?34:0;
+  const nAll=Math.max(1,nOut+nIn);
+  const cardH=Math.max(20,Math.min(42,Math.floor((drawH-DIVH)/nAll)-GAP));
+  const slotH=cardH+GAP;
+  const y0=PAD.t+Math.max(0,Math.floor((drawH-(nAll*slotH+DIVH))/2));
+  const _wts=arr=>{
+    const w=arr.map(f=>Math.pow(Math.max(f.bytes,1),0.42));
+    const t=w.reduce((a,v)=>a+v,0)||1;
+    return w.map(v=>0.7*v/t+0.3/arr.length);
+  };
+  const nodeById={};
+  try{(nodeData||[]).forEach(n=>{if(n){nodeById[n.ip||n.id]=n;}});}catch(e){}
+  if(!window._talkersPrevIn)window._talkersPrevIn={};
+  const _trend=(map,key,bytes)=>{
+    const p=map[key]||0;map[key]=bytes;
+    return !p?0:(bytes>p*1.03?1:(bytes<p*0.97?-1:0));
+  };
 
   _talkersBands=[];
-  let dstY=PAD.t,srcY=srcStart;
+  const outTop=y0,outH=nOut*slotH;
+  const wOut=_wts(srcFlows);
+  const srcSpanO=Math.min(outH*0.92,Math.max(60,drawH*0.30));
+  let srcY=outTop+(outH-srcSpanO)/2;
   srcFlows.forEach((f,i)=>{
-    const r=sqV[i]/sqT,dstH=Math.max(12,r*usableH),srcH=Math.max(6,r*srcSpan);
+    const dstH=cardH,dstY=outTop+i*slotH,srcH=Math.max(8,wOut[i]*srcSpanO-2);
     const col=TC[i%TC.length],pcol=PC[f.proto]||col;
     const spike=(_talkersPrevBytes[f.dst]||0)>0&&f.bytes>(_talkersPrevBytes[f.dst]||0)*1.5;
-    _talkersPrevBytes[f.dst]=f.bytes;
+    const trend=_trend(_talkersPrevBytes,f.dst,f.bytes);
     if(spike)_talkersEvents.push({type:'flare',x:xR,y:dstY+dstH/2,alpha:1,col,w:0});
-    const dstBlocked=!!(nodeData.find(n=>n.ip===f.dst)?.blocked)||_localBlockedIPs.has(f.dst);
+    const nd=nodeById[f.dst];
+    const dstBlocked=!!(nd&&nd.blocked)||_localBlockedIPs.has(f.dst);
     _talkersBands.push({col,pcol,bytes:f.bytes,dstH,srcH,ySrc:srcY,dstY,dst:f.dst,proto:f.proto,
-      _ip:f.dst,
+      _ip:f.dst,node:nd||null,trend,
       dstLabel:_resolveName(f.dst),outgoing:true,blocked:dstBlocked,
       x0:xL,y0:srcY,cx0:xL+cp,cy0:srcY,cx1:xR-cp,cy1:dstY,x1:xR,y1:dstY,
       x0b:xL,y0b:srcY+srcH,cx0b:xL+cp,cy0b:srcY+srcH,cx1b:xR-cp,cy1b:dstY+dstH,x1b:xR,y1b:dstY+dstH});
-    dstY+=dstH+GAP;srcY+=srcH+2;
+    srcY+=srcH+2;
   });
 
-  // Incoming bands — bottom portion, reversed (skipped when _showIncoming is false)
-  if(_showIncoming){
-  const inH=drawH*0.38-GAP*(inFlows.length||1);  // more vertical budget (was 0.28)
-  const inSqV=inFlows.map(f=>Math.sqrt(f.bytes)),inSqT=inSqV.reduce((s,v)=>s+v,0)||1;
-
-  // Compute raw heights then normalise so they always fit within inH regardless
-  // Two-pass height allocation — guaranteed to fit within inH regardless of traffic skew:
-  // Pass 1: reserve MIN_H for every band.
-  // Pass 2: distribute remaining space proportionally by sqrt(bytes).
-  // This means a dominant flow can never push small flows off-canvas.
-  const MIN_H=20,MIN_S=10;
-  const gapTotal=GAP*(inFlows.length-1);
-  const availH=Math.max(MIN_H*inFlows.length, inH-gapTotal);
-  const minReserve=MIN_H*inFlows.length;
-  const extraH=Math.max(0,availH-minReserve);
-  const normDH=inFlows.map((_,i)=>Math.round(MIN_H+inSqV[i]/inSqT*extraH));
-  // Sanity clamp — floating point rounding can add a pixel or two
-  const normTotal=normDH.reduce((s,v)=>s+v,0);
-  if(normTotal>availH){ normDH[0]-=(normTotal-availH); }
-
-  const inSrcSpan=inH*0.45,inSrcStart=H-PAD.b-inH+(inH-inSrcSpan)/2;
-  let inDstY=H-PAD.b-inH,inSrcY=inSrcStart;
-  inFlows.forEach((f,i)=>{
-    const dstH=normDH[i],srcH=Math.max(MIN_S,Math.round(inSqV[i]/inSqT*inSrcSpan));
-    const col=TC[(srcFlows.length+i)%TC.length],pcol=PC[f.proto]||col;
-    const srcBlocked2=_localBlockedIPs.has(f.src)||(!!nodeData.find(n=>n.ip===f.src)?.blocked);
-    _talkersBands.push({col,pcol,bytes:f.bytes,dstH,srcH,ySrc:inSrcY,dstY:inDstY,
-      _ip:f.src,
-      src:f.src,proto:f.proto,srcLabel:_resolveName(f.src),outgoing:false,blocked:srcBlocked2,
-      x0:xR,y0:inDstY,cx0:xR-cp,cy0:inDstY,cx1:xL+cp,cy1:inSrcY,x1:xL,y1:inSrcY,
-      x0b:xR,y0b:inDstY+dstH,cx0b:xR-cp,cy0b:inDstY+dstH,cx1b:xL+cp,cy1b:inSrcY+srcH,x1b:xL,y1b:inSrcY+srcH});
-    inDstY+=dstH+GAP;inSrcY+=srcH+2;
-  });
-
+  // Incoming bands — below the divider (skipped when _showIncoming is false)
+  if(_showIncoming&&nIn){
+    const inTop=y0+outH+DIVH,inHh=nIn*slotH;
+    const wIn=_wts(inFlows);
+    const srcSpanI=Math.min(inHh*0.92,Math.max(50,drawH*0.22));
+    let inSrcY=inTop+(inHh-srcSpanI)/2;
+    inFlows.forEach((f,i)=>{
+      const dstH=cardH,inDstY=inTop+i*slotH,srcH=Math.max(8,wIn[i]*srcSpanI-2);
+      const col=TC[(srcFlows.length+i)%TC.length],pcol=PC[f.proto]||col;
+      const nd=nodeById[f.src];
+      const srcBlocked2=_localBlockedIPs.has(f.src)||!!(nd&&nd.blocked);
+      const trend=_trend(window._talkersPrevIn,f.src,f.bytes);
+      _talkersBands.push({col,pcol,bytes:f.bytes,dstH,srcH,ySrc:inSrcY,dstY:inDstY,
+        _ip:f.src,node:nd||null,trend,
+        src:f.src,proto:f.proto,srcLabel:_resolveName(f.src),outgoing:false,blocked:srcBlocked2,
+        x0:xR,y0:inDstY,cx0:xR-cp,cy0:inDstY,cx1:xL+cp,cy1:inSrcY,x1:xL,y1:inSrcY,
+        x0b:xR,y0b:inDstY+dstH,cx0b:xR-cp,cy0b:inDstY+dstH,cx1b:xL+cp,cy1b:inSrcY+srcH,x1b:xL,y1b:inSrcY+srcH});
+      inSrcY+=srcH+2;
+    });
   }  // end if(_showIncoming)
+  _talkersBands._cardX=xR+26;_talkersBands._cardW=Math.max(120,W-12-(xR+26));
+  _talkersBands._divY=nIn?(y0+outH+DIVH/2):0;_talkersBands._outTop=outTop;
+  _talkersBands.forEach(b=>{b._card={x:_talkersBands._cardX,y:b.dstY,w:_talkersBands._cardW,h:b.dstH};});   // hit boxes exist from the moment of the build
 
   _talkersEvents.push({type:'ring',x:xL,y:PAD.t+drawH*0.32,r:6,alpha:1,col:'#00c8ff'});
   // Store as target for lerp — seed live set on first build
@@ -31920,7 +32574,7 @@ function _animateTalkers(){
   _talkersBands.forEach(b=>{
     // Refresh blocked status from current nodeData
     const ipKey=b.outgoing?b.dst:b.src;
-    const node=nodeData.find(n=>n.ip===ipKey);
+    const node=nodeData.find(n=>(n.ip||n.id)===ipKey);
     if(node) b.blocked=!!node.blocked;
     if(_localBlockedIPs.has(ipKey)) b.blocked=true;  // local override persists
     if(b.outgoing){const r=_resolveName(b.dst);if(r!==b.dst)b.dstLabel=r;}
@@ -31942,14 +32596,21 @@ function _animateTalkers(){
   const maxBytes=_talkersBands.reduce((m,b)=>Math.max(m,b.bytes),1);
 
   document.getElementById('talkersSubtitle').textContent=
-    'source: '+_resolveName(topSrc)+'  •  '+_talkersBands.filter(b=>b.outgoing).length+' flows out / '+_talkersBands.filter(b=>!b.outgoing).length+' in';
+    'source: '+_resolveName(topSrc)+'  •  '+_talkersBands.filter(b=>b.outgoing).length+' flows out / '+_talkersBands.filter(b=>!b.outgoing).length+' in  •  '+fmtB(_talkersBands.reduce((q,x)=>q+x.bytes,0))+' shown';
 
   // ── Draw bands ─────────────────────────────────────────────────────────────
+  const _hov=(_showIncoming&&_talkHover>=0&&_talkHover<_talkersBands.length)?_talkHover:-1;
+  const _totalB=_talkersBands.reduce((q,x)=>q+x.bytes,0)||1;
+  const _topIdx=_talkersBands.map((x,i)=>[x.bytes,i]).sort((p,q)=>q[0]-p[0]).slice(0,3).map(p=>p[1]);
   _talkersBands.forEach((b,bi)=>{
     // Radar mode shows BOTH directions as blips — no ribbons at all.
     if(!_showIncoming){b._ip=b.outgoing?b.dst:b.src;return;}
     // Simulated hostiles read as blocked traffic in the ribbon view too.
     if(_attackGeo(b.outgoing?b.dst:b.src))b.blocked=true;
+    const dimA=(_hov<0||_hov===bi)?1:0.28;
+    const hot=(_hov===bi);
+    const ratio=Math.min(1,b.bytes/maxBytes);       // maxBytes is the true cross-direction max
+    const yA=Math.min(b.y0,b.y1)-2,yB=Math.max(b.y0b,b.y1b)+2;
     ctx.save();
     ctx.beginPath();
     ctx.moveTo(b.x0,b.y0);ctx.bezierCurveTo(b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1);
@@ -31961,68 +32622,52 @@ function _animateTalkers(){
       // Blocked: red gradient + diagonal warning stripes
       const gr=ctx.createLinearGradient(b.outgoing?xL:xR,0,b.outgoing?xR:xL,0);
       gr.addColorStop(0,'#ff2200cc');gr.addColorStop(0.5,'#aa110066');gr.addColorStop(1,'#ff220022');
-      ctx.globalAlpha=0.45;ctx.fillStyle=gr;ctx.fill();
-      ctx.globalAlpha=0.12;ctx.strokeStyle='#ff4444';ctx.lineWidth=6;
+      ctx.globalAlpha=0.45*dimA;ctx.fillStyle=gr;ctx.fill();
+      ctx.globalAlpha=0.12*dimA;ctx.strokeStyle='#ff4444';ctx.lineWidth=6;
       for(let sx2=xL-H;sx2<xR+H;sx2+=28){
         ctx.beginPath();ctx.moveTo(sx2,0);ctx.lineTo(sx2+H,H);ctx.stroke();
       }
     } else {
+      // Colour runs strongest at the source and stays visible all the way to
+      // the host card (the old fade-to-nothing hid where each flow ended).
       const gr=ctx.createLinearGradient(b.outgoing?xL:xR,0,b.outgoing?xR:xL,0);
-      gr.addColorStop(0,b.col+'cc');gr.addColorStop(0.5,b.col+'77');gr.addColorStop(1,b.col+'22');
-      ctx.globalAlpha=b.outgoing?0.6:0.55;
+      gr.addColorStop(0,b.col+'e0');gr.addColorStop(0.55,b.col+'88');gr.addColorStop(1,b.col+'60');
+      ctx.globalAlpha=(b.outgoing?0.58:0.54)*dimA*(hot?1.25:1);
       ctx.fillStyle=gr;ctx.fill();
+      // Soft vertical sheen: lit top edge, shaded underside -- reads as a surface.
+      const vg=ctx.createLinearGradient(0,yA,0,yB);
+      vg.addColorStop(0,'rgba(255,255,255,0.20)');vg.addColorStop(0.45,'rgba(255,255,255,0.02)');
+      vg.addColorStop(1,'rgba(0,0,0,0.22)');
+      ctx.globalAlpha=dimA;ctx.fillStyle=vg;ctx.fill();
     }
 
-    // Shimmer — only on bands wide enough that the clip is taller than a line.
-    // Thin bands (<20px) produce full-width horizontal lines when fillRect is clipped
-    // to a 4-8px strip, which flashes like a strobe as the gradient peak sweeps through.
+    // Light pulse sweeping along the ribbon -- strongest on the three busiest.
     const bandThick=Math.max(b.dstH,b.srcH);
-    if(bandThick>=20){
+    if(bandThick>=14){
       const origin=b.outgoing?xL:xR,span=(b.outgoing?1:-1)*(xR-xL);
       const rawOff=((T*55+bi*120)%Math.abs(span)+Math.abs(span))%Math.abs(span);
       const sx=origin+rawOff*Math.sign(span);
-      // Alpha scales 0→1 over 20-60px so shimmer fades in as bands grow
-      const shimA=Math.min(1,(bandThick-20)/40);
-      const sg=ctx.createLinearGradient(sx-80,0,sx+80,0);
+      const shimA=Math.min(1,(bandThick-14)/30)*(_topIdx.indexOf(bi)>=0?1.9:1)*dimA;
+      const sg=ctx.createLinearGradient(sx-110,0,sx+110,0);
       sg.addColorStop(0,'rgba(255,255,255,0)');
-      sg.addColorStop(0.4,`rgba(255,255,255,${(0.06*shimA).toFixed(3)})`);
-      sg.addColorStop(0.5,`rgba(255,255,255,${(0.13*shimA).toFixed(3)})`);
-      sg.addColorStop(0.6,`rgba(255,255,255,${(0.06*shimA).toFixed(3)})`);
+      sg.addColorStop(0.4,`rgba(255,255,255,${(0.05*shimA).toFixed(3)})`);
+      sg.addColorStop(0.5,`rgba(255,255,255,${(0.14*shimA).toFixed(3)})`);
+      sg.addColorStop(0.6,`rgba(255,255,255,${(0.05*shimA).toFixed(3)})`);
       sg.addColorStop(1,'rgba(255,255,255,0)');
       ctx.fillStyle=sg;ctx.globalAlpha=1;
       ctx.fillRect(0,0,W,H);  // clip path bounds it to this band's bezier shape
     }
 
-    // Scrolling neon circuit-trace overlay -- same treatment as the 3D
-    // view's protocol bars: a fixed blue/purple glowing trace pattern,
-    // additively blended over the band's own colour, scrolling in the
-    // direction traffic is actually flowing (dir already computed above).
-    // Reuses this band's still-active clip from the top of the loop, same
-    // "fillRect bounded by the bezier clip" idiom the shimmer pass uses.
-    // Was gated on bandThick>=20 (copied from the shimmer pass above, which
-    // needs that floor to avoid a strobe on thin clipped rows). This overlay
-    // is a smoothly-scrolling static tile, not a single moving bright peak,
-    // so it doesn't strobe -- and gating it at 20px meant every band thinner
-    // than that (most flows, in any capture with one or two dominant hosts
-    // and a long tail of small ones) never got the new animation at all.
-    // Dropped to a token floor that only excludes bands too thin for any
-    // texture to read as more than a solid line anyway.
+    // Circuit texture: now a quiet background pattern (was a loud wallpaper).
+    // Scrolls in the direction traffic flows, faster for busier flows.
     if(!b.blocked&&bandThick>=4){
       if(!_talkerCircuitPattern) _talkerCircuitPattern=ctx.createPattern(_talkerCircuitCanvas,'repeat');
-      const ratio=Math.min(1,b.bytes/maxBytes);   // maxBytes is now the true cross-direction max
-      const scrollSpeed=90+ratio*260;             // px/s -- faster for busier flows
+      const scrollSpeed=60+ratio*170;             // px/s
       const patW=_talkerCircuitCanvas.width;
       const off=((dir*T*scrollSpeed)%patW+patW)%patW;
-      _talkerCircuitPattern.setTransform(new DOMMatrix().translate(off,0));
+      _talkerCircuitPattern.setTransform(new DOMMatrix().translate(off,bi*37));
       ctx.globalCompositeOperation='lighter';
-      // Was 0.14-0.36 -- matched the 3D bars' own compositing call, but the
-      // 3D scene's WebGL bars ease their overlay opacity up toward a full
-      // 1.0 (see b.pulseAmt in animate()) with additive bloom on top of that;
-      // this 2D canvas has no bloom pass, so the same numbers read as dim
-      // and washed out here. Raised well past parity so it actually reads
-      // as vivid on a flat canvas instead of matching WebGL numbers that
-      // only look right with WebGL's own rendering behind them.
-      ctx.globalAlpha=0.45+ratio*0.45;
+      ctx.globalAlpha=(0.15+ratio*0.20+(hot?0.16:0))*dimA;
       ctx.fillStyle=_talkerCircuitPattern;
       ctx.fillRect(0,0,W,H);
       ctx.globalCompositeOperation='source-over';
@@ -32030,34 +32675,38 @@ function _animateTalkers(){
     }
     ctx.restore();
 
-    // Node bars
-    ctx.save();ctx.shadowColor=b.col;ctx.shadowBlur=10;ctx.globalAlpha=0.85;ctx.fillStyle=b.col;
-    const lx=b.outgoing?xL:xR,rx=b.outgoing?xR:xL;
-    ctx.beginPath();ctx.roundRect(rx+(b.outgoing?4:-18),b.dstY,14,b.dstH,3);ctx.fill();
-    ctx.beginPath();ctx.roundRect(lx+(b.outgoing?-18:4),b.ySrc,14,b.srcH,3);ctx.fill();
+    // Glowing rim along both edges of the ribbon.
+    ctx.save();
+    ctx.globalCompositeOperation='lighter';
+    ctx.strokeStyle=b.blocked?'#ff4444':b.col;ctx.lineWidth=hot?2.2:1.2;
+    ctx.globalAlpha=(hot?0.85:0.5)*dimA;ctx.shadowColor=b.blocked?'#ff4444':b.col;ctx.shadowBlur=hot?14:6;
+    ctx.beginPath();ctx.moveTo(b.x0,b.y0);ctx.bezierCurveTo(b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(b.x0b,b.y0b);ctx.bezierCurveTo(b.cx0b,b.cy0b,b.cx1b,b.cy1b,b.x1b,b.y1b);ctx.stroke();
     ctx.restore();
 
-    // Store IP for click detection (labels now in side panel)
+    // End caps: source end on the left, remote end on the right (the bands
+    // store the remote end as dstY/dstH for BOTH directions).
+    ctx.save();ctx.shadowColor=b.col;ctx.shadowBlur=9;ctx.globalAlpha=0.9*dimA;ctx.fillStyle=b.col;
+    ctx.beginPath();ctx.roundRect(xL-18,b.ySrc,12,b.srcH,3);ctx.fill();
+    ctx.beginPath();ctx.roundRect(xR+6,b.dstY,10,b.dstH,3);ctx.fill();
+    ctx.restore();
+
+    // Store IP for click detection
     b._ip=b.outgoing?b.dst:b.src;
   });
 
-  // Separator line between outgoing and incoming
-  const firstIn=_talkersBands.find(b=>!b.outgoing);
-  if(firstIn&&_showIncoming){
+  // Divider between outgoing and incoming
+  const _divY=_talkersBands._divY||0;
+  if(_showIncoming&&_divY){
     ctx.save();
-    ctx.strokeStyle='#1a4a6a';ctx.lineWidth=1;ctx.setLineDash([4,4]);
-    ctx.beginPath();ctx.moveTo(xL,firstIn.dstY-10);ctx.lineTo(xR,firstIn.dstY-10);ctx.stroke();
-    ctx.setLineDash([]);ctx.restore();
-  }
-
-  // Labels panel removed — flow info shown in click popup
-
-  // Incoming / outgoing divider label
-  if(_showIncoming&&_talkersBands.some(b=>!b.outgoing)){
-    ctx.globalAlpha=0.4;ctx.fillStyle='#4dffff';ctx.font='10px monospace';ctx.textAlign='left';
-    const firstIn=_talkersBands.find(b=>!b.outgoing);
-    if(firstIn)ctx.fillText('↙ INCOMING',xL,firstIn.dstY-6);
-    ctx.globalAlpha=1;
+    ctx.strokeStyle='#1a4a6a';ctx.lineWidth=1;ctx.setLineDash([4,5]);ctx.globalAlpha=0.8;
+    ctx.beginPath();ctx.moveTo(xL,_divY);ctx.lineTo(W-12,_divY);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha=0.75;ctx.fillStyle='#4dffff';ctx.font='bold 11px monospace';ctx.textAlign='left';
+    ctx.fillText('↙ INCOMING',xL,_divY+14);
+    ctx.fillStyle='#4cc9f0';
+    ctx.fillText('↗ OUTGOING',xL,(_talkersBands._outTop||PAD.t)-4);
+    ctx.restore();
   } else if(!_showIncoming){
     const _sf=_radarFlowsAll||[];
     _drawSonar(ctx,W,H,_sf,T);
@@ -32065,83 +32714,183 @@ function _animateTalkers(){
 
   // Source label (ribbon-mode only — radar mode has no ribbons to anchor it to)
   if(_showIncoming){
-  const srcMidY=_talkersBands.filter(b=>b.outgoing).reduce((s,b)=>s+b.ySrc+b.srcH/2,0)/
-                Math.max(_talkersBands.filter(b=>b.outgoing).length,1);
-  ctx.save();ctx.shadowColor='#00c8ff';ctx.shadowBlur=10;
-  ctx.fillStyle='#00c8ff';ctx.font='bold 12px monospace';ctx.textAlign='right';
-  const sn=_resolveName(topSrc);ctx.fillText(sn.length>22?'…'+sn.slice(-21):sn,xL-20,srcMidY+5);
-  ctx.restore();
+    const outs=_talkersBands.filter(b=>b.outgoing);
+    const srcMidY=outs.length?outs.reduce((q,b)=>q+b.ySrc+b.srcH/2,0)/outs.length:H*0.3;
+    ctx.save();
+    const sn0=_resolveName(topSrc),maxW=PAD.l-40;
+    ctx.font='bold 13px monospace';
+    let sn=sn0;
+    while(sn.length>4&&ctx.measureText(sn).width>maxW)sn=sn.slice(0,-2);
+    if(sn!==sn0)sn=sn.slice(0,-1)+'…';
+    const tw=ctx.measureText(sn).width,px0=xL-28-tw-14,pw=tw+22;
+    ctx.fillStyle='rgba(3,11,22,0.85)';ctx.strokeStyle='rgba(0,200,255,0.45)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.roundRect(px0,srcMidY-13,pw,26,8);ctx.fill();ctx.stroke();
+    ctx.shadowColor='#00c8ff';ctx.shadowBlur=8;
+    ctx.fillStyle='#8fe9ff';ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillText(sn,px0+11,srcMidY+1);
+    ctx.shadowBlur=0;ctx.fillStyle='#2a7a9a';ctx.font='9px monospace';
+    ctx.fillText('SOURCE',px0+4,srcMidY-19);
+    ctx.restore();
   }
 
-  // ── Particles ─────────────────────────────────────────────────────────────
+  // ── Particles: glowing comets, speed and count follow throughput ──────────
+  const _ptAt=(b,u,lane)=>{
+    const pt=_bpt(b.x0,b.y0,b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1,u);
+    const pb=_bpt(b.x0b,b.y0b,b.cx0b,b.cy0b,b.cx1b,b.cy1b,b.x1b,b.y1b,u);
+    return{x:pt.x*(1-lane)+pb.x*lane,y:pt.y*(1-lane)+pb.y*lane};
+  };
   const allParts=[];
   _talkersBands.forEach((b,bi)=>{
     if(!_showIncoming)return;   // radar mode: no ribbons, so no bits travelling along them
     const speed=0.04+(b.bytes/maxBytes)*0.11;
-    // Skip particles on bands too thin to contain them cleanly
     const bandThickP=Math.max(b.dstH,b.srcH);
     if(bandThickP<8)return;
+    const dimA=(_hov<0||_hov===bi)?1:0.3;
     const pCount=bandThickP<20?1:2+Math.round((b.bytes/maxBytes)*3);  // max 5, 1 on thin bands
-    const sz=Math.min(12, Math.max(4, b.dstH*0.12));
+    const sz=Math.min(9,Math.max(3.2,Math.min(b.dstH,bandThickP)*0.17));
+    const col=b.pcol||b.col||'#ffffff';
     for(let k=0;k<pCount;k++){
       const u=((T*speed+k/pCount+bi*0.09)%1+1)%1;
-      const lane=0.12+(k/Math.max(pCount-1,1))*0.76;
-      const pt=_bpt(b.x0,b.y0,b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1,u);
-      const pb=_bpt(b.x0b,b.y0b,b.cx0b,b.cy0b,b.cx1b,b.cy1b,b.x1b,b.y1b,u);
-      // Snap to integer pixels — bezier floats cause sub-pixel blur
-      const px=Math.round(pt.x*(1-lane)+pb.x*lane),py=Math.round(pt.y*(1-lane)+pb.y*lane);
-      const du=Math.min(u+0.01,1);
-      const pt2=_bpt(b.x0,b.y0,b.cx0,b.cy0,b.cx1,b.cy1,b.x1,b.y1,du);
-      const pb2=_bpt(b.x0b,b.y0b,b.cx0b,b.cy0b,b.cx1b,b.cy1b,b.x1b,b.y1b,du);
-      const angle=Math.atan2((pt2.y*(1-lane)+pb2.y*lane)-py,(pt2.x*(1-lane)+pb2.x*lane)-px);
-      if(b.blocked) _drawRadioactive(ctx,px,py,sz);
-      else _drawShape(ctx,b.proto,px,py,angle,sz);
-      // Binary label — regenerate every ~200ms via T bucket.
-      // NOTE: the old code stamped _t on the FIRST particle, so k=1..4 then saw a
-      // matching bucket and were never regenerated — only the lead bit-string ever
-      // changed. Reset the whole cache when the bucket rolls over.
-      const _binBucket=Math.floor(T*5);
-      if(!b._binCache||b._binCache._t!==_binBucket) b._binCache={_t:_binBucket};
-      if(b._binCache[k]===undefined)
-        b._binCache[k]=(Math.random()*256|0).toString(2).padStart(8,'0');
-      const _bin=b._binCache[k];
-      ctx.save();
-      ctx.font='bold '+(Math.max(11,Math.round(sz*1.1)))+'px monospace';
-      ctx.textBaseline='middle';
-      // Bits trail BEHIND the shape…
-      ctx.fillStyle=b.pcol||b.col||'#00c8ff';ctx.globalAlpha=0.65;
-      ctx.textAlign='right';
-      ctx.fillText(_bin,px-sz-6,py);
-      // …and the flow's DNS name sits to the RIGHT of it.
-      const _nm=(b.outgoing?(b.dstLabel||b.dst):(b.srcLabel||b.src))||'';
-      if(_nm){
-        const _shown=_nm.length>24?_nm.slice(0,23)+'\u2026':_nm;
-        ctx.font=(Math.max(10,Math.round(sz*0.95)))+'px monospace';
-        ctx.textAlign='left';
-        ctx.globalAlpha=0.9;ctx.fillStyle='rgba(5,13,26,0.65)';
-        const _tw=ctx.measureText(_shown).width;
-        ctx.fillRect(px+sz+4,py-7,_tw+6,14);          // keep it legible over the band
-        ctx.globalAlpha=0.95;ctx.fillStyle=b.pcol||b.col||'#c8dff0';
-        ctx.fillText(_shown,px+sz+7,py);
+      const lane=0.18+(k/Math.max(pCount-1,1))*0.64;
+      const hp=_ptAt(b,u,lane);
+      const px=hp.x,py=hp.y;
+      if(b.blocked){_drawRadioactive(ctx,Math.round(px),Math.round(py),sz*1.6);}
+      else{
+        ctx.save();
+        ctx.globalCompositeOperation='lighter';
+        ctx.fillStyle=col;
+        for(let j=10;j>=1;j--){                      // fading tail behind the head
+          const uu=u-j*0.0062;if(uu<0)continue;
+          const tp=_ptAt(b,uu,lane);
+          ctx.globalAlpha=0.55*(1-j/11)*dimA;
+          ctx.beginPath();ctx.arc(tp.x,tp.y,Math.max(0.8,sz*0.62*(1-j/12)),0,Math.PI*2);ctx.fill();
+        }
+        ctx.globalAlpha=dimA;ctx.shadowColor=col;ctx.shadowBlur=12;
+        ctx.beginPath();ctx.arc(px,py,sz*0.62,0,Math.PI*2);ctx.fill();
+        ctx.shadowBlur=0;ctx.fillStyle='#ffffff';ctx.globalAlpha=0.95*dimA;
+        ctx.beginPath();ctx.arc(px,py,Math.max(1,sz*0.28),0,Math.PI*2);ctx.fill();
+        ctx.restore();
       }
-      ctx.restore();
+      // Bits ride only the lead pulse of the three busiest ribbons, faint.
+      if(k===0&&_topIdx.indexOf(bi)>=0&&bandThickP>=20&&u>0.22&&u<0.92){
+        const _binBucket=Math.floor(T*5);
+        if(!b._binCache||b._binCache._t!==_binBucket) b._binCache={_t:_binBucket};
+        if(b._binCache[0]===undefined) b._binCache[0]=(Math.random()*256|0).toString(2).padStart(8,'0');
+        ctx.save();ctx.font='10px monospace';ctx.textBaseline='middle';ctx.textAlign='right';
+        ctx.fillStyle=col;ctx.globalAlpha=0.42*dimA;
+        ctx.fillText(b._binCache[0],px-sz-9,py);
+        ctx.restore();
+      }
       allParts.push({px,py,col:b.pcol,bi});
     }
   });
 
-  // ── Constellation filaments (source-over, low alpha) ──────────────────────
+  // ── Constellation filaments (kept very faint) ─────────────────────────────
   for(let i=0;i<allParts.length;i++){
     for(let j=i+1;j<allParts.length;j++){
       const p=allParts[i],q=allParts[j];
       if(p.bi===q.bi)continue;
       const dx=p.px-q.px,dy=p.py-q.py,d=Math.sqrt(dx*dx+dy*dy);
-      if(d>90)continue;
-      const a=(1-d/90)*0.25;
+      if(d>80)continue;
+      const a=(1-d/80)*0.10;
       ctx.globalAlpha=a;ctx.strokeStyle='rgba(255,255,255,0.6)';ctx.lineWidth=0.7;
       ctx.beginPath();ctx.moveTo(p.px,p.py);ctx.lineTo(q.px,q.py);ctx.stroke();
     }
   }
   ctx.globalAlpha=1;
+
+  // ── Host cards (right column): flag/country, name, volume, share ──────────
+  if(_showIncoming){
+    const cx0=_talkersBands._cardX,cw=_talkersBands._cardW;
+    _talkersBands.forEach((b,bi)=>{
+      const ch=b.dstH,cy=b.dstY,two=ch>=34;
+      const dimA=(_hov<0||_hov===bi)?1:0.35,hot=(_hov===bi);
+      b._card={x:cx0,y:cy,w:cw,h:ch};
+      const nd=b.node||null;
+      const ip=b.outgoing?b.dst:b.src;
+      const lbl=(b.outgoing?b.dstLabel:b.srcLabel)||ip;
+      const isIP=(lbl===ip);
+      const name=(isIP&&nd&&nd.org)?nd.org:lbl;
+      const cc=nd&&nd.local?'LAN':((nd&&nd.cc)?String(nd.cc).toUpperCase().slice(0,3):'··');
+      const share=Math.round(100*b.bytes/_totalB);
+      const accent=b.blocked?'#ff4444':b.col;
+      ctx.save();
+      ctx.globalAlpha=dimA;
+      // connector from ribbon end cap to the card
+      ctx.strokeStyle=accent;ctx.globalAlpha=0.45*dimA;ctx.lineWidth=1.2;
+      ctx.beginPath();ctx.moveTo(xR+16,cy+ch/2);ctx.lineTo(cx0,cy+ch/2);ctx.stroke();
+      ctx.globalAlpha=dimA;
+      // card body
+      ctx.fillStyle=hot?'rgba(14,34,60,0.95)':'rgba(6,16,32,0.84)';
+      ctx.strokeStyle=accent;ctx.lineWidth=hot?1.6:1;
+      if(hot){ctx.shadowColor=accent;ctx.shadowBlur=14;}
+      ctx.beginPath();ctx.roundRect(cx0,cy,cw,ch,7);ctx.fill();
+      ctx.globalAlpha=(hot?0.95:0.42)*dimA;ctx.stroke();
+      ctx.shadowBlur=0;ctx.globalAlpha=dimA;
+      // accent stripe
+      ctx.fillStyle=accent;ctx.beginPath();ctx.roundRect(cx0+4,cy+5,3,ch-10,2);ctx.fill();
+      // country chip
+      ctx.font='bold 9px monospace';ctx.textBaseline='middle';ctx.textAlign='center';
+      const chipW=Math.max(22,ctx.measureText(cc).width+10),chipH=15;
+      const rowY=two?cy+ch*0.34:cy+ch/2;
+      ctx.fillStyle='rgba(255,255,255,0.08)';ctx.strokeStyle='rgba(255,255,255,0.18)';ctx.lineWidth=1;
+      ctx.beginPath();ctx.roundRect(cx0+13,rowY-chipH/2,chipW,chipH,4);ctx.fill();ctx.stroke();
+      ctx.fillStyle='#bfe6f7';ctx.fillText(cc,cx0+13+chipW/2,rowY+0.5);
+      // volume (right)
+      const arrow=b.trend>0?'▲ ':(b.trend<0?'▼ ':'');
+      const vol=fmtB(b.bytes);
+      ctx.textAlign='right';ctx.font='bold 12px monospace';ctx.fillStyle='#e6f4ff';
+      const volTxt=two?vol:(vol+'  '+share+'%');
+      const vtw=ctx.measureText(volTxt).width;
+      ctx.fillText(volTxt,cx0+cw-9,rowY+0.5);
+      if(arrow){
+        ctx.font='9px monospace';ctx.fillStyle=b.trend>0?'#39ff14':'#ff9f43';
+        ctx.fillText(arrow,cx0+cw-9-vtw-2,rowY+0.5);
+      }
+      // name (left, truncated to fit)
+      ctx.textAlign='left';ctx.font='bold '+(two?13:12)+'px monospace';
+      ctx.fillStyle=b.blocked?'#ff8080':'#d9ecfa';
+      const flag=(b.blocked?'⛔ ':'')+((nd&&nd.suspicious)?'⚠ ':'');
+      let nm=flag+name;
+      const nmX=cx0+13+chipW+8,nmMax=cw-(nmX-cx0)-vtw-(arrow?24:14);
+      if(ctx.measureText(nm).width>nmMax){
+        while(nm.length>3&&ctx.measureText(nm+'…').width>nmMax)nm=nm.slice(0,-1);
+        nm+='…';
+      }
+      ctx.fillText(nm,nmX,rowY+0.5);
+      if(two){
+        ctx.font='10px monospace';ctx.fillStyle='#6f9bb8';
+        const sub=((isIP||!(nd&&nd.org)?'':nd.org+' · ')+(isIP?'':ip+' · ')+(b.proto||'other').toUpperCase()+' · '+share+'%');
+        let st=sub;const stMax=cw-26;
+        if(ctx.measureText(st).width>stMax){
+          while(st.length>3&&ctx.measureText(st+'…').width>stMax)st=st.slice(0,-1);
+          st+='…';
+        }
+        ctx.fillText(st,cx0+13,cy+ch*0.75);
+      }
+      ctx.restore();
+    });
+
+    // Hover tooltip while the pointer is over a ribbon body
+    if(_hov>=0&&_talkHoverBody){
+      const b=_talkersBands[_hov],nd=b.node||null,ip=b.outgoing?b.dst:b.src;
+      const lbl=(b.outgoing?b.dstLabel:b.srcLabel)||ip;
+      const lines=[lbl,(b.outgoing?'↗ outgoing':'↙ incoming')+' · '+(b.proto||'other').toUpperCase(),
+                   fmtB(b.bytes)+' · '+Math.round(100*b.bytes/_totalB)+'% of shown traffic'];
+      if(nd&&nd.org)lines.splice(1,0,nd.org+(nd.country?' · '+nd.country:''));
+      ctx.save();ctx.font='11px monospace';ctx.textBaseline='middle';ctx.textAlign='left';
+      const tw2=Math.max(...lines.map(l=>ctx.measureText(l).width))+20,th2=lines.length*16+12;
+      let tx2=_talkMouse.x+16,ty2=_talkMouse.y+14;
+      if(tx2+tw2>W-8)tx2=_talkMouse.x-tw2-16;
+      if(ty2+th2>H-8)ty2=_talkMouse.y-th2-14;
+      ctx.fillStyle='rgba(4,12,28,0.95)';ctx.strokeStyle=b.col;ctx.lineWidth=1;ctx.globalAlpha=1;
+      ctx.shadowColor=b.col;ctx.shadowBlur=10;
+      ctx.beginPath();ctx.roundRect(tx2,ty2,tw2,th2,7);ctx.fill();ctx.shadowBlur=0;ctx.stroke();
+      lines.forEach((l,i)=>{ctx.fillStyle=i===0?'#e6f4ff':'#8fb4cc';
+        ctx.font=(i===0?'bold ':'')+'11px monospace';ctx.fillText(l,tx2+10,ty2+14+i*16);});
+      ctx.restore();
+    }
+  }
 
   // ── Events ────────────────────────────────────────────────────────────────
   if(!_showIncoming)_talkersEvents.length=0;   // ribbon-anchored ripples: not in radar mode
@@ -32648,17 +33397,6 @@ if(_initBloom()){
   if(_bb) _bb.style.display='none';   // addons missing — hide the toggle
 }
 animate();
-
-// ── Flag proxy test ────────────────────────────────────────────────────────
-// Show a GB flag in the corner to verify /flag/ proxy is working
-(function(){
-  const img=document.createElement('img');
-  img.src='/flag/gb';
-  img.style.cssText='position:fixed;bottom:60px;right:14px;width:40px;height:28px;border-radius:4px;border:1px solid #1a3a5a;opacity:0.8;z-index:50';
-  img.title='Flag proxy test (GB)';
-  img.onerror=()=>{img.style.border='2px solid #ff3333';img.title='Flag proxy FAILED';};
-  document.body.appendChild(img);
-})();
 
 // Wrap poll in global error handler to surface any startup crash
 window.addEventListener('error', function(e){

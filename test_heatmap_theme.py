@@ -87,6 +87,27 @@ def main():
     check(hasattr(win, "_nm_rerender"), "win._nm_rerender exposed")
     check(hasattr(win, "_nm_fig"), "win._nm_fig exposed")
 
+    # ── 0. New default look: dashboard + smooth + vivid. Check it renders, the
+    #       heat field is the top-most axes (hover/pin hit it), and the vivid
+    #       ramp's good end is the hot red -- then switch all three off to get
+    #       the classic theme-accent table that the checks below assert on.
+    V = win._nm_vars
+    check(V["dash"].get() and V["smooth"].get() and V["vivid"].get(),
+          "defaults: Dashboard, Smooth and Vivid colours are all on")
+    axes0 = win._nm_fig.axes
+    check(len(axes0) >= 6, f"dashboard draws backdrop + side panels + heat field ({len(axes0)} axes)")
+    heat = axes0[-1]
+    check(len(heat.images) >= 2, "dashboard heat field carries the bloom + field images")
+    check(heat.get_zorder() > max(a.get_zorder() for a in axes0[:-1]),
+          "heat field is the top-most axes (hover/click land on it)")
+    check(close_enough(mod._nm_vivid_cmap(True)(1.0), "#ff3d2e"),
+          "vivid ramp: high (good) end is the hot red")
+    check(close_enough(mod._nm_vivid_cmap(False)(0.0), "#ff3d2e"),
+          "vivid ramp: low latency (good) end is the hot red")
+    V["dash"].set(False); V["smooth"].set(False); V["vivid"].set(False)
+    win._nm_rerender(); root.update()
+    check(len(win._nm_fig.axes) == 2, "all three switches off -> classic heatmap + colourbar axes")
+
     ax = win._nm_fig.axes[0]
     im = ax.images[0]
     top_rgba = im.cmap(1.0)     # download is higher_better -> value 1.0 = the accent end
