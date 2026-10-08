@@ -2713,7 +2713,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-c51d7e93'
+_NM_BUILD_ID = 'b-5f2c8e19'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -7610,17 +7610,44 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             hist_tree.insert('', 'end', values=(ts.replace('T', ' '), kind, detail), tags=(kind,))
 
     # ── SIGNAL MAP ──────────────────────────────────────────────────────────
+    # floors have names ('Downstairs', 'Upstairs', ...); samples, picture, router and plan size are kept per floor
+    _fl = plan.setdefault('floors', {})
+    plan.setdefault('sizes', {})
+    if not _fl:
+        _fl.update({'0': 'Downstairs', '1': 'Upstairs'})
+    _used = {s_.get('z', 0) for s_ in survey} | {k for k in list(plan['images']) + list(plan['routers'])}
+    for _z in _used:
+        try:
+            _zi = int(float(_z))
+        except (TypeError, ValueError):
+            continue
+        _fl.setdefault(str(_zi), f'Floor {_zi}')
+    try:
+        _f0 = int(float(plan.get('floor', 0)))
+    except (TypeError, ValueError):
+        _f0 = 0
+    if str(_f0) not in _fl:
+        _f0 = sorted(int(k) for k in _fl)[0]
+    _sz0 = plan['sizes'].get(str(_f0)) or [plan.get('w', 12), plan.get('h', 8)]
+    floor_bar = tk.Frame(tab_map, bg=D['bg']); floor_bar.pack(fill='x', padx=8, pady=(6, 0))
     ctl = tk.Frame(tab_map, bg=D['bg']); ctl.pack(fill='x', padx=8, pady=(6, 0))
     ctl2 = tk.Frame(tab_map, bg=D['bg']); ctl2.pack(fill='x', padx=8, pady=(2, 2))
-    floor_v = tk.StringVar(value='0'); w_v = tk.StringVar(value=str(plan.get('w', 12)))
-    h_v = tk.StringVar(value=str(plan.get('h', 8))); what_v = tk.StringVar(value='Connected link')
+    floor_v = tk.StringVar(value=str(_f0)); w_v = tk.StringVar(value=str(_sz0[0]))
+    h_v = tk.StringVar(value=str(_sz0[1])); what_v = tk.StringVar(value='Connected link')
     td_v = tk.BooleanVar(value=False); dead_v = tk.BooleanVar(value=True)
-    _ttk.Label(ctl, text='Floor').pack(side='left', padx=(0, 4))
-    _ttk.Spinbox(ctl, from_=0, to=9, width=3, textvariable=floor_v, command=lambda: _draw_map()).pack(side='left', padx=(0, 12))
+    PLAN_VIEWS = ['Signal on paper (see-through)', 'Signal on dark, plan lines on top', 'Signal only']
+    view_v = tk.StringVar(value=plan.get('view') if plan.get('view') in PLAN_VIEWS else PLAN_VIEWS[0])
+    try:
+        op_v = tk.DoubleVar(value=float(plan.get('opacity', 55)))
+    except Exception:
+        op_v = tk.DoubleVar(value=55.0)
     _ttk.Label(ctl, text='Plan size (m)').pack(side='left', padx=(0, 4))
     _ttk.Entry(ctl, textvariable=w_v, width=5).pack(side='left')
     _ttk.Label(ctl, text='×').pack(side='left', padx=3)
-    _ttk.Entry(ctl, textvariable=h_v, width=5).pack(side='left', padx=(0, 12))
+    h_ent = _ttk.Entry(ctl, textvariable=h_v, width=5)
+    h_ent.pack(side='left', padx=(0, 4))
+    h_note = tk.Label(ctl, text='', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8))
+    h_note.pack(side='left', padx=(0, 12))
     _ttk.Label(ctl, text='Show').pack(side='left', padx=(0, 4))
     what_cb = _ttk.Combobox(ctl, textvariable=what_v, width=34, state='readonly',
                             values=['Connected link', 'Band comparison (my network)'])
@@ -7631,10 +7658,22 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     _img_cache = {}
 
     def _plan_wh():
+        """Plan size in metres. The width is yours to set; with a floor plan picture the height always follows
+        the picture's own shape, so it can never be stretched."""
         try:
-            return max(2.0, float(w_v.get())), max(2.0, float(h_v.get()))
+            W = max(2.0, float(w_v.get()))
         except Exception:
-            return 12.0, 8.0
+            W = 12.0
+        ip = plan['images'].get(str(_floor()))
+        if ip:
+            try:
+                return W, max(2.0, min(500.0, W / _plan_layers(ip)['ratio']))
+            except Exception:
+                _exc_debug('wifi plan ratio')
+        try:
+            return W, max(2.0, float(h_v.get()))
+        except Exception:
+            return W, 8.0
 
     def _floor():
         try:
@@ -7656,6 +7695,13 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     def _save_survey():
         W, Hh = _plan_wh()
         plan['w'], plan['h'] = W, Hh
+        plan['sizes'][str(_floor())] = [W, Hh]
+        plan['floor'] = _floor()
+        plan['view'] = view_v.get()
+        try:
+            plan['opacity'] = round(float(op_v.get()), 1)
+        except Exception:
+            _exc_debug('wifi plan opacity')
         _nm_wifi_save(survey_path, {'plan': plan, 'samples': survey}, state_dir)
 
     def _recent_link(sec=5.0):
@@ -7688,16 +7734,168 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
         if survey:
             survey.pop(); _save_survey(); _draw_map()
 
+    # ── floors ──
+    _floor_btns = {}
+    _cur_floor = {'f': _f0}
+
+    def _floor_ids():
+        return sorted(int(k) for k in plan['floors'])
+
+    def _floor_name(f):
+        return plan['floors'].get(str(f), f'Floor {f}')
+
+    def _floor_count(f):
+        return sum(1 for s_ in survey if s_.get('z', 0) == f)
+
+    def _refresh_floor_labels():
+        for f, b in list(_floor_btns.items()):
+            n = _floor_count(f)
+            try:
+                b.configure(text=f'{_floor_name(f)}  ({n})')
+            except Exception:
+                _exc_debug('wifi floor label')
+        try:
+            sample_btn.configure(text=f'Sample here ({_floor_name(_floor())})')
+        except Exception:
+            _exc_debug('wifi sample label')
+
+    def _on_floor():
+        # keep the plan size of the floor we are leaving, show the size of the one we arrive on
+        old = _cur_floor['f']
+        W_o, H_o = _plan_wh()
+        if str(old) in plan['floors']:
+            plan['sizes'][str(old)] = [W_o, H_o]
+        new = _floor()
+        _cur_floor['f'] = new
+        sz = plan['sizes'].get(str(new)) or [plan.get('w', 12), plan.get('h', 8)]
+        _sz_guard['on'] = True
+        try:
+            w_v.set(str(sz[0])); h_v.set(str(sz[1]))
+        finally:
+            _sz_guard['on'] = False
+        cursor['x'] = cursor['y'] = None
+        mode['router'] = False
+        plan['floor'] = new
+        _save_survey()
+        map_var.set(f'Now looking at: {_floor_name(new)}. Click the plan where you are standing, then Sample here.')
+        _draw_map()
+
+    def _rebuild_floor_bar():
+        for w_ in floor_bar.winfo_children():
+            w_.destroy()
+        _floor_btns.clear()
+        tk.Label(floor_bar, text='Floor', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='left', padx=(0, 8))
+        for f in _floor_ids():
+            b = tk.Radiobutton(floor_bar, text=f'{_floor_name(f)}', value=str(f), variable=floor_v, indicatoron=0,
+                               command=_on_floor, bg='#10193a', fg=D['text'], selectcolor='#1f6aa5',
+                               activebackground='#17305c', activeforeground='#ffffff', relief='flat', bd=0, highlightthickness=0,
+                               padx=16, pady=6, font=(_NM_MONO, 10, 'bold'), cursor='hand2')
+            b.pack(side='left', padx=(0, 4))
+            _floor_btns[f] = b
+        _ttk.Button(floor_bar, text='＋ Floor above', command=lambda: _add_floor(1)).pack(side='left', padx=(14, 4))
+        _ttk.Button(floor_bar, text='＋ Floor below', command=lambda: _add_floor(-1)).pack(side='left', padx=4)
+        _ttk.Button(floor_bar, text='Rename', command=_rename_floor).pack(side='left', padx=4)
+        _ttk.Button(floor_bar, text='Delete floor', command=_delete_floor).pack(side='left', padx=4)
+        _refresh_floor_labels()
+
+    def _add_floor(direction):
+        from tkinter import simpledialog
+        ids = _floor_ids()
+        nid = (max(ids) + 1) if direction > 0 else (min(ids) - 1)
+        default = ('Attic' if nid > 1 else f'Floor {nid}') if direction > 0 else 'Basement'
+        name = simpledialog.askstring('Add a floor', 'Name of the new floor:', initialvalue=default, parent=win)
+        if not name or not name.strip():
+            return
+        plan['floors'][str(nid)] = name.strip()[:24]
+        floor_v.set(str(nid))
+        _rebuild_floor_bar()
+        _on_floor()
+
+    def _rename_floor():
+        from tkinter import simpledialog
+        f = _floor()
+        name = simpledialog.askstring('Rename floor', 'New name for this floor:', initialvalue=_floor_name(f), parent=win)
+        if not name or not name.strip():
+            return
+        plan['floors'][str(f)] = name.strip()[:24]
+        _save_survey()
+        _refresh_floor_labels()
+        _draw_map()
+
+    def _delete_floor():
+        from tkinter import messagebox
+        f = _floor()
+        if len(plan['floors']) <= 1:
+            map_var.set('There has to be at least one floor.')
+            return
+        n = _floor_count(f)
+        has_img = str(f) in plan['images']
+        if n or has_img:
+            if not messagebox.askyesno('Delete floor', f'Delete “{_floor_name(f)}”, its {n} sample(s)'
+                                       f'{" and its floor plan picture" if has_img else ""}? This cannot be undone.',
+                                       parent=win):
+                return
+        survey[:] = [s_ for s_ in survey if s_.get('z', 0) != f]
+        for k in ('floors', 'images', 'routers', 'sizes'):
+            plan[k].pop(str(f), None)
+        floor_v.set(str(_floor_ids()[0]))
+        _rebuild_floor_bar()
+        _on_floor()
+
     def _clear_floor():
         f = _floor()
         survey[:] = [s for s in survey if s['z'] != f]
         _save_survey(); _draw_map()
+
+    def _plan_layers(ip):
+        """The floor plan as three arrays: the picture itself, dark line-art with a pale halo (for drawing over the
+        signal) and its width/height ratio. Cached; big images are shrunk so redraws stay quick."""
+        c = _img_cache.get(ip)
+        if c is None:
+            from PIL import Image, ImageFilter
+            im = Image.open(ip).convert('RGB')
+            iw, ih = im.size
+            if iw > 1800:
+                im = im.resize((1800, max(1, int(round(ih * 1800.0 / iw)))), Image.LANCZOS)
+            rgb = np.asarray(im)
+            lum = np.asarray(im.convert('L'), float) / 255.0
+            light_paper = float(np.median(lum)) >= 0.5
+            ink = np.clip(((1.0 - lum) if light_paper else lum) * 1.7, 0.0, 1.0)      # how 'line-like' each pixel is
+            ink[ink < 0.12] = 0.0
+            ink_im = Image.fromarray((ink * 255).astype('uint8'))
+            halo = np.asarray(ink_im.filter(ImageFilter.MaxFilter(3)), float) / 255.0
+            fg = np.array([8, 14, 32] if light_paper else [236, 244, 255], 'uint8')
+            bg = np.array([236, 244, 255] if light_paper else [8, 14, 32], 'uint8')
+            lines = np.zeros(ink.shape + (4,), 'uint8'); lines[..., :3] = fg; lines[..., 3] = (ink * 255).astype('uint8')
+            hal = np.zeros(ink.shape + (4,), 'uint8'); hal[..., :3] = bg; hal[..., 3] = (halo * 215).astype('uint8')
+            c = {'rgb': rgb, 'lines': lines, 'halo': hal, 'ratio': im.size[0] / float(im.size[1])}
+            _img_cache[ip] = c
+        return c
+
+    def _match_picture(quiet=False):
+        ip = plan['images'].get(str(_floor()))
+        if not ip:
+            if not quiet:
+                map_var.set('Load a floor plan image first.')
+            return
+        try:
+            W = _plan_wh()[0]
+            Hn = max(2.0, min(300.0, round(W / _plan_layers(ip)['ratio'], 1)))
+            h_v.set(str(Hn))
+            if not quiet:
+                map_var.set(f'Plan height set to {Hn:g} m so the picture keeps its proportions at {W:g} m wide. '
+                            'Set the width to the real width of the area the picture shows.')
+        except Exception:
+            _exc_debug('wifi match picture')
 
     def _load_plan():
         p = filedialog.askopenfilename(title='Floor plan image', filetypes=[('Images', '*.png *.jpg *.jpeg *.bmp *.gif'),
                                                                             ('All files', '*.*')])
         if p:
             plan['images'][str(_floor())] = p
+            _match_picture(quiet=True)
+            map_var.set('Floor plan loaded. Its proportions are kept: set the width (m) to the real width of the area '
+                        'it shows; the height follows the picture.')
             _save_survey(); _draw_map()
 
     def _clear_plan():
@@ -7717,15 +7915,34 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 map_var.set(f'Saved {p}')
             except Exception as ex:
                 map_var.set(f'Could not save: {ex}')
-    _ttk.Button(ctl, text='Sample here', style='Accent.TButton', command=_sample_here).pack(side='left', padx=(0, 6))
+    sample_btn = _ttk.Button(ctl, text='Sample here', style='Accent.TButton', command=_sample_here)
+    sample_btn.pack(side='left', padx=(0, 6))
     _ttk.Button(ctl, text='Undo', command=_undo).pack(side='left', padx=(0, 6))
     _ttk.Button(ctl, text='Clear floor', command=_clear_floor).pack(side='left', padx=(0, 12))
     _ttk.Checkbutton(ctl, text='3D view', variable=td_v, command=lambda: _draw_map()).pack(side='left')
     _ttk.Button(ctl2, text='Floor plan image…', command=_load_plan).pack(side='left', padx=(0, 6))
-    _ttk.Button(ctl2, text='Remove image', command=_clear_plan).pack(side='left', padx=(0, 12))
+    _ttk.Button(ctl2, text='Remove image', command=_clear_plan).pack(side='left', padx=(0, 6))
+    tk.Frame(ctl2, bg=D['bg'], width=6).pack(side='left')
     _ttk.Button(ctl2, text='Place router', command=_router_mode).pack(side='left', padx=(0, 12))
     _ttk.Checkbutton(ctl2, text='Mark dead spots', variable=dead_v, command=lambda: _draw_map()).pack(side='left', padx=(0, 12))
     _ttk.Button(ctl2, text='Export PNG…', command=_export).pack(side='left')
+    ctl3 = tk.Frame(tab_map, bg=D['bg']); ctl3.pack(fill='x', padx=8, pady=(0, 2))
+    _ttk.Label(ctl3, text='Plan view').pack(side='left', padx=(0, 4))
+    view_cb = _ttk.Combobox(ctl3, textvariable=view_v, width=30, state='readonly', values=PLAN_VIEWS)
+    view_cb.pack(side='left', padx=(0, 14))
+    view_cb.bind('<<ComboboxSelected>>', lambda e: (_save_survey(), _draw_map()))
+    _ttk.Label(ctl3, text='Signal strength of the colour').pack(side='left', padx=(0, 4))
+    _ttk.Scale(ctl3, from_=15, to=100, variable=op_v, length=160,
+               command=lambda v: (_draw_map_soon(), _save_survey_soon())).pack(side='left')
+    _sv = {'job': None}
+
+    def _save_survey_soon():
+        try:
+            if _sv['job']:
+                win.after_cancel(_sv['job'])
+            _sv['job'] = win.after(800, _save_survey)
+        except Exception:
+            _exc_debug('wifi survey save soon')
     tk.Label(tab_map, textvariable=map_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w',
              justify='left', wraplength=1150).pack(fill='x', padx=10)
     cv_m.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
@@ -7739,7 +7956,17 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             _soon['job'] = win.after(400, _draw_map)
         except Exception:
             _exc_debug('wifi map soon')
-    w_v.trace_add('write', _draw_map_soon); h_v.trace_add('write', _draw_map_soon)
+    _sz_guard = {'on': False}
+
+    def _size_changed(*_a):
+        if _sz_guard['on']:
+            return
+        _draw_map_soon()
+        try:
+            _save_survey_soon()
+        except NameError:
+            pass
+    w_v.trace_add('write', _size_changed); h_v.trace_add('write', _size_changed)
 
     def _paint_plan(ax, pts, getter, W, Hh, f, title):
         """One floor map: image, field, contours, dead spots, dots, router, cursor."""
@@ -7748,12 +7975,23 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
         ax.set_xlabel('metres', color=D['text2'], fontsize=7)
         ax.set_title(title, loc='left', color=D['text'], fontsize=9, fontweight='bold')
         ip = plan['images'].get(str(f))
-        if ip:
+        view = view_v.get()
+        try:
+            op = max(0.15, min(1.0, float(op_v.get()) / 100.0))
+        except Exception:
+            op = 0.55
+        lay = None
+        if ip and view != PLAN_VIEWS[2]:
             try:
-                if ip not in _img_cache:
-                    from PIL import Image
-                    _img_cache[ip] = np.asarray(Image.open(ip).convert('RGB'))
-                ax.imshow(_img_cache[ip], extent=(0, W, 0, Hh), origin='upper', aspect='auto', alpha=0.55, zorder=1)
+                lay = _plan_layers(ip)
+                if view == PLAN_VIEWS[0]:
+                    ax.set_facecolor('#ffffff')                       # the 'paper': the signal tints it, the plan's
+                                                                      # dark lines are laid over it (like multiply)
+                else:
+                    ax.imshow(lay['halo'], extent=(0, W, 0, Hh), origin='upper', aspect='equal', zorder=3.2,
+                              interpolation='antialiased')
+                ax.imshow(lay['lines'], extent=(0, W, 0, Hh), origin='upper', aspect='equal', zorder=3.3,
+                          interpolation='antialiased')
             except Exception:
                 _exc_debug('wifi plan image')
         info = ''
@@ -7763,8 +8001,11 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             vs = np.array([getter(s) for s in pts], float)
             gx, gy, fld, cov = _nm_wifi_field(xs, ys, vs, W, Hh)
             rgba = np.asarray(cmap(DBM_NORM(fld)), float)
-            rgba[..., 3] = np.clip(cov, 0, 1) * 0.9
-            ax.imshow(rgba, extent=(0, W, 0, Hh), origin='lower', aspect='auto', interpolation='bicubic', zorder=2)
+            if lay is not None and view == PLAN_VIEWS[0]:
+                rgba[..., 3] = np.clip(cov, 0, 1) * (0.35 + 0.65 * op)      # tint on the white paper
+            else:
+                rgba[..., 3] = np.clip(cov * 1.6, 0, 1) ** 0.8               # true colours, not dimmed
+            ax.imshow(rgba, extent=(0, W, 0, Hh), origin='lower', aspect='equal', interpolation='bicubic', zorder=2)
             try:
                 m = np.ma.masked_where(cov < 0.35, fld)
                 if m.count() > 6:
@@ -7804,15 +8045,32 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             ax.axhline(cursor['y'], color=D['accent'], lw=0.8, alpha=0.7, zorder=4)
             ax.scatter([cursor['x']], [cursor['y']], s=120, facecolors='none', edgecolors=D['accent'], linewidths=1.4,
                        zorder=6)
+        ax.set_xlim(0, W); ax.set_ylim(0, Hh); ax.set_aspect('equal', adjustable='box')   # imshow must not undo this
         if len(pts) < 3:
             ax.text(0.5, 0.5, 'Click the plan where you are standing, press “Sample here”,\nthen walk to another spot. '
                               '3+ samples draw the map.', transform=ax.transAxes, ha='center', va='center',
                     color=D['text2'], fontsize=9)
         return info
 
+    _rebuild_floor_bar()
+
     def _draw_map():
         fig_m.clear()
+        _refresh_floor_labels()
         W, Hh = _plan_wh(); f = _floor()
+        has_pic = str(f) in plan['images']
+        try:
+            if has_pic:
+                if abs(float(h_v.get() or 0) - Hh) > 0.05:
+                    _sz_guard['on'] = True
+                    try:
+                        h_v.set(f'{Hh:.1f}')
+                    finally:
+                        _sz_guard['on'] = False
+            h_ent.configure(state='disabled' if has_pic else 'normal')
+            h_note.configure(text='← from the picture' if has_pic else '')
+        except Exception:
+            _exc_debug('wifi plan height sync')
         sm = ScalarMappable(norm=DBM_NORM, cmap=cmap)
         info = ''
         sel = what_v.get()
@@ -7840,9 +8098,15 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 except Exception:
                     _exc_debug('wifi 3d router')
             zmax = max(3.5, 3.0 * (max([s['z'] for s in allp] + [0]) + 1))
-            ax.set_xlim(0, W); ax.set_ylim(0, Hh); ax.set_zlim(0, zmax)
+            zmin = min(0.0, 3.0 * min([s['z'] for s in allp] + [0]))
+            ax.set_xlim(0, W); ax.set_ylim(0, Hh); ax.set_zlim(zmin, zmax)
+            for fz in sorted({s['z'] for s in allp}):
+                try:
+                    ax.text(0, 0, fz * 3.0 + 0.2, _floor_name(fz), color=D['text2'], fontsize=7)
+                except Exception:
+                    _exc_debug('wifi 3d floor label')
             try:
-                ax.set_box_aspect((W, Hh, zmax * 2.2))
+                ax.set_box_aspect((W, Hh, (zmax - zmin) * 2.2))
             except Exception:
                 _exc_debug('wifi 3d aspect')
             ax.set_xlabel('x (m)', color=D['text2'], fontsize=7); ax.set_ylabel('y (m)', color=D['text2'], fontsize=7)
@@ -7857,14 +8121,28 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             for ax, key, nm in ((axs[0], '2.4', '2.4 GHz'), (axs[1], '5', '5 GHz')):
                 pts = [s for s in survey if s['z'] == f and key in (s.get('bands') or {})]
                 parts.append(f'{nm}: ' + (_paint_plan(ax, pts, lambda s, k=key: s['bands'][k], W, Hh, f,
-                                                      f'Floor {f} — {nm} ({len(pts)} samples)') or 'needs 3+ samples'))
+                                                      f'{_floor_name(f)} — {nm} ({len(pts)} samples)') or 'needs 3+ samples'))
             info = '   |   '.join(parts)
             cb = fig_m.colorbar(sm, cax=fig_m.add_axes([0.92, 0.15, 0.015, 0.7]))
         else:
             pts = [s for s in survey if s['z'] == f and _metric_of(s) is not None]
-            ax = fig_m.add_subplot(111)
-            info = _paint_plan(ax, pts, _metric_of, W, Hh, f, f'Floor {f} — {len(pts)} samples')
-            cb = fig_m.colorbar(sm, ax=ax, fraction=0.025, pad=0.02)
+            # the plan keeps its true shape; the map and its colour bar are centred as a pair
+            fw_, fh_ = np.asarray(fig_m.get_size_inches()) * fig_m.dpi
+            ah, bot = 0.82, 0.11
+            aw = min(0.84, ah * fh_ * W / max(Hh, 1e-6) / max(fw_, 1.0))
+            ax = fig_m.add_axes([0.05, bot, aw, ah])
+            cax = fig_m.add_axes([0.9, bot, 0.016, ah])
+            info = _paint_plan(ax, pts, _metric_of, W, Hh, f, f'{_floor_name(f)} — {len(pts)} samples')
+            cb = fig_m.colorbar(sm, cax=cax)
+            try:
+                ax.apply_aspect()
+                bb = ax.get_position()
+                gap, cbw = 0.014, 0.016
+                left = max(0.03, (1.0 - (bb.width + gap + cbw)) / 2.0)
+                ax.set_position([left, bb.y0, bb.width, bb.height])
+                cax.set_position([left + bb.width + gap, bb.y0, cbw, bb.height])
+            except Exception:
+                _exc_debug('wifi map layout')
         try:
             cb.set_label('dBm', color=D['text2'], fontsize=7)
             cb.ax.tick_params(colors=D['text2'], labelsize=6)
@@ -7976,7 +8254,11 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                      'figs': (fig_l, fig_n, fig_a, fig_m), 'drain': _drain, 'draw_map': _draw_map,
                      'draw_activity': _draw_activity, 'draw_nets': _draw_nets, 'draw_live': _draw_live,
                      'sample': _sample_here, 'info': info_txt, 'map_var': map_var, 'mode': mode,
-                     'tick_click': _map_click, 'what_cb': what_cb, 'csi': csi_ctl}
+                     'tick_click': _map_click, 'what_cb': what_cb, 'csi': csi_ctl, 'view_v': view_v, 'op_v': op_v,
+                     'w_v': w_v, 'h_v': h_v, 'match_picture': _match_picture, 'plan_views': PLAN_VIEWS,
+                     'floors': {'v': floor_v, 'btns': _floor_btns, 'on': _on_floor, 'add': _add_floor,
+                                'rename': _rename_floor, 'delete': _delete_floor, 'name': _floor_name,
+                                'sample_btn': sample_btn}}
     _draw_map()
     _drain()
     return win
@@ -8496,6 +8778,46 @@ class _NMCsiAnalyzer:
             out[:, ~self.valid] = np.nan
         return out
 
+    def activity(self, t, sec=60.0, cols=240, bands=8):
+        """bands x cols matrix: how much the radio path is changing, per slice of the Wi-Fi channel and
+        per moment. Same measure as the MOTION line (std/mean over the trailing second), computed per
+        group of subcarriers, so a bright patch here lines up with a rise in the motion line. NaN = no data."""
+        out = np.full((bands, cols), np.nan)
+        if len(self.t) < 12 or self.valid is None:
+            return out
+        tt = np.asarray(self.t)
+        X = np.asarray(list(self.X))[:, self.valid]
+        edges = np.linspace(0, X.shape[1], bands + 1).astype(int)
+        grid = np.linspace(t - sec, t, cols)
+        hi = np.searchsorted(tt, grid, side='right')                   # frames at or before each column
+        lo = np.searchsorted(tt, grid - self.win_s, side='left')
+        for c in range(cols):
+            a, b = int(lo[c]), int(hi[c])
+            if b - a < 8 or grid[c] < tt[0]:
+                continue
+            W = X[a:b]
+            r = W.std(axis=0) / np.maximum(W.mean(axis=0), 1e-6)
+            for k in range(bands):
+                if edges[k + 1] > edges[k]:
+                    out[k, c] = float(r[edges[k]:edges[k + 1]].mean())
+        return out
+
+    def activity_now(self, t, bands=8):
+        """The latest column of activity(): change per slice of the channel over the trailing second."""
+        out = np.full(bands, np.nan)
+        if self.valid is None or len(self.t) < 12:
+            return out
+        W = self._window(t, self.win_s)
+        if W is None or W.shape[0] < 8:
+            return out
+        W = W[:, self.valid]
+        r = W.std(axis=0) / np.maximum(W.mean(axis=0), 1e-6)
+        edges = np.linspace(0, W.shape[1], bands + 1).astype(int)
+        for k in range(bands):
+            if edges[k + 1] > edges[k]:
+                out[k] = float(r[edges[k]:edges[k + 1]].mean())
+        return out
+
     def snapshot(self, t):
         s = dict(self.state)
         rs, d, thr = self.room_state()
@@ -8505,16 +8827,25 @@ class _NMCsiAnalyzer:
         return s
 
 
-class _NMCsiSource:
-    """Reads lines from a serial port (or the simulator) on a thread and feeds the analyzer."""
+_NM_CSI_UDP_PORT = 4210            # the receiver board sends here when it joins the home Wi-Fi (csi_config.h)
+_NM_CSI_UDP_TOKEN = 'wifi'          # port-box entry: "wifi:4210 — receiver board over Wi-Fi"
 
-    def __init__(self, analyzer, port=None, baud=_NM_CSI_BAUD, sim=None, serial_cls=None, clock=None):
+
+class _NMCsiSource:
+    """Reads lines from a serial port, a UDP socket fed by the receiver board over Wi-Fi, or the simulator,
+    on a thread, and feeds the analyzer."""
+
+    def __init__(self, analyzer, port=None, baud=_NM_CSI_BAUD, sim=None, serial_cls=None, clock=None,
+                 udp_port=None):
         import threading
         from collections import deque
         self.an = analyzer
         self.port = port
         self.baud = baud
         self.sim = sim
+        self.udp_port = udp_port
+        self.board = None                       # last 'CSI_BOARD' announcement (Wi-Fi mode)
+        self.sock = None
         self.serial_cls = serial_cls or _NMSerial
         self.clock = clock or time.time
         self.raw = deque(maxlen=6000)           # (t, line) -- CSI lines
@@ -8535,8 +8866,13 @@ class _NMCsiSource:
         import threading
         self.stop_ev.clear()
         self.t_start = self.clock()
-        self.thread = threading.Thread(target=self._run_sim if self.sim is not None else self._run_serial,
-                                       daemon=True, name='nm-csi')
+        if self.sim is not None:
+            target = self._run_sim
+        elif self.udp_port:
+            target = self._run_udp
+        else:
+            target = self._run_serial
+        self.thread = threading.Thread(target=target, daemon=True, name='nm-csi')
         self.thread.start()
 
     def stop(self):
@@ -8573,6 +8909,82 @@ class _NMCsiSource:
                 self.feed_line(self.sim.frame(tt - t0), tt)
                 n += 1
             self.stop_ev.wait(0.02)
+
+    def _board_line(self, line, addr, now):
+        """'CSI_BOARD,csi_recv,<ip>,<channel on air>,<AP rssi>,<channel the firmware expects>'"""
+        f = line.strip().split(',')
+        try:
+            self.board = {'ip': addr[0], 'port': addr[1], 'ch': int(f[3]), 'rssi': int(f[4]),
+                          'cfg': int(f[5]), 't': now}
+        except (IndexError, ValueError):
+            self.board = {'ip': addr[0], 'port': addr[1], 'ch': 0, 'rssi': 0, 'cfg': 0, 't': now}
+
+    def _run_udp(self):
+        """The receiver board joined the home Wi-Fi: it announces itself ('CSI_BOARD,...') about once a second to
+        the whole network; we answer 'CSI_SUBSCRIBE' every 2 s and it streams one CSI line per datagram to us."""
+        import socket
+        s = None
+        err = None
+        for _try in range(8):                     # a quick Disconnect -> Connect can race the old socket closing
+            s = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):      # Windows: never share the port with another program
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                s.bind(('', int(self.udp_port)))
+                s.settimeout(0.25)
+                try:                              # Windows: an ICMP 'port unreachable' must not break recvfrom
+                    s.ioctl(socket.SIO_UDP_CONNRESET, False)
+                except Exception:
+                    pass
+                err = None
+                break
+            except Exception as ex:
+                err = ex
+                if s is not None:
+                    s.close()
+                s = None
+                if self.stop_ev.wait(0.15):
+                    return
+        if s is None:
+            self.error = (f'Could not listen on UDP port {self.udp_port}: {err}. Another copy of this app (or '
+                          f'another program) may be using it.')
+            return
+        self.sock = s
+        last_sub = 0.0
+        try:
+            while not self.stop_ev.is_set():
+                data = addr = None
+                try:
+                    data, addr = s.recvfrom(8192)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    self.stop_ev.wait(0.05)
+                now = self.clock()
+                if data:
+                    self.bytes += len(data)
+                    self.t_last_byte = now
+                    for ln in data.decode('utf-8', 'replace').splitlines():
+                        if ln.startswith('CSI_BOARD,'):
+                            self._board_line(ln, addr, now)
+                        else:
+                            self.feed_line(ln.rstrip('\r'), now)
+                b = self.board
+                if b and now - last_sub >= 2.0:
+                    last_sub = now
+                    try:
+                        s.sendto(b'CSI_SUBSCRIBE', (b['ip'], b['port']))
+                    except OSError:
+                        pass
+        except Exception as ex:
+            self.error = str(ex)
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self.sock = None
 
     def _run_serial(self):
         ser = None
@@ -8611,6 +9023,25 @@ class _NMCsiSource:
             return self.error
         if self.sim is not None or now - self.t_start < 4.0:
             return ''
+        if self.udp_port:
+            b = self.board
+            if b is None:
+                return (f'Listening on UDP port {self.udp_port}, but no receiver board has announced itself. Check: '
+                        'the board is powered and flashed with csi_recv with your Wi-Fi name and password in '
+                        'csi_config.h; it is on the same network as this PC (an extender that makes its own separate '
+                        'network blocks the announcement: then set CSI_UDP_TARGET to this PC\'s address); and Windows '
+                        'Firewall allows this app on private networks.')
+            if now - b['t'] > 6.0:
+                return ('The receiver board stopped announcing itself. Did it lose power or drop off the Wi-Fi? '
+                        'It reconnects by itself when the router is back.')
+            if self.t_last_csi == 0.0:
+                ch = b['ch'] or b['cfg']
+                return (f'The receiver board is on your network ({b["ip"]}, Wi-Fi channel {ch}) but no CSI is arriving. '
+                        f'Is the transmitter (csi_send) powered, and set to channel {ch}? The receiver follows your '
+                        'router/extender onto that channel, so the transmitter must use the same one.')
+            if now - self.t_last_csi > 4.0:
+                return 'CSI stopped arriving — is the transmitter (csi_send) board still powered and in range?'
+            return ''
         if self.bytes == 0:
             return ('Nothing is coming from this port. Check: the right COM port, baud ' + str(self.baud) +
                     ', and that this board is flashed with the csi_recv firmware (press its EN/RESET button '
@@ -8632,6 +9063,276 @@ class _NMCsiSource:
 
 # ── Wi-Fi window: CSI (ESP32) tab ────────────────────────────────────────────
 
+class _NMCsiHistory:
+    """Everything the CSI tab shows, kept in SQLite so any past moment can be replayed.
+
+    Raw packets are NOT stored (about 100 a second would be gigabytes a day). Instead one summary row is
+    written every second: movement level and threshold, motion score, room-differs deviation,
+    breathing estimate, signal strength, packet rate and the eight channel-slice activity values that
+    draw the strip. Every 5 s the signal shape (and the empty-room reference in force) is stored too.
+    A per-minute table makes the long-range timeline cheap and an event table lists each stretch of
+    movement, so 'jump to the previous movement' is one query. Rows from the simulated demo are tagged
+    and can never be mistaken for real data. Old rows are dropped after `keep_days`."""
+    BANDS = 8
+    GAP_S = 3.0
+
+    def __init__(self, path, keep_days=7.0):
+        import sqlite3, threading
+        self.path = str(path)
+        self.keep_s = float(keep_days) * 86400.0
+        self.lock = threading.RLock()
+        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=5.0)
+        try:
+            self.db.execute('PRAGMA journal_mode=WAL')
+            self.db.execute('PRAGMA synchronous=NORMAL')
+        except Exception:
+            _exc_debug('csi history pragma')
+        self.db.executescript(
+            'CREATE TABLE IF NOT EXISTS csi_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, t0 REAL, t1 REAL, '
+            'kind TEXT, label TEXT);'
+            'CREATE TABLE IF NOT EXISTS csi_hist(t REAL PRIMARY KEY, sess INTEGER, turb REAL, thr REAL, mu REAL, '
+            'score REAL, flags INTEGER, dev REAL, bpm REAL, rssi REAL, rate REAL, bands BLOB);'
+            'CREATE TABLE IF NOT EXISTS csi_shape(t REAL PRIMARY KEY, sess INTEGER, cur BLOB, ref BLOB);'
+            'CREATE TABLE IF NOT EXISTS csi_min(m INTEGER PRIMARY KEY, score REAL, sim INTEGER, n INTEGER);'
+            'CREATE TABLE IF NOT EXISTS csi_event(t0 REAL PRIMARY KEY, t1 REAL, peak REAL, sess INTEGER);')
+        self.db.commit()
+        self.kinds = {}
+        for (i, k) in self.db.execute('SELECT id, kind FROM csi_sessions'):
+            self.kinds[i] = k
+        self._rows = []
+        self._shapes = []
+        self._min = {}
+        self._ev = None
+        self._ev_out = []
+        self._last_flush = None
+        self._last_shape = -1e18
+        self._last_ref = b'?'
+        self.version = 0
+
+    # ── write side ────────────────────────────────────────────────────────
+    @staticmethod
+    def _f(v):
+        try:
+            v = float(v)
+            return v if v == v and abs(v) != float('inf') else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _blob(a):
+        return np.asarray(a, dtype=np.float32).tobytes() if a is not None else None
+
+    def start_session(self, t, kind, label=''):
+        with self.lock:
+            self.flush()
+            cur = self.db.execute('INSERT INTO csi_sessions(t0, t1, kind, label) VALUES(?,?,?,?)',
+                                  (float(t), float(t), kind, str(label)))
+            self.db.commit()
+            self.kinds[cur.lastrowid] = kind
+            return cur.lastrowid
+
+    def end_session(self, sess, t):
+        if sess is None:
+            return
+        with self.lock:
+            self._close_event()
+            self.flush()
+            self.db.execute('UPDATE csi_sessions SET t1=? WHERE id=?', (float(t), sess))
+            self.db.commit()
+
+    def _close_event(self):
+        if self._ev is not None:
+            self._ev_out.append(tuple(self._ev))
+            self._ev = None
+
+    def add(self, t, sess, snap, bands, prof=None, ref=None):
+        with self.lock:
+            fl = (1 if snap.get('moving') else 0) | (2 if snap.get('ready') else 0) | (4 if snap.get('calibrated') else 0)
+            rs = snap.get('room')
+            fl |= 16 if rs == 'differs' else (8 if rs == 'match' else 0)
+            b = snap.get('breath') or {}
+            f = self._f
+            bl = None
+            if bands is not None:
+                bl = self._blob(np.asarray(bands, float)[:self.BANDS])
+            self._rows.append((float(t), sess, f(snap.get('turb')), f(snap.get('thr')), f(snap.get('mu')),
+                               f(snap.get('score')) or 0.0, fl, f(snap.get('dev')), f(b.get('bpm')),
+                               f(snap.get('rssi')), f(snap.get('rate')), bl))
+            sim = 1 if self.kinds.get(sess) == 'sim' else 0
+            m = int(t // 60)
+            cur = self._min.get(m)
+            sc = f(snap.get('score')) or 0.0
+            if cur is None:
+                self._min[m] = [sc, sim, 1]
+            else:
+                cur[0] = max(cur[0], sc); cur[1] = max(cur[1], sim); cur[2] += 1
+            if snap.get('moving'):
+                if self._ev is not None and t - self._ev[1] <= self.GAP_S:
+                    self._ev[1] = float(t); self._ev[2] = max(self._ev[2], sc)
+                else:
+                    self._close_event()
+                    self._ev = [float(t), float(t), sc, sess]
+            elif self._ev is not None and t - self._ev[1] > self.GAP_S:
+                self._close_event()
+            if prof is not None and t - self._last_shape >= 5.0:
+                self._last_shape = t
+                rb = self._blob(ref)
+                if rb != self._last_ref:                 # the empty-room reference is stored only when it changes
+                    self._last_ref = rb
+                    rb = rb if rb is not None else b''   # b'' = 'no reference from here on'
+                else:
+                    rb = None
+                self._shapes.append((float(t), sess, self._blob(prof), rb))
+            if self._last_flush is None:
+                self._last_flush = t
+            if len(self._rows) >= 20 or t - self._last_flush >= 5.0:
+                self.flush()
+                self._last_flush = t
+
+    def flush(self):
+        with self.lock:
+            if not (self._rows or self._shapes or self._min or self._ev or self._ev_out):
+                return
+            c = self.db
+            if self._rows:
+                c.executemany('INSERT OR REPLACE INTO csi_hist VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', self._rows)
+            if self._shapes:
+                c.executemany('INSERT OR REPLACE INTO csi_shape VALUES(?,?,?,?)', self._shapes)
+            for m, (sc, sim, n) in self._min.items():
+                c.execute('INSERT INTO csi_min(m, score, sim, n) VALUES(?,?,?,?) ON CONFLICT(m) DO UPDATE SET '
+                          'score=MAX(score, excluded.score), sim=MAX(sim, excluded.sim), n=n+excluded.n',
+                          (m, sc, sim, n))
+            evs = list(self._ev_out) + ([tuple(self._ev)] if self._ev is not None else [])
+            if evs:
+                c.executemany('INSERT OR REPLACE INTO csi_event(t0, t1, peak, sess) VALUES(?,?,?,?)', evs)
+            c.commit()
+            self._rows, self._shapes, self._min, self._ev_out = [], [], {}, []
+            self.version += 1
+
+    # ── read side ─────────────────────────────────────────────────────────
+    def bounds(self):
+        with self.lock:
+            self.flush()
+            r = self.db.execute('SELECT MIN(t), MAX(t) FROM csi_hist').fetchone()
+            return (r[0], r[1]) if r and r[0] is not None else (None, None)
+
+    def window(self, t0, t1):
+        """Arrays for the rows in [t0, t1] (empty arrays if nothing was recorded)."""
+        with self.lock:
+            self.flush()
+            rows = self.db.execute('SELECT t, turb, thr, mu, score, flags, dev, bpm, rssi, rate, bands, sess '
+                                   'FROM csi_hist WHERE t >= ? AND t <= ? ORDER BY t', (t0, t1)).fetchall()
+        n = len(rows)
+        nan = float('nan')
+        g = lambda i: np.asarray([(r[i] if r[i] is not None else nan) for r in rows], float)
+        bands = np.full((n, self.BANDS), np.nan)
+        for i, r in enumerate(rows):
+            if r[10]:
+                a = np.frombuffer(r[10], np.float32)
+                bands[i, :len(a)] = a[:self.BANDS]
+        return {'t': g(0), 'turb': g(1), 'thr': g(2), 'mu': g(3), 'score': g(4),
+                'flags': np.asarray([r[5] or 0 for r in rows], int), 'dev': g(6), 'bpm': g(7), 'rssi': g(8),
+                'rate': g(9), 'bands': bands,
+                'kind': [self.kinds.get(r[11], 'live') for r in rows]}
+
+    def shape_at(self, t, tol=30.0):
+        with self.lock:
+            self.flush()
+            r = self.db.execute('SELECT cur, t FROM csi_shape WHERE t <= ? AND t >= ? ORDER BY t DESC LIMIT 1',
+                                (t, t - tol)).fetchone()
+            if not r:
+                return None, None
+            rr = self.db.execute('SELECT ref FROM csi_shape WHERE ref IS NOT NULL AND t <= ? ORDER BY t DESC LIMIT 1',
+                                 (r[1],)).fetchone()
+        cur = np.frombuffer(r[0], np.float32).astype(float) if r[0] else None
+        ref = np.frombuffer(rr[0], np.float32).astype(float) if rr and rr[0] else None
+        return cur, ref
+
+    def overview(self, t0, t1, n=400):
+        """(bucket-centre times, max motion score, simulated flag) per bucket; buckets with no data are NaN."""
+        with self.lock:
+            self.flush()
+            w = max((t1 - t0) / n, 1e-6)
+            if t1 - t0 > 3600.0:
+                q = ('SELECT CAST((m*60.0 - ?) / ? AS INT) AS b, MAX(score), MAX(sim) FROM csi_min '
+                     'WHERE m*60.0 + 60 >= ? AND m*60.0 <= ? GROUP BY b')
+            else:
+                q = ('SELECT CAST((t - ?) / ? AS INT) AS b, MAX(score), '
+                     'MAX(CASE WHEN (SELECT kind FROM csi_sessions s WHERE s.id = csi_hist.sess) = \'sim\' '
+                     'THEN 1 ELSE 0 END) FROM csi_hist WHERE t >= ? AND t <= ? GROUP BY b')
+            rows = self.db.execute(q, (t0, w, t0, t1)).fetchall()
+        xs = t0 + (np.arange(n) + 0.5) * w
+        real = np.full(n, np.nan); sim = np.full(n, np.nan)
+        for b, sc, sm in rows:
+            if b is None or not (0 <= b < n):
+                continue
+            (sim if sm else real)[b] = sc or 0.0
+        return xs, real, sim
+
+    def events(self, t0, t1):
+        with self.lock:
+            self.flush()
+            return self.db.execute('SELECT t0, t1, peak FROM csi_event WHERE t1 >= ? AND t0 <= ? ORDER BY t0',
+                                   (t0, t1)).fetchall()
+
+    def next_event(self, anchor, direction):
+        """Start time of the nearest movement event after (+1) or before (-1) `anchor`, else None."""
+        with self.lock:
+            self.flush()
+            if direction > 0:
+                r = self.db.execute('SELECT t0 FROM csi_event WHERE t0 > ? ORDER BY t0 LIMIT 1', (anchor,)).fetchone()
+            else:
+                r = self.db.execute('SELECT t0 FROM csi_event WHERE t0 < ? ORDER BY t0 DESC LIMIT 1',
+                                    (anchor,)).fetchone()
+        return r[0] if r else None
+
+    def session_kind(self, t):
+        with self.lock:
+            self.flush()
+            r = self.db.execute('SELECT sess FROM csi_hist WHERE t <= ? ORDER BY t DESC LIMIT 1', (t,)).fetchone()
+        return self.kinds.get(r[0], 'live') if r else None
+
+    def size_bytes(self):
+        import os as _os
+        n = 0
+        for suf in ('', '-wal'):
+            try:
+                n += _os.path.getsize(self.path + suf)
+            except OSError:
+                pass
+        return n
+
+    def prune(self, now):
+        cutoff = now - self.keep_s
+        with self.lock:
+            self.flush()
+            c = self.db
+            c.execute('DELETE FROM csi_hist WHERE t < ?', (cutoff,))
+            c.execute('DELETE FROM csi_shape WHERE t < ?', (cutoff,))
+            c.execute('DELETE FROM csi_event WHERE t1 < ?', (cutoff,))
+            c.execute('DELETE FROM csi_min WHERE m*60 + 60 < ?', (cutoff,))
+            c.execute('DELETE FROM csi_sessions WHERE t1 < ?', (cutoff,))
+            c.commit()
+
+    def clear(self):
+        with self.lock:
+            self._last_ref = b'?'
+            self._rows, self._shapes, self._min, self._ev_out, self._ev = [], [], {}, [], None
+            for tb in ('csi_hist', 'csi_shape', 'csi_min', 'csi_event'):
+                self.db.execute(f'DELETE FROM {tb}')
+            self.db.commit()
+            self.version += 1
+
+    def close(self):
+        with self.lock:
+            try:
+                self._close_event()
+                self.flush()
+                self.db.close()
+            except Exception:
+                _exc_debug('csi history close')
+
+
 def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
     """Builds the CSI tab inside `parent`. Returns a controller dict (also used by tests)."""
     import tkinter as tk
@@ -8641,11 +9342,21 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
 
     clock = clock or time.time
     cmap = _nm_vivid_cmap(True)
+    from matplotlib.colors import LinearSegmentedColormap as _LSC
+    act_cmap = _LSC.from_list('nm_csi_act', [(0.0, '#0b1636'), (0.25, '#173f7d'), (0.5, '#ff8a3d'),
+                                              (0.75, '#ffd23f'), (1.0, '#fffbe6')])
     prefs = _nm_wifi_load('csi_prefs.json', {}, state_dir)
     if not isinstance(prefs, dict):
         prefs = {}
     S = {'an': _NMCsiAnalyzer(), 'src': None, 'sim': None, 'ports': [], 'cal_after': None, 'dead': False,
-         'last_draw': 0.0}
+         'last_draw': 0.0, 'hist': None, 'sess': None, 'hist_t': None, 'play': 0.0, 'ov_ax': None, 'ov_last': 0.0,
+         'ov_drag': False, 'last_prune': 0.0, 'rv_key': None, 'rv': None, 'kind': None}
+    try:
+        S['hist'] = _NMCsiHistory(_nm_wifi_dir(state_dir) / 'csi_history.db')
+        S['hist'].prune(clock())
+    except Exception:
+        _exc('csi history open')
+        S['hist'] = None
     SCEN = {'Empty room': 'empty', 'Someone walking about': 'walking',
             'Someone sitting still (15 breaths/min)': 'still'}
 
@@ -8706,14 +9417,51 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
     fig = _mf.Figure(figsize=(11, 4.6), facecolor=D['bg'])
     cv = FigureCanvasTkAgg(fig, master=parent)
     cv.get_tk_widget().pack(fill='both', expand=True, padx=8, pady=(2, 2))
+    # ── history: timeline of everything recorded, plus transport controls ──
+    fig2 = _mf.Figure(figsize=(11, 1.15), facecolor=D['bg'])
+    cv2 = FigureCanvasTkAgg(fig2, master=parent)
+    cv2.get_tk_widget().pack(fill='x', padx=8, pady=(0, 0))
+    ctl_row = tk.Frame(parent, bg=D['bg'])
+    ctl_row.pack(fill='x', padx=10, pady=(0, 2))
+    live_btn = _ttk.Button(ctl_row, text='● Back to live', width=14)
+    ev_prev_btn = _ttk.Button(ctl_row, text='⏮ Earlier movement', width=19)
+    m1_btn = _ttk.Button(ctl_row, text='−1 min', width=7)
+    s10_btn = _ttk.Button(ctl_row, text='−10 s', width=6)
+    p10_btn = _ttk.Button(ctl_row, text='+10 s', width=6)
+    p1_btn = _ttk.Button(ctl_row, text='+1 min', width=7)
+    ev_next_btn = _ttk.Button(ctl_row, text='Later movement ⏭', width=18)
+    play_btn = _ttk.Button(ctl_row, text='▶ Play', width=8)
+    speed_var = tk.StringVar(value='1×')
+    speed_cb = _ttk.Combobox(ctl_row, textvariable=speed_var, width=4, state='readonly', values=('1×', '4×', '16×'))
+    for w_ in (live_btn, ev_prev_btn, m1_btn, s10_btn, p10_btn, p1_btn, ev_next_btn, play_btn, speed_cb):
+        w_.pack(side='left', padx=2)
+    RANGES = {'Last 10 minutes': 600.0, 'Last hour': 3600.0, 'Last 6 hours': 21600.0, 'Last 24 hours': 86400.0,
+              'Everything recorded': None}
+    range_var = tk.StringVar(value=prefs.get('range', 'Last hour') if prefs.get('range') in RANGES else 'Last hour')
+    range_cb = _ttk.Combobox(ctl_row, textvariable=range_var, width=19, state='readonly', values=list(RANGES))
+    range_cb.pack(side='right', padx=2)
+    tk.Label(ctl_row, text='timeline', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8)).pack(side='right')
+    clr_hist_btn = _ttk.Button(ctl_row, text='Clear history', width=13)
+    clr_hist_btn.pack(side='right', padx=8)
+    info_row = tk.Frame(parent, bg=D['bg'])
+    info_row.pack(fill='x', padx=12, pady=(0, 2))
+    rev_var = tk.StringVar(value='')
+    rev_lbl = tk.Label(info_row, textvariable=rev_var, bg=D['bg'], fg='#2fe07a', font=(_NM_MONO, 9, 'bold'), anchor='w')
+    rev_lbl.pack(side='left')
+    hist_var = tk.StringVar(value='')
+    tk.Label(info_row, textvariable=hist_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='e').pack(side='right')
+
     tk.Label(parent, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w', justify='left', wraplength=1150,
-             text=('How to read this: each row of the waterfall is one moment, each column one Wi-Fi subcarrier; bands of '
-                   'colour that shift mean the radio path between the two boards is changing. MOTION compares the last '
-                   'second to a quiet baseline. ROOM compares the average pattern to the empty-room reference you '
-                   'calibrated, so it can notice that something is different even when nothing is moving. BREATHING is '
-                   'experimental: it only reports a rate when someone sits still near the line between the boards for '
-                   '30 s and a steady rhythm stands clear of the background. It detects movement and change, not who or '
-                   'how many. For your own home, with the people there aware of it.')
+             text=('How to read this: the coloured strip at the top is "is the signal between the two boards changing?" '
+                   'Time runs left to right (right edge = now). Dark blue = steady, orange = some change, '
+                   'yellow/white = a lot. Each row is one slice of the Wi-Fi channel, so movement that '
+                   'affects only part of the channel shows up as a patch on some rows. The line underneath is the same '
+                   'thing averaged into one number, with the moments above the threshold shaded red. ROOM compares the '
+                   'signal shape to the empty-room reference you calibrated. BREATHING is experimental: it only reports '
+                   'a rate when someone sits still near the line between the boards for 30 s and a steady rhythm stands '
+                   'clear of the background; otherwise it says so. It detects movement and change, not who or how many. '
+                   'The timeline underneath is a record of everything captured: click or drag on it to look at any earlier '
+                   'moment. For your own home, with the people there aware of it.')
              ).pack(fill='x', padx=12, pady=(0, 6))
 
     def _style_ax(a):
@@ -8724,24 +9472,29 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
         a.grid(True, color='white', alpha=0.06, linewidth=0.6)
 
     def _save_prefs():
-        _nm_wifi_save('csi_prefs.json', {'port': port_var.get(), 'baud': baud_var.get()}, state_dir)
+        _nm_wifi_save('csi_prefs.json', {'port': port_var.get(), 'baud': baud_var.get(), 'range': range_var.get()},
+                      state_dir)
+
+    WIFI_ENTRY = (f'{_NM_CSI_UDP_TOKEN}:{_NM_CSI_UDP_PORT}  —  receiver board over Wi-Fi (no cable; '
+                  f'UDP port {_NM_CSI_UDP_PORT})')
 
     def _fill_ports(ports):
         S['ports'] = ports
         vals = [f"{p}  —  {d if d != p else 'serial port'}{'  ★' if esp else ''}" for (p, d, esp) in ports]
+        real = list(vals)
+        vals.append(WIFI_ENTRY)                           # always last, so the starred USB board stays the default
         port_cb.configure(values=vals)
-        cur = port_var.get()
-        if cur and any(v.startswith(cur + ' ') for v in vals):
-            port_var.set(next(v for v in vals if v.startswith(cur + ' ')))
-        elif vals:
-            star = [v for v, pp in zip(vals, ports) if pp[2]]
-            port_var.set((star or vals)[0])
+        cur = (port_var.get().split() or [''])[0]
+        match = [v for v in vals if cur and v.split()[0] == cur]
+        if match:
+            port_var.set(match[0])
         else:
-            port_var.set('')
+            star = [v for v, pp in zip(real, ports) if pp[2]]
+            port_var.set((star or vals)[0])
         if not ports:
-            hint_var.set('No serial ports found. Plug the receiver ESP32 in with a data-capable USB cable '
-                         '(some cables are charge-only), then press Refresh.')
-        elif hint_var.get().startswith('No serial ports'):
+            hint_var.set('No USB serial ports found. For a USB board plug it in with a data-capable cable (some are '
+                         'charge-only) and press Refresh; for a board on your Wi-Fi pick the "wifi" entry.')
+        elif hint_var.get().startswith('No USB serial ports'):
             hint_var.set('')
 
     def _refresh_ports():
@@ -8767,6 +9520,12 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
     def _stop():
         if S['src'] is not None:
             S['src'].stop()
+        if S['hist'] is not None and S['sess'] is not None:
+            try:
+                S['hist'].end_session(S['sess'], clock())
+            except Exception:
+                _exc_debug('csi end session')
+        S['sess'] = None
         S['src'] = None
         S['sim'] = None
         conn_btn.configure(text='Connect')
@@ -8786,18 +9545,31 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
         else:
             port = _port_name()
             if not port:
-                hint_var.set('Pick a serial port first (press Refresh if the list is empty).')
+                hint_var.set('Pick a serial port (or the Wi-Fi entry) first; press Refresh if the list is empty.')
                 return
             try:
                 baud = int(baud_var.get())
             except ValueError:
                 baud = _NM_CSI_BAUD
             _save_prefs()
-            S['src'] = _NMCsiSource(S['an'], port=port, baud=baud, clock=clock)
+            if port.startswith(_NM_CSI_UDP_TOKEN + ':'):
+                try:
+                    up = int(port.split(':', 1)[1])
+                except ValueError:
+                    up = _NM_CSI_UDP_PORT
+                S['src'] = _NMCsiSource(S['an'], udp_port=up, clock=clock)
+            else:
+                S['src'] = _NMCsiSource(S['an'], port=port, baud=baud, clock=clock)
             conn_btn.configure(text='Disconnect')
             badge.configure(text='LIVE', bg='#12482b', fg='#c8ffe0')
         hint_var.set('')
         S['src'].start()
+        if S['hist'] is not None:
+            try:
+                S['sess'] = S['hist'].start_session(clock(), 'sim' if sim is not None else 'live',
+                                                    'demo' if sim is not None else _port_name())
+            except Exception:
+                _exc_debug('csi start session')
 
     def _toggle_conn():
         if S['src'] is not None and S['sim'] is None:
@@ -8863,7 +9635,7 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
         src = S['src']
         with (src.lock if src is not None else _nullctx()):
             snap = an.snapshot(now)
-            wf = an.waterfall(now, 30.0, 120)
+            act = an.activity(now, 60.0, 240, 8)
             turb = [(t - now, v) for (t, v) in list(an.turb) if now - t <= 60]
             dev = [(t - now, v) for (t, v) in list(an.dev) if now - t <= 60]
             prof = None
@@ -8896,6 +9668,11 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
                       (f"   RSSI {snap['rssi']} dBm" if snap['rssi'] is not None else '') +
                       (f"   {snap['n_sc']} subcarriers" if snap['n_sc'] else '') +
                       (f"   · {src.bad} damaged lines skipped" if src is not None and src.bad else ''))
+        rv = _review_fetch() if S['hist_t'] is not None else None
+        if rv is not None:
+            _review_chips(rv)
+        else:
+            _update_rev(None)
         ca = S['cal_after']
         if ca is not None:
             if now < ca:
@@ -8921,35 +9698,82 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
         if not force and (now - S['last_draw']) < 0.45:
             return
         S['last_draw'] = now
+        no_data_msg = None
+        if rv is not None:
+            if rv['empty']:
+                act = np.full((8, 240), np.nan); turb = []; prof = None; empty = None
+                b = {'bpm': None, 'freqs': None, 'power': None, 'why': 'nothing was recorded here'}
+                no_data_msg = 'nothing was recorded around this time'
+                snap = dict(snap, thr=None, mu=None)
+            else:
+                act, turb, prof, empty, valid, b = rv['act'], rv['turb'], rv['prof'], rv['ref'], rv['valid'], rv['b']
+                snap = rv['snap']
         fig.clear()
-        gs = fig.add_gridspec(3, 2, width_ratios=[1.45, 1], height_ratios=[1, 1, 1], hspace=0.78, wspace=0.18,
-                              left=0.06, right=0.985, top=0.94, bottom=0.09)
-        aw = fig.add_subplot(gs[:, 0]); am = fig.add_subplot(gs[0, 1]); ap = fig.add_subplot(gs[1, 1])
-        ab = fig.add_subplot(gs[2, 1])
+        gs = fig.add_gridspec(3, 2, height_ratios=[1.1, 1.0, 1.35], hspace=0.95, wspace=0.14,
+                              left=0.05, right=0.985, top=0.90, bottom=0.095)
+        aw = fig.add_subplot(gs[0, :]); am = fig.add_subplot(gs[1, :], sharex=aw)
+        ap = fig.add_subplot(gs[2, 0]); ab = fig.add_subplot(gs[2, 1])
         for a in (aw, am, ap, ab):
             _style_ax(a)
-        aw.set_title('Subcarrier waterfall — last 30 s (z-score per subcarrier)', loc='left', color=D['text'],
-                     fontsize=9, fontweight='bold')
-        if np.isfinite(wf).any():
-            aw.imshow(np.ma.masked_invalid(wf), aspect='auto', cmap=cmap, vmin=-3, vmax=3, origin='lower',
-                      extent=[0, wf.shape[1], -30, 0], interpolation='nearest')
+        thr = snap['thr']
+        learning = thr is None
+        # ① heat strip: is the signal changing, and where in the channel -- on the same clock as the line below
+        aw.set_title('Is the signal changing?  Brighter = more change' +
+                     ('   (still learning what normal looks like)' if learning and np.isfinite(act).any() else ''),
+                     loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        if np.isfinite(act).any():
+            # each slice is judged against its own quiet level, so a naturally noisier part of the channel
+            # does not glow all the time; orange = clearly more change than that slice's quiet level
+            floor = np.nanpercentile(act, 20, axis=1)
+            rel = act - floor[:, None]
+            if not learning and snap['mu'] is not None:
+                span = 2.5 * max(float(thr - snap['mu']), 1e-4)       # one slice is noisier than the average of all
+            else:
+                span = max(float(np.nanpercentile(rel, 90)), 1e-4)
+            aw.imshow(np.ma.masked_invalid(rel / span), aspect='auto', cmap=act_cmap, vmin=0.0, vmax=2.0,
+                      origin='lower', extent=[-60, 0, 0, act.shape[0]], interpolation='nearest')
+            ins = aw.inset_axes([0.745, 1.10, 0.25, 0.13])
+            ins.imshow(np.linspace(0, 2, 64)[None, :], aspect='auto', cmap=act_cmap, vmin=0.0, vmax=2.0,
+                       extent=[0, 2, 0, 1])
+            ins.set_yticks([]); ins.set_xticks([0.0, 1.0, 2.0])
+            ins.set_xticklabels(['steady', 'some change', 'strong'], fontsize=6)
+            ins.tick_params(colors=D['text2'], length=0, pad=1)
+            for sp in ins.spines.values():
+                sp.set_visible(False)
+            ins.xaxis.set_ticks_position('top')
+            ins.grid(False)
         else:
-            aw.text(0.5, 0.5, 'waiting for CSI…' if src is not None else 'connect the receiver board, or try the demo',
+            aw.text(0.5, 0.5, no_data_msg or ('waiting for CSI…' if src is not None
+                                              else 'connect the receiver board, or try the demo'),
                     transform=aw.transAxes, ha='center', va='center', color=D['text2'], fontsize=9)
-        aw.set_xlabel('subcarrier', color=D['text2'], fontsize=7); aw.set_ylabel('seconds ago', color=D['text2'], fontsize=7)
+        aw.set_xlim(-60, 0)
+        aw.set_ylim(0, 8)
+        aw.set_yticks([])
+        aw.set_ylabel('slices of the\nWi-Fi channel', color=D['text2'], fontsize=7)
+        aw.tick_params(labelbottom=False)
         aw.grid(False)
-        am.set_title('Motion (turbulence of the last second)', loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        # ② the same thing as one line, with a threshold and the moments that crossed it shaded
+        am.set_title('Movement level: the same thing as one line', loc='left', color=D['text'], fontsize=9,
+                     fontweight='bold')
         if turb:
-            xs = [x for x, _ in turb]; ys = [y for _, y in turb]
+            xs = np.asarray([x for x, _ in turb]); ys = np.asarray([y for _, y in turb])
             am.plot(xs, ys, color='#38b8f0', linewidth=1.2)
             am.fill_between(xs, ys, color='#38b8f0', alpha=0.15)
-            if snap['thr'] is not None:
-                am.axhline(snap['thr'], color='#ff5c4d', linestyle='--', linewidth=0.9)
-                am.text(xs[0], snap['thr'], ' motion threshold', color='#ff5c4d', fontsize=7, va='bottom')
+            if thr is not None:
+                tarr = (rv['thr_arr'] if rv is not None and not rv['empty'] else np.full(len(xs), float(thr)))
+                tarr = np.where(np.isfinite(tarr), tarr, float(thr))
+                am.plot(xs, tarr, color='#ff8a3d', linestyle='--', linewidth=0.9)
+                am.fill_between(xs, ys, tarr, where=ys >= tarr, color='#ff5c4d', alpha=0.45, interpolate=True)
+                am.text(-59.5, thr, ' someone / something moving above this line', color='#ff8a3d', fontsize=7,
+                        va='bottom')
             if snap['mu'] is not None:
                 am.axhline(snap['mu'], color='#2fe07a', linestyle=':', linewidth=0.8)
         am.set_xlim(-60, 0)
-        ap.set_title('Subcarrier pattern now vs empty room', loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        am.set_yticks([])
+        am.set_ylabel('level', color=D['text2'], fontsize=7)
+        am.set_xlabel('seconds ago  (now = right edge)', color=D['text2'], fontsize=7)
+        # ③ signal shape
+        ap.set_title('Signal shape: now vs empty room', loc='left', color=D['text'], fontsize=9, fontweight='bold')
         if prof is not None:
             ks = np.arange(len(prof))
             pm = np.where(valid, prof, np.nan)
@@ -8958,26 +9782,326 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
                 ap.plot(ks, np.where(valid, empty['mean'], np.nan), color='#2fe07a', linewidth=1.0, linestyle='--',
                         label='empty room')
                 ap.legend(fontsize=7, facecolor=D['panel'], edgecolor='#26365f', labelcolor=D['text2'], loc='upper right')
-        ab.set_title('Breathing spectrum (breaths per minute)', loc='left', color=D['text'], fontsize=9, fontweight='bold')
-        if b['freqs'] is not None:
+            else:
+                ap.text(0.5, 0.06, 'calibrate the empty room to compare', transform=ap.transAxes, ha='center',
+                        color=D['text2'], fontsize=7)
+        ap.set_yticks([])
+        ap.set_xlabel('position across the Wi-Fi channel', color=D['text2'], fontsize=7)
+        # ④ breathing: grey and plainly labelled unless a rate was actually found
+        ab.set_title('Breathing (only if someone sits still nearby)', loc='left', color=D['text'], fontsize=9,
+                     fontweight='bold')
+        ab.set_yticks([])
+        ab.set_xlabel('breaths per minute', color=D['text2'], fontsize=7)
+        if b['freqs'] is not None and b['bpm']:
             ab.plot(b['freqs'] * 60.0, b['power'], color='#bf5af2', linewidth=1.2)
             ab.fill_between(b['freqs'] * 60.0, b['power'], color='#bf5af2', alpha=0.18)
-            if b['bpm']:
-                ab.axvline(b['bpm'], color='#2fe07a', linewidth=1.4)
+            ab.axvline(b['bpm'], color='#2fe07a', linewidth=1.4)
             ab.set_xlim(9, 30)
+            ab.text(0.97, 0.88, f"about {b['bpm']:.0f} per minute", transform=ab.transAxes, ha='right',
+                    color='#2fe07a', fontsize=8, fontweight='bold')
+        elif b['freqs'] is not None:
+            ab.plot(b['freqs'] * 60.0, b['power'], color='#3a4a78', linewidth=1.0)
+            ab.set_xlim(9, 30)
+            ab.text(0.5, 0.56, 'no breathing detected', transform=ab.transAxes, ha='center', va='center',
+                    color=D['text'], fontsize=9, fontweight='bold',
+                    bbox=dict(boxstyle='round,pad=0.35', fc=D['panel'], ec='none', alpha=0.85))
+            ab.text(0.5, 0.30, '(grey line = background wobble, not a breath)', transform=ab.transAxes,
+                    ha='center', va='center', color=D['text2'], fontsize=6.5)
         else:
+            ab.set_xlim(9, 30)
             ab.text(0.5, 0.5, b['why'], transform=ab.transAxes, ha='center', va='center', color=D['text2'],
                     fontsize=8, wrap=True)
-        if b['freqs'] is not None and not b['bpm'] and b['why']:
-            ab.text(0.98, 0.9, 'no steady rhythm', transform=ab.transAxes, ha='right', color=D['warn'], fontsize=7)
+        if rv is not None:
+            fig.text(0.735, 0.975, 'RECORDED · ' + datetime.fromtimestamp(S['hist_t']).strftime('%a %d %b %H:%M:%S') +
+                     ('  · SIMULATED DATA' if rv.get('kind') == 'sim' else ''), ha='right', va='top',
+                     color=('#ffa43a' if rv.get('kind') == 'sim' else '#38b8f0'), fontsize=9, fontweight='bold')
         cv.draw_idle()
+
+    # ── history: record, review, scrub ────────────────────────────────────
+    def _record():
+        h, src = S['hist'], S['src']
+        if h is None or src is None:
+            return
+        an = S['an']
+        now = clock()
+        if now - S.get('last_rec', -1e18) < 0.95:
+            return
+        with src.lock:
+            if not an.t or now - an.t[-1] > 1.5:        # nothing arriving: leave a gap rather than fill one
+                return
+            snap = an.snapshot(now)
+            bands = an.activity_now(now, 8)
+            prof = None
+            if an.n_sc and len(an.X) > 10 and an.valid is not None:
+                prof = np.where(an.valid, np.asarray(list(an.X)[-50:]).mean(axis=0), np.nan)
+            ref = None
+            if an.empty is not None and an.valid is not None:
+                ref = np.where(an.valid, an.empty['mean'], np.nan)
+        if S['sess'] is None:
+            S['sess'] = h.start_session(now, 'sim' if S['sim'] is not None else 'live', 'unlabelled')
+        S['last_rec'] = now
+        h.add(now, S['sess'], snap, bands, prof, ref)
+
+    def _review_fetch():
+        h, T = S['hist'], S['hist_t']
+        if h is None or T is None:
+            return None
+        key = (round(T, 2), h.version)
+        if S['rv_key'] == key and S['rv'] is not None:
+            return S['rv']
+        w = h.window(T - 60.0, T)
+        n = len(w['t'])
+        rv = {'empty': True, 'kind': None, 'gap': True}
+        if n:
+            nan = float('nan')
+            grid = np.linspace(T - 60.0, T, 240)
+            idx = np.searchsorted(w['t'], grid, side='right') - 1
+            ok = (idx >= 0) & ((grid - w['t'][np.clip(idx, 0, n - 1)]) <= 1.2)
+            act = np.full((8, 240), np.nan)
+            act[:, ok] = w['bands'][idx[ok]].T
+            last = n - 1
+            fl = int(w['flags'][last])
+            fin = lambda v: None if v != v else float(v)
+            cur, ref = h.shape_at(T)
+            m = np.isfinite(w['turb'])
+            bpm = fin(w['bpm'][last])
+            rv = {'empty': False, 'gap': (T - w['t'][last]) > 2.0, 'kind': w['kind'][last], 'act': act,
+                  'turb': [(float(x), float(y)) for x, y in zip(w['t'][m] - T, w['turb'][m])],
+                  'thr_arr': w['thr'][m], 'prof': cur,
+                  'ref': ({'mean': ref} if ref is not None else None),
+                  'valid': (np.isfinite(cur) if cur is not None else None),
+                  'b': {'bpm': bpm, 'freqs': None, 'power': None,
+                        'why': (f'recorded: about {bpm:.0f} breaths a minute' if bpm
+                                else 'no breathing detected at this moment')},
+                  'snap': {'ready': bool(fl & 2), 'moving': bool(fl & 1), 'score': float(w['score'][last]),
+                           'frames': n, 'rate': fin(w['rate'][last]), 'rssi': fin(w['rssi'][last]),
+                           'n_sc': (len(cur) if cur is not None else None),
+                           'room': 'differs' if fl & 16 else ('match' if fl & 8 else None),
+                           'dev': fin(w['dev'][last]), 'thr': fin(w['thr'][last]), 'mu': fin(w['mu'][last]),
+                           'calibrated': bool(fl & 4), 'breath': {'bpm': bpm}}}
+            if rv['prof'] is not None and rv['valid'] is None:
+                rv['valid'] = np.isfinite(rv['prof'])
+        S['rv_key'], S['rv'] = key, rv
+        return rv
+
+    def _update_rev(rv):
+        T = S['hist_t']
+        if T is None:
+            if S['src'] is not None:
+                rev_var.set('● LIVE  ·  recording to history' + ('  (simulated demo)' if S['sim'] is not None else ''))
+                rev_lbl.configure(fg='#ffa43a' if S['sim'] is not None else '#2fe07a')
+            else:
+                rev_var.set('Not connected  ·  drag on the timeline above to look at anything recorded earlier')
+                rev_lbl.configure(fg=D['text2'])
+            return
+        sim_ = rv is not None and rv.get('kind') == 'sim'
+        txt = '◷ REVIEWING  ' + datetime.fromtimestamp(T).strftime('%a %d %b %Y  %H:%M:%S')
+        txt += '  ·  SIMULATED demo data' if sim_ else '  ·  recorded data'
+        if S['src'] is not None:
+            txt += '  ·  live capture continues in the background'
+        rev_var.set(txt)
+        rev_lbl.configure(fg='#ffa43a' if sim_ else '#38b8f0')
+
+    def _review_chips(rv):
+        _update_rev(rv)
+        if rv['empty'] or rv['gap']:
+            chip_m.configure(text='NOTHING RECORDED HERE', bg='#1c2b52', fg=D['text2'])
+            chip_r.configure(text='ROOM: —', bg='#1c2b52', fg=D['text2'])
+            breath_var.set('breathing: —')
+            stats_var.set('')
+            return
+        sn = rv['snap']
+        if not sn['ready']:
+            chip_m.configure(text='PAST · LEARNING BASELINE…', bg='#1c2b52', fg=D['text2'])
+        elif sn['moving']:
+            chip_m.configure(text=f"PAST · MOTION  {sn['score']:.0f}", bg='#7a1d12', fg='#ffd5cf')
+        else:
+            chip_m.configure(text=f"PAST · STILL  {sn['score']:.0f}", bg='#12482b', fg='#c8ffe0')
+        if sn['room'] == 'differs':
+            chip_r.configure(text='ROOM: DIFFERENT FROM EMPTY', bg='#6b3d00', fg='#ffe0b0')
+        elif sn['room'] == 'match':
+            chip_r.configure(text='ROOM: matched empty reference', bg='#12482b', fg='#c8ffe0')
+        else:
+            chip_r.configure(text='ROOM: no reference then', bg='#1c2b52', fg=D['text2'])
+        bpm = sn['breath']['bpm']
+        breath_var.set(f'breathing: {bpm:.0f} per min' if bpm else 'breathing: —')
+        stats_var.set((f"{sn['rate']:.0f} packets/s" if sn['rate'] is not None else '') +
+                      (f"   RSSI {sn['rssi']:.0f} dBm" if sn['rssi'] is not None else ''))
+
+    def _draw_overview(force=False):
+        import matplotlib.dates as mdates
+        h = S['hist']
+        now = clock()
+        if not force and now - S['ov_last'] < 1.0:
+            return
+        S['ov_last'] = now
+        fig2.clear()
+        ax = fig2.add_axes([0.05, 0.27, 0.935, 0.50])
+        _style_ax(ax)
+        S['ov_ax'] = ax
+        ax.set_title('Recorded movement — click or drag to jump to a moment   (blue = real, orange = simulated demo)',
+                     loc='left', color=D['text'], fontsize=8, fontweight='bold')
+        lo, hi = h.bounds() if h is not None else (None, None)
+        if lo is None:
+            ax.text(0.5, 0.5, 'nothing recorded yet — it is saved automatically while a board (or the demo) is connected',
+                    transform=ax.transAxes, ha='center', va='center', color=D['text2'], fontsize=8)
+            ax.set_xticks([]); ax.set_yticks([])
+            hist_var.set('History: empty' if h is not None else 'History unavailable (database could not be opened)')
+            cv2.draw_idle()
+            return
+        T = S['hist_t']
+        t1 = max(hi, T or hi)
+        span = RANGES.get(range_var.get())
+        t0 = lo if span is None else max(lo, t1 - span)
+        if t1 - t0 < 60.0:
+            t0 = t1 - 60.0
+        xs, real, sim = h.overview(t0, t1, int(min(400, max(10, (t1 - t0) / 1.0))))   # buckets >= 1 s (rows are 0.5 s apart)
+        dn = lambda ts: mdates.date2num([datetime.fromtimestamp(float(x)) for x in np.atleast_1d(ts)])
+        X = dn(xs)
+        ax.fill_between(X, 0, real, step='mid', color='#38b8f0', alpha=0.9, linewidth=0)
+        ax.fill_between(X, 0, sim, step='mid', color='#ffa43a', alpha=0.9, linewidth=0)
+        ax.axhline(50, color='#ff8a3d', linestyle='--', linewidth=0.7)
+        ax.set_ylim(0, 105)
+        ax.set_yticks([0, 50, 100])
+        ax.set_yticklabels(['still', 'moving', ''], fontsize=6)
+        xl = dn([t0, t1])
+        ax.set_xlim(xl[0], xl[1])
+        loc = mdates.AutoDateLocator(minticks=3, maxticks=8)
+        ax.xaxis.set_major_locator(loc)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+        ax.tick_params(labelsize=7)
+        if T is not None:
+            c = dn([T])[0]
+            ax.axvspan(dn([T - 60.0])[0], c, color='white', alpha=0.18, linewidth=0)
+            ax.axvline(c, color='white', linewidth=1.6)
+        else:
+            ax.text(0.995, 0.88, 'live ▸', transform=ax.transAxes, ha='right', color='#2fe07a', fontsize=7)
+        kb = h.size_bytes() / 1048576.0
+        hist_var.set(f"History: {datetime.fromtimestamp(lo).strftime('%d %b %H:%M')} → "
+                     f"{datetime.fromtimestamp(hi).strftime('%d %b %H:%M')}   ({_fmt_dur(hi - lo)} recorded, "
+                     f"{kb:.1f} MB, the last {h.keep_s / 86400:.0f} days are kept)")
+        cv2.draw_idle()
+
+    def _fmt_dur(sec):
+        sec = int(max(0, sec))
+        if sec < 90:
+            return f'{sec} s'
+        if sec < 5400:
+            return f'{sec // 60} min'
+        if sec < 172800:
+            return f'{sec / 3600:.1f} h'
+        return f'{sec / 86400:.1f} days'
+
+    def _set_play(on):
+        S['play'] = float(speed_var.get().rstrip('×') or 1) if on else 0.0
+        play_btn.configure(text='⏸ Pause' if on else '▶ Play')
+
+    def _goto(T, keep_play=False):
+        h = S['hist']
+        lo, hi = h.bounds() if h is not None else (None, None)
+        if lo is None:
+            rev_var.set('Nothing has been recorded yet.')
+            return False
+        S['hist_t'] = max(lo, min(hi, float(T)))
+        if not keep_play:
+            _set_play(False)
+        _draw(force=True)
+        _draw_overview(True)
+        return True
+
+    def _go_live():
+        S['hist_t'] = None
+        _set_play(False)
+        _draw(force=True)
+        _draw_overview(True)
+
+    def _step(dt):
+        h = S['hist']
+        lo, hi = h.bounds() if h is not None else (None, None)
+        if lo is None:
+            return
+        _goto((S['hist_t'] if S['hist_t'] is not None else hi) + dt)
+
+    def _event_jump(direction):
+        h = S['hist']
+        lo, hi = h.bounds() if h is not None else (None, None)
+        if lo is None:
+            rev_var.set('Nothing has been recorded yet.')
+            return
+        anchor = (S['hist_t'] if S['hist_t'] is not None else hi) - 10.0
+        e = h.next_event(anchor + (0.5 if direction > 0 else -0.5), direction)
+        if e is None:
+            rev_var.set('No ' + ('later' if direction > 0 else 'earlier') + ' movement was recorded.')
+            return
+        _goto(e + 10.0)                  # land ten seconds in, so the calm lead-up is still on screen
+
+    def _toggle_play():
+        if S['play']:
+            _set_play(False)
+            return
+        h = S['hist']
+        lo, hi = h.bounds() if h is not None else (None, None)
+        if lo is None:
+            rev_var.set('Nothing has been recorded yet.')
+            return
+        if S['hist_t'] is None or S['hist_t'] >= hi - 1.0:
+            _goto(max(lo, hi - 120.0), keep_play=True)
+        _set_play(True)
+
+    def _ov_mouse(ev, kind):
+        ax = S['ov_ax']
+        if kind == 'press':
+            S['ov_drag'] = ev.inaxes is ax and ev.button == 1
+        elif kind == 'release':
+            S['ov_drag'] = False
+            return
+        elif not S['ov_drag']:
+            return
+        if ev.inaxes is not ax or ev.xdata is None or S['hist'] is None:
+            return
+        import matplotlib.dates as mdates
+        mt = time.monotonic()
+        if kind == 'move' and mt - S.get('ov_mt', 0.0) < 0.12:
+            return
+        S['ov_mt'] = mt
+        _goto(mdates.num2date(ev.xdata).replace(tzinfo=None).timestamp())
+
+    def _clear_hist():
+        h = S['hist']
+        if h is None:
+            return
+        if clr_hist_btn.cget('text') != 'Really clear?':
+            clr_hist_btn.configure(text='Really clear?')
+            win.after(4000, lambda: clr_hist_btn.configure(text='Clear history') if not S['dead'] else None)
+            return
+        clr_hist_btn.configure(text='Clear history')
+        h.clear()
+        S['rv_key'] = None
+        _go_live()
 
     def _tick():
         if S['dead']:
             return
         try:
+            try:
+                _record()
+                if clock() - S['last_prune'] > 3600.0 and S['hist'] is not None:
+                    S['last_prune'] = clock()
+                    S['hist'].prune(clock())
+            except Exception:
+                _exc('csi record')
+            if S['play'] and S['hist_t'] is not None and S['hist'] is not None:
+                lo, hi = S['hist'].bounds()
+                nt = S['hist_t'] + 0.5 * S['play']
+                if hi is None or nt >= hi:
+                    S['hist_t'] = None if S['src'] is not None else hi
+                    _set_play(False)
+                else:
+                    S['hist_t'] = nt
             if parent.winfo_ismapped() or S['src'] is not None:
                 _draw()
+                if parent.winfo_ismapped():
+                    _draw_overview(force=False if S['hist_t'] is None else bool(S['play']))
         except Exception:
             _exc('csi tick')
         S['job'] = win.after(500, _tick)
@@ -8985,6 +10109,8 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
     def _on_close():
         S['dead'] = True
         _stop()
+        if S['hist'] is not None:
+            S['hist'].close()
 
     conn_btn.configure(command=_toggle_conn)
     ref_btn.configure(command=_refresh_ports)
@@ -8994,13 +10120,32 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
     clr_btn.configure(command=_clear_cal)
     copy_btn.configure(command=_copy_raw)
     log_btn.configure(command=_copy_log)
+    live_btn.configure(command=_go_live)
+    ev_prev_btn.configure(command=lambda: _event_jump(-1))
+    ev_next_btn.configure(command=lambda: _event_jump(1))
+    m1_btn.configure(command=lambda: _step(-60.0))
+    s10_btn.configure(command=lambda: _step(-10.0))
+    p10_btn.configure(command=lambda: _step(10.0))
+    p1_btn.configure(command=lambda: _step(60.0))
+    play_btn.configure(command=_toggle_play)
+    clr_hist_btn.configure(command=_clear_hist)
+    speed_cb.bind('<<ComboboxSelected>>', lambda _e=None: _set_play(True) if S['play'] else None)
+    range_cb.bind('<<ComboboxSelected>>', lambda _e=None: (_save_prefs(), _draw_overview(True)))
+    cv2.mpl_connect('button_press_event', lambda ev: _ov_mouse(ev, 'press'))
+    cv2.mpl_connect('motion_notify_event', lambda ev: _ov_mouse(ev, 'move'))
+    cv2.mpl_connect('button_release_event', lambda ev: _ov_mouse(ev, 'release'))
     _refresh_ports()
+    _update_rev(None)
+    _draw_overview(True)
     S['job'] = win.after(500, _tick)
     ctl = {'S': S, 'close': _on_close, 'draw': _draw, 'begin': _begin, 'stop': _stop, 'calibrate': _calibrate,
            'toggle_demo': _toggle_demo, 'scen_var': scen_var, 'port_var': port_var, 'copy_raw': _copy_raw,
            'chip_m': chip_m, 'chip_r': chip_r, 'breath_var': breath_var, 'hint_var': hint_var, 'cal_var': cal_var,
-           'badge': badge, 'fig': fig, 'fill_ports': _fill_ports, 'clear_cal': _clear_cal, 'stats_var': stats_var,
-           'toggle_conn': _toggle_conn}
+           'badge': badge, 'fig': fig, 'fill_ports': _fill_ports, 'port_cb': port_cb, 'clear_cal': _clear_cal, 'stats_var': stats_var,
+           'toggle_conn': _toggle_conn, 'hist': lambda: S['hist'], 'record': _record, 'goto': _goto,
+           'go_live': _go_live, 'step': _step, 'event_jump': _event_jump, 'toggle_play': _toggle_play,
+           'overview': _draw_overview, 'rev_var': rev_var, 'hist_var': hist_var, 'fig2': fig2,
+           'range_var': range_var, 'ov_mouse': _ov_mouse, 'clear_hist': _clear_hist}
     return ctl
 
 
@@ -25348,6 +26493,15 @@ class UserGuideWindow:
             ('h2', 'Signal map tab'),
             ('bullet', 'Walk-around survey: "Floor plan image…" loads a picture of your floor, click on it where you are '
                        'standing, press "Sample here". It builds a smoothed map; "Place router" then a click marks the router.'),
+            ('bullet', 'Floors: the buttons along the top of the Signal map switch between Downstairs, Upstairs and any '
+                       'floors you add ("＋ Floor above" for an attic, "＋ Floor below" for a basement); "Rename" changes '
+                       'a name and "Delete floor" removes one (it asks first if it holds samples). Each floor keeps its '
+                       'own samples, floor plan picture, router position and plan size, and "Sample here" says which floor '
+                       'it will record on. The 3D survey stacks the floors and labels them with your names.'),
+            ('bullet', 'Floor plan display: the picture is never stretched. Set the width (m) to the real width of the area '
+                       'it shows and the height follows the picture. "Plan view" chooses how it is drawn: signal tinting '
+                       'white paper with the plan\'s lines on top (default), vivid signal on dark with the plan lines on '
+                       'top, or signal only; the slider sets how strong the tint is.'),
             ('bullet', '"Mark dead spots": areas below −75 dBm, where real samples support the estimate, are outlined, '
                        'and a star suggests where an extra node or extender would help.'),
             ('bullet', 'Layers: your connection, each access point, or 2.4 vs 5 GHz of your network side by side; '
@@ -25365,8 +26519,24 @@ class UserGuideWindow:
                    'as text, which this tab reads directly — no extra software to install.'),
             ('bullet', 'Receiver board — pick the COM port (USB-serial bridges are starred) and press Connect. '
                        'Default 921600 baud. Close any other program using that port first.'),
-            ('bullet', 'Waterfall — one row per moment, one column per subcarrier; shifting colour bands mean the '
-                       'path between the boards is changing.'),
+            ('bullet', 'Receiver over Wi-Fi — if the receiver cannot be next to this PC, put your Wi-Fi name and '
+                       'password in its csi_config.h, re-flash it, plug it into any phone charger where you want it, '
+                       'and choose the "wifi" entry at the end of the list. The board announces itself on your '
+                       'network and streams to this app (UDP port 4210). Needs: the PC and the board on the same '
+                       'network, Windows Firewall allowing this app on private networks, and csi_send set to the '
+                       'same Wi-Fi channel the board joined (the board warns if they differ).'),
+            ('bullet', 'Is the signal changing? — the coloured strip at the top. Time runs left to right (right edge '
+                       '= now); dark blue is steady, orange is some change, yellow/white is a lot. Each row is one '
+                       'slice of the Wi-Fi channel. The line underneath is the same thing as a single number, with '
+                       'the moments above the motion threshold shaded red, so the two always line up.'),
+            ('bullet', 'History — while a board (or the demo) is connected, a summary is saved every second to '
+                       'csi_history.db in %LOCALAPPDATA%\\NetworkMonitor, about 18 MB a day, and the last 7 days are '
+                       'kept. The timeline under the charts shows it all (blue = real, orange = simulated demo, never '
+                       'mixed up). Click or drag on it to jump to any moment: the charts above then show the minute '
+                       'ending there, marked RECORDED. Use the ±10 s / ±1 min buttons to step, "Earlier / Later '
+                       'movement" to jump between times something moved, Play to watch it back at 1×, 4× or 16×, and '
+                       '"Back to live" to return. Live capture keeps recording while you review. Raw packets are not '
+                       'kept, only the summaries the charts need. Clear history deletes it all (asks twice).'),
             ('bullet', 'MOTION — the last second compared to a quiet baseline (learned automatically, or the '
                        'empty-room reference). ROOM — the average pattern compared to your empty-room reference; it '
                        'can notice that something is different even when nothing is moving.'),
@@ -25374,7 +26544,7 @@ class UserGuideWindow:
                        '20 s. Redo it after you move furniture or the boards.'),
             ('bullet', 'Breathing — experimental. A rate appears only when someone sits still near the line between '
                        'the boards for about 30 s and a steady rhythm stands well clear of the background; otherwise '
-                       'it says why not. Heavy room drift, fans or pets can still fool it, so treat it as a '
+                       'the box is grey and says "no breathing detected". Heavy room drift, fans or pets can still fool it, so treat it as a '
                        'curiosity, never as a health measurement.'),
             ('bullet', 'Copy raw data (last 20 s) — puts the CSI lines on the clipboard, useful for checking what '
                        'the boards really send. Copy board messages — the board\'s own boot and error text.'),
@@ -36501,6 +37671,7 @@ function _wifiBuildAir(d,scene,T,leg){
     'orb colour = strength · amber ring = path disturbed · red ring = new / suspicious<br>drag to orbit · scroll to zoom · hover an orb';
 }
 function _wifiBuildSurvey(d,scene,T,leg){
+  _wf.floors=d.floors||{};
   const S=d.survey||[];
   _wifiMsg(S.length?'':'No survey yet. In the app: WI-FI window → Signal map → click the floor plan where you stand → Sample here.');
   if(!S.length){leg.innerHTML='';return;}
@@ -36514,7 +37685,7 @@ function _wifiBuildSurvey(d,scene,T,leg){
     pl.rotation.x=-Math.PI/2;pl.position.set(0,y-0.02,0);scene.add(pl);
     const ed=new T.LineSegments(new T.EdgesGeometry(new T.PlaneGeometry(gw,gd)),new T.LineBasicMaterial({color:0x2a4170}));
     ed.rotation.x=-Math.PI/2;ed.position.set(0,y-0.01,0);scene.add(ed);
-    const ls=_wfLab('floor '+f,'#5a78b0');ls.position.set(-gw/2-0.6,y+0.2,-gd/2);scene.add(ls);
+    const ls=_wfLab((_wf.floors[f]||('floor '+f)),'#5a78b0');ls.position.set(-gw/2-0.6,y+0.2,-gd/2);scene.add(ls);
   });
   S.forEach(s=>{
     const v=(s.link!=null?s.link:-80),col=_wifiCol(v);
@@ -36544,7 +37715,7 @@ function _wifiHover(e){
   if(!hit){tip.style.display='none';return;}
   const u=hit.object.userData;let txt='';
   if(u.ap){const a=u.ap;txt=(a.ssid||'(hidden)')+'\n'+a.bssid+(a.maker?'  ·  '+a.maker:'')+'\n'+Math.round(a.dbm)+' dBm  ·  '+(a.band||'?')+' ch '+(a.channel==null?'?':a.channel)+(a.disturbed?'\npath disturbed':'')+(a.new?'\nnew since baseline':'');}
-  else if(u.sv){const s=u.sv;txt='sample at ('+s.x+', '+s.y+') m, floor '+s.z+'\nlink '+(s.link!=null?Math.round(s.link)+' dBm':'?')+(s.bands&&s.bands['5']!=null?'\n5 GHz '+Math.round(s.bands['5'])+' dBm':'')+(s.bands&&s.bands['2.4']!=null?'\n2.4 GHz '+Math.round(s.bands['2.4'])+' dBm':'');}
+  else if(u.sv){const s=u.sv;txt='sample at ('+s.x+', '+s.y+') m, '+((_wf.floors&&_wf.floors[s.z])||('floor '+s.z))+'\nlink '+(s.link!=null?Math.round(s.link)+' dBm':'?')+(s.bands&&s.bands['5']!=null?'\n5 GHz '+Math.round(s.bands['5'])+' dBm':'')+(s.bands&&s.bands['2.4']!=null?'\n2.4 GHz '+Math.round(s.bands['2.4'])+' dBm':'');}
   tip.textContent=txt;tip.style.display='block';
   tip.style.left=Math.min(r.width-230,e.clientX-r.left+14)+'px';tip.style.top=Math.max(4,e.clientY-r.top+12)+'px';
 }
@@ -39617,6 +40788,7 @@ ol.steps li{margin:6px 0}
                             'bands': s.get('bands', {})} for s in (sv.get('samples') or [])[-1500:]
                            if s.get('x') is not None and s.get('y') is not None]
             d['routers'] = (sv.get('plan') or {}).get('routers', {})
+            d['floors'] = (sv.get('plan') or {}).get('floors', {})
             d['ok'] = True
             handler._json(200, d)
         except Exception as e:
