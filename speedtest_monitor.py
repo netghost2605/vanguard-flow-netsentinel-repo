@@ -2713,7 +2713,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-e5b30c18'
+_NM_BUILD_ID = 'b-c51d7e93'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -5736,7 +5736,7 @@ def _nm_open_heatmap(monitor):
         ax.set_xticks(np.arange(-0.5, 24, 1), minor=True)
         ax.set_yticks(np.arange(-0.5, 7, 1), minor=True)
         if _smooth:
-            ax.grid(which='minor', color=(1, 1, 1, 0.07), linewidth=0.6)
+            ax.grid(which='minor', color='white', alpha=0.07, linewidth=0.6)
         else:
             ax.grid(which='minor', color=bg, linewidth=1.2)
         ax.tick_params(which='minor', length=0)
@@ -5941,6 +5941,3068 @@ def _nm_open_heatmap(monitor):
     win._nm_fig = fig
     win._nm_vars = {'smooth': smooth_var, 'vivid': vivid_var, 'dash': dash_var}   # test hook
     return win
+
+
+# ── Wi-Fi signal window (Windows netsh) ──────────────────────────────────────
+# Tier-1 "WiFi sensing": no special hardware. Windows already tells us the
+# signal strength of the network we are on (about once a second) and of every
+# access point in range (about once a minute, cached by the OS). That is enough
+# for four honest features:
+#   * Live link graph with a room-disturbance detector. A person moving between
+#     you and the router makes the signal jitter; the detector watches that jitter
+#     against a learned quiet baseline. It is coarse -- "something moved", not "who".
+#   * A network list + channel-congestion view (and a new-access-point alarm).
+#   * A walk-around signal map: stand somewhere, mark it, sample; it builds a
+#     smoothed 2D floor map and a 3D point cloud across floors.
+# It does NOT read CSI (per-subcarrier channel data) -- ordinary Wi-Fi cards do
+# not expose it. See the guide for the ESP32 route to real CSI.
+
+_NM_WIFI_DASH = {'bg': '#060a1c', 'panel': '#0d1630', 'text': '#e8f1ff',
+                 'text2': '#8fa8cc', 'accent': '#38b8f0', 'good': '#2fe07a',
+                 'warn': '#ff9a1e', 'bad': '#ff3d2e'}
+
+
+def _nm_wifi_dbm(pct):
+    """Windows reports Signal as a 0-100 % quality. The standard mapping the
+    OS itself uses is dBm = pct/2 - 100 (100 % = -50 dBm, 0 % = -100 dBm)."""
+    try:
+        return float(pct) / 2.0 - 100.0
+    except Exception:
+        return None
+
+
+def _nm_wifi_band(channel, band_txt=''):
+    t = (band_txt or '').strip().lower()
+    if t.startswith('2.4'):
+        return '2.4 GHz'
+    if t.startswith('5'):
+        return '5 GHz'
+    if t.startswith('6'):
+        return '6 GHz'
+    try:
+        return '2.4 GHz' if int(channel) <= 14 else '5 GHz'
+    except Exception:
+        return '?'
+
+
+def _nm_wifi_kv(line):
+    """'   Signal   : 91%'  ->  ('Signal', '91%').  BSSID values contain colons,
+    but keys never do, so splitting on the FIRST colon is correct."""
+    if ':' not in line:
+        return None, None
+    k, v = line.split(':', 1)
+    return k.strip(), v.strip()
+
+
+def _nm_wifi_int(v):
+    m = re.search(r'(\d+)', v or '')
+    return int(m.group(1)) if m else None
+
+
+def _nm_wifi_float(v):
+    m = re.search(r'(\d+(?:\.\d+)?)', v or '')
+    return float(m.group(1)) if m else None
+
+
+def _nm_wifi_parse_interfaces(text):
+    """Parse `netsh wlan show interfaces` -> list of adapter dicts."""
+    out, cur = [], None
+    for ln in (text or '').splitlines():
+        k, v = _nm_wifi_kv(ln)
+        if k is None:
+            continue
+        kl = k.lower()
+        if kl == 'name':
+            cur = {'name': v}
+            out.append(cur)
+            continue
+        if cur is None:
+            continue
+        if kl == 'state':
+            cur['state'] = v.lower()
+        elif kl == 'ssid':
+            cur['ssid'] = v
+        elif kl in ('bssid', 'ap bssid'):
+            cur['bssid'] = v.lower()
+        elif kl == 'signal':
+            cur['signal'] = _nm_wifi_int(v)
+        elif kl == 'channel':
+            cur['channel'] = _nm_wifi_int(v)
+        elif kl.startswith('band'):
+            cur['band_txt'] = v
+        elif kl == 'radio type':
+            cur['radio'] = v
+        elif kl.startswith('receive rate'):
+            cur['rx'] = _nm_wifi_float(v)
+        elif kl.startswith('transmit rate'):
+            cur['tx'] = _nm_wifi_float(v)
+        elif kl == 'authentication':
+            cur['auth'] = v
+        elif kl == 'profile':
+            cur['profile'] = v
+    return out
+
+
+def _nm_wifi_link_from_interfaces(ifs):
+    """The adapter that is actually connected, as a normalised dict (or None)."""
+    for d in ifs or []:
+        if d.get('signal') is None:
+            continue
+        if d.get('state', 'connected').startswith('disconn'):
+            continue
+        return {'ssid': d.get('ssid', ''), 'bssid': d.get('bssid', ''), 'pct': d['signal'],
+                'dbm': _nm_wifi_dbm(d['signal']), 'channel': d.get('channel'),
+                'band': _nm_wifi_band(d.get('channel'), d.get('band_txt', '')),
+                'radio': d.get('radio', ''), 'rx': d.get('rx'), 'tx': d.get('tx'),
+                'auth': d.get('auth', ''), 'adapter': d.get('name', '')}
+    return None
+
+
+def _nm_wifi_parse_networks(text):
+    """Parse `netsh wlan show networks mode=bssid` -> list of AP dicts, one per BSSID."""
+    aps, ssid, auth, cur = [], '', '', None
+    for ln in (text or '').splitlines():
+        k, v = _nm_wifi_kv(ln)
+        if k is None:
+            continue
+        kl = k.lower()
+        if re.fullmatch(r'ssid\s+\d+', kl):
+            ssid, auth, cur = (v or '(hidden)'), '', None
+        elif re.fullmatch(r'bssid\s+\d+', kl):
+            cur = {'ssid': ssid, 'bssid': v.lower(), 'auth': auth}
+            aps.append(cur)
+        elif cur is None:
+            if kl.startswith('authentication'):
+                auth = v
+        elif kl == 'signal':
+            cur['pct'] = _nm_wifi_int(v)
+        elif kl == 'channel':
+            cur['channel'] = _nm_wifi_int(v)
+        elif kl == 'radio type':
+            cur['radio'] = v
+        elif kl.startswith('band'):
+            cur['band_txt'] = v
+    if not aps:
+        # Localised Windows: the labels are translated but MAC addresses and
+        # 'NN%' are not. Recover what we can rather than showing nothing.
+        for ln in (text or '').splitlines():
+            m = re.search(r'\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b', ln)
+            if m:
+                cur = {'ssid': '?', 'bssid': m.group(0).lower(), 'auth': ''}
+                aps.append(cur)
+                continue
+            p = re.search(r'\b(\d{1,3})\s?%', ln)
+            if p and cur is not None and 'pct' not in cur:
+                cur['pct'] = int(p.group(1))
+    res = []
+    for a in aps:
+        if a.get('pct') is None:
+            continue
+        a['dbm'] = _nm_wifi_dbm(a['pct'])
+        a['band'] = _nm_wifi_band(a.get('channel'), a.get('band_txt', ''))
+        res.append(a)
+    return res
+
+
+def _nm_wifi_scan(kind='link'):
+    """One poll of Windows' Wi-Fi state. kind='link' = the connected network
+    (cheap, ~1 Hz); kind='aps' = every access point in range (cached by the OS).
+    Never raises; returns {'kind','t','ok','error','link'|'aps','raw'}."""
+    import time as _t
+    res = {'kind': kind, 't': _t.time(), 'ok': False, 'error': '', 'raw': ''}
+    if not _NM_IS_WIN:
+        res['error'] = 'Wi-Fi signal tools use Windows netsh and are not available on this OS yet.'
+        return res
+    if kind == 'link':
+        rc, out = _nm_run(['netsh', 'wlan', 'show', 'interfaces'], timeout=8)
+        res['raw'] = out
+        ifs = _nm_wifi_parse_interfaces(out)
+        res['link'] = _nm_wifi_link_from_interfaces(ifs)
+        res['adapters'] = len(ifs)
+        if rc != 0 and not ifs:
+            res['error'] = (out.splitlines()[0] if out else 'netsh failed')
+        elif not ifs:
+            res['error'] = (out.splitlines()[0] if out else 'No Wi-Fi adapter found.')
+        else:
+            res['ok'] = True
+            d0 = ifs[0]
+            if res['link'] is None and not str(d0.get('state', '')).startswith('disconn'):
+                res['error'] = (f"Adapter '{d0.get('name', '?')}' reports state '{d0.get('state', '?')}', "
+                                f"signal {d0.get('signal')}, SSID '{d0.get('ssid', '')}' but no readable link - "
+                                f"press Copy raw netsh output and send it over.")
+        return res
+    rc, out = _nm_run(['netsh', 'wlan', 'show', 'networks', 'mode=bssid'], timeout=20)
+    res['raw'] = out
+    res['aps'] = _nm_wifi_parse_networks(out)
+    if res['aps']:
+        res['ok'] = True
+    else:
+        low = out.lower()
+        if 'location' in low:
+            res['error'] = ('Windows is blocking Wi-Fi scans until Location is allowed: Settings > '
+                            'Privacy & security > Location > turn on Location services and let desktop '
+                            'apps access it.')
+        else:
+            res['error'] = (out.splitlines()[0] if out else 'No networks reported.')
+    return res
+
+
+# ── Wi-Fi: Windows WLAN API helper ───────────────────────────────────────────
+# Calling `netsh` once a second is slow and reports whole-percent quality. The
+# Windows WLAN API gives the connected link's real RSSI in dBm instantly and can
+# trigger a FRESH scan of every access point instead of waiting for the OS cache.
+# It is reached from a small PowerShell helper (P/Invoke into wlanapi.dll) that
+# streams JSON lines. Running it as a CHILD PROCESS is deliberate: if a native
+# struct is ever read wrongly, the helper dies and the app falls back to netsh;
+# it can never take the app down. C# here is v5 (what Windows PowerShell 5.1's
+# Add-Type compiles) -- no interpolation, no ?., no expression-bodied members.
+_NM_WLAN_HELPER_PS1 = r'''
+$ErrorActionPreference = 'Stop'
+$src = @"
+using System;
+using System.Text;
+using System.Threading;
+using System.Runtime.InteropServices;
+public static class NmWlan {
+  [DllImport("wlanapi.dll")] static extern int WlanOpenHandle(uint v, IntPtr r, out uint n, out IntPtr h);
+  [DllImport("wlanapi.dll")] static extern int WlanEnumInterfaces(IntPtr h, IntPtr r, out IntPtr l);
+  [DllImport("wlanapi.dll")] static extern int WlanQueryInterface(IntPtr h, ref Guid g, int op, IntPtr r, out int sz, out IntPtr d, IntPtr t);
+  [DllImport("wlanapi.dll")] static extern int WlanScan(IntPtr h, ref Guid g, IntPtr s, IntPtr ie, IntPtr r);
+  [DllImport("wlanapi.dll")] static extern int WlanGetNetworkBssList(IntPtr h, ref Guid g, IntPtr s, int bssType, bool sec, IntPtr r, out IntPtr l);
+  [DllImport("wlanapi.dll")] static extern void WlanFreeMemory(IntPtr p);
+  static void Out(string s) { Console.Out.WriteLine(s); Console.Out.Flush(); }
+  static string J(string s) {
+    StringBuilder b = new StringBuilder();
+    foreach (char c in s) {
+      if (c == '\\') b.Append("\\\\");
+      else if (c == '"') b.Append("\\\"");
+      else if (c < ' ') b.Append(' ');
+      else b.Append(c);
+    }
+    return b.ToString();
+  }
+  static void ReadBss(IntPtr h, Guid g, int idx) {
+    IntPtr bl;
+    int rc = WlanGetNetworkBssList(h, ref g, IntPtr.Zero, 3, false, IntPtr.Zero, out bl);
+    if (rc != 0) { Out("{\"k\":\"err\",\"msg\":\"BssList " + rc + "\"}"); return; }
+    int total = Marshal.ReadInt32(bl, 0);
+    int cnt = Marshal.ReadInt32(bl, 4);
+    if (cnt < 0 || cnt > 500 || 8L + (long)cnt * 360L > (long)total) {
+      Out("{\"k\":\"err\",\"msg\":\"BssList layout mismatch total=" + total + " n=" + cnt + "\"}");
+      WlanFreeMemory(bl); return;
+    }
+    StringBuilder sb = new StringBuilder();
+    sb.Append("{\"k\":\"bss\",\"i\":" + idx + ",\"aps\":[");
+    bool first = true;
+    for (int i = 0; i < cnt; i++) {
+      IntPtr p = new IntPtr(bl.ToInt64() + 8L + (long)i * 360L);
+      int sl = Marshal.ReadInt32(p, 0);
+      if (sl < 0 || sl > 32) sl = 0;
+      byte[] sbts = new byte[sl];
+      if (sl > 0) Marshal.Copy(new IntPtr(p.ToInt64() + 4L), sbts, 0, sl);
+      byte[] mac = new byte[6];
+      Marshal.Copy(new IntPtr(p.ToInt64() + 40L), mac, 0, 6);
+      int rssi = Marshal.ReadInt32(p, 56);
+      int q = Marshal.ReadInt32(p, 60);
+      int freq = Marshal.ReadInt32(p, 92);
+      if (rssi > 0 || rssi < -127) continue;
+      if (!first) sb.Append(",");
+      first = false;
+      sb.Append("{\"s\":\"" + J(Encoding.UTF8.GetString(sbts)) + "\",\"b\":\"" +
+        BitConverter.ToString(mac).Replace('-', ':').ToLower() + "\",\"r\":" + rssi +
+        ",\"q\":" + q + ",\"f\":" + freq + "}");
+    }
+    sb.Append("]}");
+    WlanFreeMemory(bl);
+    Out(sb.ToString());
+  }
+  public static void Run(int scanSec) {
+    IntPtr h; uint neg;
+    int rc = WlanOpenHandle(2, IntPtr.Zero, out neg, out h);
+    if (rc != 0) { Out("{\"k\":\"err\",\"msg\":\"WlanOpenHandle " + rc + "\"}"); return; }
+    IntPtr lp;
+    rc = WlanEnumInterfaces(h, IntPtr.Zero, out lp);
+    if (rc != 0) { Out("{\"k\":\"err\",\"msg\":\"WlanEnumInterfaces " + rc + "\"}"); return; }
+    int n = Marshal.ReadInt32(lp, 0);
+    if (n < 0 || n > 16) n = 0;
+    Guid[] gs = new Guid[n];
+    for (int i = 0; i < n; i++) {
+      byte[] gb = new byte[16];
+      Marshal.Copy(new IntPtr(lp.ToInt64() + 8L + (long)i * 532L), gb, 0, 16);
+      gs[i] = new Guid(gb);
+    }
+    WlanFreeMemory(lp);
+    Out("{\"k\":\"hello\",\"ifaces\":" + n + "}");
+    if (n == 0) { Out("{\"k\":\"err\",\"msg\":\"no Wi-Fi interface\"}"); return; }
+    DateTime nextScan = DateTime.UtcNow;
+    DateTime readAt = DateTime.MaxValue;
+    while (true) {
+      for (int i = 0; i < n; i++) {
+        IntPtr d; int sz;
+        rc = WlanQueryInterface(h, ref gs[i], 0x10000102, IntPtr.Zero, out sz, out d, IntPtr.Zero);
+        if (rc == 0 && sz >= 4 && d != IntPtr.Zero) {
+          int rssi = Marshal.ReadInt32(d);
+          WlanFreeMemory(d);
+          Out("{\"k\":\"rssi\",\"i\":" + i + ",\"v\":" + rssi + "}");
+        }
+      }
+      DateTime now = DateTime.UtcNow;
+      if (now >= nextScan) {
+        for (int i = 0; i < n; i++) { WlanScan(h, ref gs[i], IntPtr.Zero, IntPtr.Zero, IntPtr.Zero); }
+        nextScan = now.AddSeconds(scanSec);
+        readAt = now.AddSeconds(3);
+      }
+      if (now >= readAt) {
+        for (int i = 0; i < n; i++) { ReadBss(h, gs[i], i); }
+        readAt = DateTime.MaxValue;
+      }
+      Thread.Sleep(100);
+    }
+  }
+}
+"@
+Add-Type -TypeDefinition $src
+[NmWlan]::Run(__SCAN_SEC__)
+'''
+
+
+def _nm_wifi_freq_to_channel(freq_khz):
+    """BSS entries carry the centre frequency in kHz."""
+    try:
+        mhz = int(freq_khz) // 1000
+    except Exception:
+        return None, '?'
+    if 2400 <= mhz <= 2500:
+        return (14 if mhz == 2484 else (mhz - 2407) // 5), '2.4 GHz'
+    if 5150 <= mhz < 5950:
+        return (mhz - 5000) // 5, '5 GHz'
+    if 5950 <= mhz <= 7125:
+        return (mhz - 5950) // 5, '6 GHz'
+    return None, '?'
+
+
+def _nm_wifi_api_aps(raw_aps, meta=None):
+    """Turn the helper's compact AP records into the same dicts netsh parsing makes."""
+    meta = meta or {}
+    out = []
+    for a in raw_aps or []:
+        try:
+            b = str(a.get('b', '')).lower()
+            if not b:
+                continue
+            ch, band = _nm_wifi_freq_to_channel(a.get('f'))
+            m = meta.get(b, {})
+            ssid = a.get('s') or m.get('ssid') or '(hidden)'
+            dbm = float(a['r'])
+            out.append({'ssid': ssid, 'bssid': b, 'dbm': dbm, 'pct': int(max(0, min(100, round((dbm + 100) * 2)))),
+                        'channel': ch if ch is not None else m.get('channel'),
+                        'band': band if band != '?' else m.get('band', '?'),
+                        'radio': m.get('radio', ''), 'auth': m.get('auth', '')})
+        except Exception:
+            _exc_debug('_nm_wifi_api_aps')
+    return out
+
+
+class _NMWifiApiSource:
+    """Runs the PowerShell WLAN helper as a child process and forwards its JSON
+    lines to on_msg(dict). stop() kills it; the app also stops it at shutdown."""
+
+    def __init__(self, on_msg, scan_s=12, cmd=None):
+        self.on_msg = on_msg
+        self.scan_s = max(4, int(scan_s))
+        self.cmd = cmd                       # tests inject a fake helper command
+        self.proc = None
+        self.thread = None
+        self.path = None
+        self.error = ''
+
+    def start(self):
+        import subprocess, threading
+        try:
+            if self.cmd is None:
+                p = _nm_wifi_dir() / 'wifi_helper.ps1'
+                p.write_text(_NM_WLAN_HELPER_PS1.replace('__SCAN_SEC__', str(self.scan_s)), encoding='utf-8')
+                self.path = str(p)
+                cmd = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                       '-File', self.path]
+            else:
+                cmd = self.cmd
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                         bufsize=1, creationflags=flags)
+        except Exception as ex:
+            self.error = str(ex)
+            _exc_debug('_NMWifiApiSource.start')
+            return False
+        self.thread = threading.Thread(target=self._read, daemon=True, name='nm-wifi-api')
+        self.thread.start()
+        threading.Thread(target=self._drain_err, daemon=True, name='nm-wifi-api-err').start()
+        return True
+
+    def _read(self):
+        try:
+            for line in self.proc.stdout:
+                line = line.strip()
+                if not line.startswith('{'):
+                    continue
+                try:
+                    self.on_msg(json.loads(line))
+                except ValueError:
+                    continue
+        except Exception:
+            _exc_debug('_NMWifiApiSource._read')
+
+    def _drain_err(self):
+        try:
+            txt = self.proc.stderr.read()
+            if txt:
+                self.error = txt.strip().splitlines()[0][:300]
+        except Exception:
+            _exc_debug('_NMWifiApiSource._drain_err')
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self):
+        try:
+            if self.proc is not None and self.proc.poll() is None:
+                self.proc.kill()
+        except Exception:
+            _exc_debug('_NMWifiApiSource.stop')
+
+
+class _NMWifiMotion:
+    """Room-disturbance detector from the connected link's signal strength.
+
+    A still room leaves the signal nearly flat; a person crossing the path
+    between you and the router makes it swing by several dB. We take the rolling
+    standard deviation over `win_s` seconds, learn a quiet baseline (25th
+    percentile of that std, sampled once a second, over `hist_s`) and call it
+    movement when the std is well above baseline AND above an absolute floor
+    `min_thr` (which depends on the source's resolution: 0.5 dB steps from
+    netsh, 1 dB from the WLAN API). Works at any sample rate (1 Hz or 10 Hz);
+    hysteresis (`hold_s`) stops flicker."""
+
+    def __init__(self, win_s=15.0, hist_s=600.0, hold_s=4.0, min_thr=0.9):
+        from collections import deque
+        self.win_s = win_s
+        self.hist_s = hist_s
+        self.hold_s = hold_s
+        self.min_thr = min_thr
+        self.samples = deque()
+        self.stds = deque()
+        self.moving = False
+        self.base = None
+        self.thr = min_thr
+        self._last_hot = 0.0
+        self._last_std_t = -1e9
+
+    def add(self, t, dbm):
+        self.samples.append((t, float(dbm)))
+        while self.samples and t - self.samples[0][0] > self.win_s:
+            self.samples.popleft()
+        if len(self.samples) < 6 or t - self.samples[0][0] < min(5.0, self.win_s / 2):
+            return {'std': None, 'base': None, 'thr': self.thr, 'moving': False, 'ready': False}
+        std = float(np.std([s[1] for s in self.samples]))
+        if t - self._last_std_t >= 0.999:
+            self.stds.append((t, std))
+            self._last_std_t = t
+            while self.stds and t - self.stds[0][0] > self.hist_s:
+                self.stds.popleft()
+            if len(self.stds) >= 20:
+                self.base = max(0.3, float(np.percentile([s[1] for s in self.stds], 25)))
+                self.thr = max(self.min_thr, 3.0 * self.base)
+        ready = len(self.stds) >= 20
+        hot = ready and std >= self.thr
+        if hot:
+            self._last_hot = t
+            self.moving = True
+        elif self.moving and t - self._last_hot > self.hold_s:
+            self.moving = False
+        return {'std': std, 'base': self.base, 'thr': self.thr, 'moving': self.moving, 'ready': ready}
+
+
+class _NMWifiApTracker:
+    """Per-access-point disturbance. Every AP is a separate radio path; a person
+    crossing one path swings that AP's strength while the others stay put.
+    Scans give a sample every ~10 s, so this is a minutes-scale 'activity near
+    this path' signal, not an instant detector -- the link detector above is the
+    fast one. Noise is measured as the median consecutive change (robust to the
+    slow drift every AP shows as the OS re-measures it)."""
+
+    def __init__(self, hist_s=900.0, win_s=60.0):
+        from collections import deque
+        self._dq = deque
+        self.hist_s, self.win_s = hist_s, win_s
+        self.series = {}
+        self.state = {}
+
+    @staticmethod
+    def _noise(vals):
+        if len(vals) < 3:
+            return None
+        d = np.abs(np.diff(np.asarray(vals, float)))
+        return float(np.median(d)) * 1.4826 / 1.4142
+
+    def add(self, t, bssid, dbm):
+        dq = self.series.setdefault(bssid, self._dq())
+        dq.append((t, float(dbm)))
+        while dq and t - dq[0][0] > self.hist_s:
+            dq.popleft()
+        recent = [v for (tt, v) in dq if t - tt <= self.win_s]
+        older = [v for (tt, v) in dq if t - tt > self.win_s]
+        nr, nb = self._noise(recent), self._noise(older)
+        swing = (max(recent) - min(recent)) if len(recent) >= 3 else 0.0
+        if nr is None:
+            self.state[bssid] = {'score': 0.0, 'swing': swing, 'disturbed': False, 'ready': False}
+            return
+        ready = nb is not None and len(older) >= 8
+        base = max(1.0, nb) if ready else 1.0
+        score = nr / base
+        self.state[bssid] = {'score': score, 'swing': swing, 'ready': ready,
+                             'disturbed': bool(ready and score >= 2.5 and swing >= 6.0)}
+
+    def forget(self, alive, t):
+        for b in list(self.series):
+            if b not in alive:
+                dq = self.series[b]
+                if not dq or t - dq[-1][0] > 120:
+                    self.series.pop(b, None)
+                    self.state.pop(b, None)
+
+
+# ── Wi-Fi: security, rogue-network findings, health score, channel advice ────
+
+def _nm_wifi_sec_rank(auth):
+    """0 open .. 4 WPA3; None if unknown."""
+    a = (auth or '').lower()
+    if not a:
+        return None
+    if 'wpa3' in a or 'sae' in a:
+        return 4
+    if 'wpa2' in a:
+        return 3
+    if 'wpa' in a:
+        return 2
+    if 'wep' in a or 'owe' in a:
+        return 1
+    if 'open' in a or 'none' in a:
+        return 0
+    return None
+
+
+def _nm_wifi_mac_base(bssid):
+    """Multi-SSID routers derive extra BSSIDs by setting the 'locally administered'
+    bit (0x02) of the first octet. Clear it to get the radio's real address."""
+    try:
+        parts = bssid.lower().split(':')
+        parts[0] = '%02x' % (int(parts[0], 16) & ~0x02)
+        return ':'.join(parts)
+    except Exception:
+        return bssid.lower()
+
+
+def _nm_wifi_device_key(bssid):
+    """First five octets (LA bit cleared): BSSIDs sharing it are the same box."""
+    return _nm_wifi_mac_base(bssid)[:14]
+
+
+def _nm_wifi_vendor(bssid):
+    try:
+        v = _nm_oui_vendor(_nm_wifi_mac_base(bssid))
+    except Exception:
+        v = ''
+    return v or ''
+
+
+def _nm_wifi_findings(aps, link, learned=None):
+    """Rogue / look-alike / downgrade findings -> list of dicts
+    {'sev': 'high'|'warn'|'info', 'bssid', 'kind', 'text'}.
+    `learned` = set of BSSIDs the watcher learned as normal for this place."""
+    out = []
+    if not link or not link.get('ssid'):
+        return out
+    learned = learned or set()
+    mine = link['ssid']
+    my_rank = _nm_wifi_sec_rank(link.get('auth'))
+    my_bssid = link.get('bssid', '')
+    my_vendor = _nm_wifi_vendor(my_bssid) if my_bssid else ''
+    my_dev = _nm_wifi_device_key(my_bssid) if my_bssid else ''
+    for a in aps or []:
+        if a['ssid'] != mine or a['bssid'] == my_bssid:
+            continue
+        r = _nm_wifi_sec_rank(a.get('auth'))
+        if r is not None and r <= 1:
+            out.append({'sev': 'high', 'bssid': a['bssid'], 'kind': 'open-lookalike',
+                        'text': f"{a['bssid']} uses YOUR network name with {'no' if r == 0 else 'weak'} security "
+                                f"({a.get('auth') or 'open'}) — a classic evil-twin set-up. Don't connect to it."})
+        elif r is not None and my_rank is not None and r < my_rank:
+            out.append({'sev': 'info', 'bssid': a['bssid'], 'kind': 'weaker-mode',
+                        'text': f"{a['bssid']} offers your network name with weaker security "
+                                f"({a.get('auth')}) than your link ({link.get('auth')}). Normal for WPA2/WPA3 "
+                                f"transition mode; suspicious otherwise."})
+        v = _nm_wifi_vendor(a['bssid'])
+        same_dev = my_dev and _nm_wifi_device_key(a['bssid']) == my_dev
+        if (not same_dev and a['bssid'] not in learned and v and my_vendor and v != my_vendor
+                and (a.get('dbm') or -100) >= -75):
+            out.append({'sev': 'warn', 'bssid': a['bssid'], 'kind': 'other-maker',
+                        'text': f"{a['bssid']} uses your network name but is made by {v}, not {my_vendor} like "
+                                f"your router — an extra node you added, or a look-alike."})
+    return out
+
+
+_NM_5G_NONDFS = (36, 40, 44, 48, 149, 153, 157, 161, 165)
+
+
+def _nm_wifi_channel_advice(aps, link):
+    """Plain-language channel advice for the band you're on, plus the other band."""
+    lines = []
+    mine = (link or {}).get('bssid')
+
+    def load(chs, ch, spread):
+        return sum(10 ** (a['dbm'] / 10.0) for a in chs if a['bssid'] != mine
+                   and a.get('channel') is not None and abs(a['channel'] - ch) <= spread)
+
+    s24 = [a for a in aps or [] if a.get('band') == '2.4 GHz' and a.get('channel')]
+    s5 = [a for a in aps or [] if a.get('band') == '5 GHz' and a.get('channel')]
+    if s24:
+        best = min((1, 6, 11), key=lambda c: load(s24, c, 4))
+        cur = (link or {}).get('channel') if (link or {}).get('band') == '2.4 GHz' else None
+        if cur and cur != best and load(s24, cur, 4) > 1.5 * load(s24, best, 4):
+            lines.append(f"2.4 GHz: you're on channel {cur}; channel {best} is quieter — set your router to {best}.")
+        elif cur:
+            lines.append(f"2.4 GHz: channel {cur} is already among the quietest options.")
+        else:
+            lines.append(f"2.4 GHz: quietest of 1 / 6 / 11 is {best}.")
+    if s5 or (link or {}).get('band') == '5 GHz':
+        best5 = min(_NM_5G_NONDFS, key=lambda c: load(s5, c, 0))
+        cur = (link or {}).get('channel') if (link or {}).get('band') == '5 GHz' else None
+        if cur and cur in _NM_5G_NONDFS and load(s5, cur, 0) > 3 * max(load(s5, best5, 0), 1e-12):
+            lines.append(f"5 GHz: you're on channel {cur}; channel {best5} is much emptier.")
+        elif cur:
+            lines.append(f"5 GHz: channel {cur} is fine — little competition on it.")
+        else:
+            lines.append(f"5 GHz: emptiest non-DFS channel is {best5}.")
+    return lines
+
+
+def _nm_wifi_health(link, aps, quiet_base=None, findings=None):
+    """0-100 Wi-Fi health score with the factors that make it up."""
+    if not link:
+        return None
+    f = []
+    dbm = link.get('dbm')
+    p = 35.0 * float(np.clip(((dbm if dbm is not None else -85) + 85.0) / 30.0, 0, 1))
+    f.append(('Signal strength', p, 35, f"{dbm:.0f} dBm" if dbm is not None else 'unknown'))
+    band = link.get('band', '?')
+    p = 15.0 if band in ('5 GHz', '6 GHz') else (7.0 if band == '2.4 GHz' else 9.0)
+    f.append(('Band', p, 15, band))
+    ch, mine = link.get('channel'), link.get('bssid')
+    co = 0
+    if ch is not None:
+        spread = 4 if band == '2.4 GHz' else 0
+        co = sum(1 for a in aps or [] if a['bssid'] != mine and a.get('band') == band
+                 and a.get('channel') is not None and abs(a['channel'] - ch) <= spread and a['dbm'] > -75)
+    p = 20.0 * max(0.0, 1.0 - co / 6.0)
+    f.append(('Channel congestion', p, 20, f'{co} strong neighbour(s) on or beside your channel'))
+    rk = _nm_wifi_sec_rank(link.get('auth'))
+    p = {4: 15.0, 3: 12.0, 2: 6.0, 1: 2.0, 0: 0.0}.get(rk, 8.0)
+    f.append(('Security', p, 15, link.get('auth') or 'unknown'))
+    if quiet_base is None:
+        p, note = 6.0, 'still calibrating'
+    else:
+        p = float(np.clip(10.0 - (quiet_base - 0.4) * 5.0, 2.0, 10.0))
+        note = f'quiet-room jitter {quiet_base:.1f} dB'
+    f.append(('Stability', p, 10, note))
+    rate = link.get('rx') or link.get('tx')
+    p = 5.0 if (rate or 0) >= 400 else (3.5 if (rate or 0) >= 150 else (2.0 if rate else 3.0))
+    f.append(('Link rate', p, 5, f'{rate:.0f} Mbps' if rate else 'unknown'))
+    total = sum(x[1] for x in f)
+    pen = 0.0
+    for x in findings or []:
+        pen += 12.0 if x['sev'] == 'high' else (4.0 if x['sev'] == 'warn' else 0.0)
+    pen = min(pen, 30.0)
+    if pen:
+        f.append(('Suspicious networks', -pen, 0, f'{sum(1 for x in findings if x["sev"] != "info")} flagged'))
+    score = int(round(max(0.0, min(100.0, total - pen))))
+    grade = 'A' if score >= 85 else 'B' if score >= 70 else 'C' if score >= 55 else 'D' if score >= 40 else 'E'
+    return {'score': score, 'grade': grade, 'factors': f}
+
+
+# ── Wi-Fi: history in the app's SQLite database ──────────────────────────────
+
+def _nm_wifi_db_init(db):
+    try:
+        c = db._conn()
+        c.execute("CREATE TABLE IF NOT EXISTS wifi_activity(minute TEXT PRIMARY KEY, moving REAL, "
+                  "sigma REAL, dbm REAL, n INTEGER)")
+        c.execute("CREATE TABLE IF NOT EXISTS wifi_events(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                  "ts TEXT, kind TEXT, detail TEXT)")
+        c.commit()
+        return True
+    except Exception:
+        _exc_debug('_nm_wifi_db_init')
+        return False
+
+
+def _nm_wifi_db_put_minute(db, minute_iso, moving, sigma, dbm, n):
+    try:
+        c = db._conn()
+        c.execute("INSERT OR REPLACE INTO wifi_activity(minute, moving, sigma, dbm, n) VALUES(?,?,?,?,?)",
+                  (minute_iso, float(moving), float(sigma), float(dbm), int(n)))
+        c.commit()
+    except Exception:
+        _exc_debug('_nm_wifi_db_put_minute')
+
+
+def _nm_wifi_db_put_event(db, ts_iso, kind, detail):
+    try:
+        c = db._conn()
+        c.execute("INSERT INTO wifi_events(ts, kind, detail) VALUES(?,?,?)", (ts_iso, kind, detail))
+        c.commit()
+    except Exception:
+        _exc_debug('_nm_wifi_db_put_event')
+
+
+def _nm_wifi_db_events(db, limit=200):
+    try:
+        rows = db._conn().execute("SELECT ts, kind, detail FROM wifi_events ORDER BY id DESC LIMIT ?",
+                                  (int(limit),)).fetchall()
+        return [(r[0], r[1], r[2]) for r in rows]
+    except Exception:
+        _exc_debug('_nm_wifi_db_events')
+        return []
+
+
+def _nm_wifi_activity_grid(db, days=30):
+    """7x24 grid (weekday x hour) of the % of time movement was detected, NaN where
+    nothing was recorded, plus the per-cell minutes recorded, plus the last 24
+    clock hours as [(hour_start_dt, movement_minutes, minutes_recorded)]."""
+    grid = np.full((7, 24), np.nan)
+    counts = np.zeros((7, 24), dtype=int)
+    last24 = []
+    try:
+        since = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M')
+        rows = db._conn().execute("SELECT minute, moving, n FROM wifi_activity WHERE minute >= ?",
+                                  (since,)).fetchall()
+    except Exception:
+        _exc_debug('_nm_wifi_activity_grid')
+        return grid, counts, last24
+    acc = {}
+    per_hour = {}
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(r[0])
+        except Exception:
+            continue
+        k = (t.weekday(), t.hour)
+        a = acc.setdefault(k, [0.0, 0])
+        a[0] += float(r[1]); a[1] += 1
+        hk = t.replace(minute=0, second=0, microsecond=0)
+        h = per_hour.setdefault(hk, [0.0, 0])
+        h[0] += float(r[1]); h[1] += 1
+    for (d, h), (s, n) in acc.items():
+        grid[d, h] = 100.0 * s / n
+        counts[d, h] = n
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    for i in range(23, -1, -1):
+        hk = now - timedelta(hours=i)
+        s, n = per_hour.get(hk, [0.0, 0])
+        last24.append((hk, s, n))
+    return grid, counts, last24
+
+
+def _nm_idle_seconds():
+    """Seconds since the last keyboard/mouse input on this PC (Windows), else 0."""
+    if not _NM_IS_WIN:
+        return 0.0
+    try:
+        import ctypes
+
+        class _LII(ctypes.Structure):
+            _fields_ = [('cbSize', ctypes.c_uint), ('dwTime', ctypes.c_uint)]
+        li = _LII()
+        li.cbSize = ctypes.sizeof(li)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(li)):
+            return 0.0
+        k32 = ctypes.windll.kernel32
+        k32.GetTickCount.restype = ctypes.c_uint
+        return ((k32.GetTickCount() - li.dwTime) & 0xFFFFFFFF) / 1000.0
+    except Exception:
+        _exc_debug('_nm_idle_seconds')
+        return 0.0
+
+
+def _nm_wifi_alert(monitor, title, msg, sev='warn'):
+    """Desktop toast + the app's push/webhook channels. Never raises."""
+    try:
+        _nm_toast(title, msg)
+    except Exception:
+        _exc_debug('_nm_wifi_alert toast')
+    try:
+        _nm_notify_async(title, msg, sev=sev, tags='wifi')
+    except Exception:
+        _exc_debug('_nm_wifi_alert notify')
+    try:
+        hook = str((getattr(monitor, 'config', {}) or {}).get('alert_webhook') or '').strip()
+        if hook:
+            _nm_webhook(hook, {'text': f'{title} — {msg}', 'rule': 'wifi', 'ts': datetime.now().isoformat()})
+    except Exception:
+        _exc_debug('_nm_wifi_alert webhook')
+
+
+
+# ── Wi-Fi: the background watcher ────────────────────────────────────────────
+# Owns the pollers, the movement detector, the per-AP tracker, the new-network
+# logic, the history writer and the away alerts. It runs WITHOUT the window (when
+# 'keep watching' is on) so away-mode alerts and the activity history keep going
+# while the window is closed; the window just reads its state.
+
+_nm_wifi_watchers = []
+
+
+def _nm_wifi_dir(state_dir=None):
+    import pathlib
+    if state_dir:
+        d = pathlib.Path(state_dir)
+    else:
+        d = pathlib.Path(os.environ.get('LOCALAPPDATA') or str(pathlib.Path.home())) / 'NetworkMonitor'
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        _exc_debug('_nm_wifi_dir')
+    return d
+
+
+def _nm_wifi_load(name, default, state_dir=None):
+    try:
+        p = _nm_wifi_dir(state_dir) / name
+        if p.exists():
+            return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        _exc_debug('_nm_wifi_load')
+    return default
+
+
+def _nm_wifi_save(name, obj, state_dir=None):
+    try:
+        p = _nm_wifi_dir(state_dir) / name
+        tmp = p.with_suffix('.tmp')
+        tmp.write_text(json.dumps(obj), encoding='utf-8')
+        tmp.replace(p)
+        return True
+    except Exception:
+        _exc_debug('_nm_wifi_save')
+        return False
+
+
+def _nm_wifi_get_watcher(monitor, create=True, **kw):
+    for w in _nm_wifi_watchers:
+        if w.monitor is monitor:
+            return w
+    if not create:
+        return None
+    w = _NMWifiWatcher(monitor, **kw)
+    _nm_wifi_watchers.append(w)
+    return w
+
+
+def _nm_wifi_stop_all():
+    for w in list(_nm_wifi_watchers):
+        try:
+            w.stop()
+        except Exception:
+            _exc_debug('_nm_wifi_stop_all')
+
+
+def _nm_wifi_autostart(monitor):
+    """At app launch: if the user left 'keep watching in the background' on, start."""
+    try:
+        if _nm_wifi_load('wifi_prefs.json', {}).get('background') and _NM_IS_WIN:
+            _nm_wifi_get_watcher(monitor).start()
+    except Exception:
+        _exc('_nm_wifi_autostart')
+
+
+class _NMWifiWatcher:
+    PREF_DEFAULTS = {'background': False, 'away': False, 'auto_away_min': 0,
+                     'scan_s': 12, 'alert_away': True}
+
+    def __init__(self, monitor=None, scan_fn=None, state_dir=None, use_api=True, api_cls=None,
+                 db=None, threads=True, alert_fn=None, idle_fn=None):
+        import threading
+        from collections import deque
+        self.monitor = monitor
+        self.db = db if db is not None else getattr(monitor, '_db', None)
+        if self.db is not None:
+            _nm_wifi_db_init(self.db)
+        self._scan = scan_fn or _nm_wifi_scan
+        self.state_dir = state_dir
+        self._use_api = bool(use_api) and (api_cls is not None or (_NM_IS_WIN and scan_fn is None))
+        self._api_cls = api_cls or _NMWifiApiSource
+        self._threads_on = bool(threads)
+        self.alert_fn = alert_fn or (lambda title, msg, sev: _nm_wifi_alert(self.monitor, title, msg, sev))
+        self.idle_fn = idle_fn or _nm_idle_seconds
+        self.lock = threading.RLock()
+        self.stop_ev = threading.Event()
+        self.api = None
+        self.mode = 'netsh'                 # 'netsh' | 'starting' | 'api'
+        self._started = False
+        self._t0 = 0.0
+        self.last_rssi_t = 0.0
+        self.last_bss_t = 0.0
+        self.api_err = ''
+        self.link = None
+        self.link_meta = None
+        self.link_t = 0.0
+        self.aps = []
+        self.aps_t = 0.0
+        self.ap_meta = {}
+        self.link_hist = deque(maxlen=4000)
+        self.motion = _NMWifiMotion()
+        self.aptrk = _NMWifiApTracker()
+        self.moves = []
+        self.move_start = None
+        self.events = deque(maxlen=500)
+        self._evid = 0
+        self.err_link = ''
+        self.err_aps = ''
+        self.raw_link = ''
+        self.raw_aps = ''
+        self.adapters = None
+        self.findings = []
+        self.health = None
+        self.advice = []
+        self._alert_last = {}
+        self._flagged = set()
+        self._vendor_cache = {}
+        self._minute = None
+        self.prefs = dict(self.PREF_DEFAULTS)
+        self.prefs.update(_nm_wifi_load('wifi_prefs.json', {}, state_dir) or {})
+        sl = _nm_wifi_load('wifi_seen2.json', None, state_dir)
+        if not isinstance(sl, dict) or 'aps' not in sl:
+            sl = None
+        self.meta = dict((sl or {}).get('_meta', {}))
+        self.meta.setdefault('learn_until', time.time() + 600.0)   # first run: learn for 10 minutes
+        self.meta.setdefault('announced', False)
+        self.meta.setdefault('min_age', 30.0)                      # seconds an AP must persist before an alarm
+        self.meta.setdefault('min_dbm', -78.0)                     # faint APs flicker in and out of the OS cache
+        self.seen = dict((sl or {}).get('aps', {}))
+        self._learn_msg = False
+
+    # ── persistence / prefs ────────────────────────────────────────────────
+    def _save_seen(self):
+        _nm_wifi_save('wifi_seen2.json', {'_meta': self.meta, 'aps': self.seen}, self.state_dir)
+
+    def set_pref(self, key, value):
+        with self.lock:
+            self.prefs[key] = value
+            _nm_wifi_save('wifi_prefs.json', self.prefs, self.state_dir)
+        if key == 'scan_s' and self.api is not None and self.mode in ('api', 'starting'):
+            try:
+                self.api.stop()
+                self.api = self._api_cls(self._on_api_msg, scan_s=int(value))
+                self.api.start()
+            except Exception:
+                _exc_debug('set_pref scan_s')
+
+    def is_away(self):
+        if self.prefs.get('away'):
+            return True
+        m = int(self.prefs.get('auto_away_min') or 0)
+        try:
+            return m > 0 and self.idle_fn() >= m * 60
+        except Exception:
+            return False
+
+    # ── events + alerts ────────────────────────────────────────────────────
+    def event(self, kind, detail, alert=False, sev='warn', key=None, debounce=300.0):
+        import threading
+        with self.lock:
+            self._evid += 1
+            ev = {'id': self._evid, 't': time.time(), 'kind': kind, 'detail': detail}
+            self.events.append(ev)
+        if self.db is not None:
+            _nm_wifi_db_put_event(self.db, datetime.now().isoformat(timespec='seconds'), kind, detail)
+        if alert:
+            k = key or kind
+            now = time.time()
+            if now - self._alert_last.get(k, 0.0) >= debounce:
+                self._alert_last[k] = now
+                title = {'MOVEMENT': 'Wi-Fi: movement while you are away', 'NEW AP': 'Wi-Fi: new network nearby',
+                         'ROGUE': 'Wi-Fi: suspicious network'}.get(kind, 'Wi-Fi alert')
+                threading.Thread(target=self._safe_alert, args=(title, detail, sev), daemon=True).start()
+        return ev
+
+    def _safe_alert(self, title, msg, sev):
+        try:
+            self.alert_fn(title, msg, sev)
+        except Exception:
+            _exc_debug('wifi alert')
+
+    # ── lifecycle ──────────────────────────────────────────────────────────
+    def start(self):
+        import threading
+        if self._started:
+            return
+        self._started = True
+        self.stop_ev.clear()
+        self._t0 = time.time()
+        if self._use_api:
+            self.mode = 'starting'
+            try:
+                self.api = self._api_cls(self._on_api_msg, scan_s=int(self.prefs.get('scan_s') or 12))
+                if not self.api.start():
+                    self._fallback('could not start the helper: ' + (getattr(self.api, 'error', '') or '?'))
+            except Exception as ex:
+                self._fallback(str(ex))
+        if self._threads_on:
+            for fn, nm in ((self._link_loop, 'nm-wifi-link'), (self._aps_loop, 'nm-wifi-aps')):
+                threading.Thread(target=fn, daemon=True, name=nm).start()
+
+    def stop(self):
+        self.stop_ev.set()
+        try:
+            if self.api is not None:
+                self.api.stop()
+        except Exception:
+            _exc_debug('wifi watcher stop')
+        with self.lock:
+            self._flush_minute()
+        self._started = False
+
+    def _fallback(self, reason):
+        self.mode = 'netsh'
+        try:
+            if self.api is not None:
+                self.api.stop()
+        except Exception:
+            _exc_debug('wifi fallback')
+        self.motion.min_thr = 0.9
+        self.event('INFO', f'Windows Wi-Fi API not available ({reason}) — using netsh instead '
+                           f'(slower, coarser readings).')
+
+    def _link_loop(self):
+        while not self.stop_ev.is_set():
+            t0 = time.time()
+            try:
+                r = self._scan('link')
+            except Exception as ex:
+                r = {'kind': 'link', 't': time.time(), 'ok': False, 'error': str(ex), 'raw': ''}
+            try:
+                self._remember_link(r)
+                if self.mode != 'api':
+                    self.ingest_link(r)
+                else:
+                    if time.time() - self.last_rssi_t > 4.0:
+                        self._process_nolink(time.time())
+                if self.mode == 'starting' and time.time() - self._t0 > 20:
+                    self._fallback('no readings from the helper in 20 s' +
+                                   (f" ({self.api.error})" if self.api is not None and self.api.error else ''))
+            except Exception:
+                _exc('wifi link loop')
+            period = 5.0 if self.mode in ('api', 'starting') else 1.0
+            self.stop_ev.wait(max(0.2, period - (time.time() - t0)))
+
+    def _aps_loop(self):
+        while not self.stop_ev.is_set():
+            t0 = time.time()
+            try:
+                r = self._scan('aps')
+            except Exception as ex:
+                r = {'kind': 'aps', 't': time.time(), 'ok': False, 'error': str(ex), 'raw': '', 'aps': []}
+            try:
+                self._remember_ap_meta(r.get('aps') or [])
+                self.raw_aps = r.get('raw', '') or self.raw_aps
+                if r.get('ok') is False:
+                    self.err_aps = r.get('error', '')
+                if self.mode != 'api' or time.time() - self.last_bss_t > 45:
+                    self.ingest_aps(r)
+            except Exception:
+                _exc('wifi aps loop')
+            period = 30.0 if self.mode == 'api' else 12.0
+            self.stop_ev.wait(max(0.5, period - (time.time() - t0)))
+
+    # ── helper messages (API mode) ─────────────────────────────────────────
+    def _on_api_msg(self, msg):
+        try:
+            k = msg.get('k')
+            now = time.time()
+            if k == 'rssi':
+                v = msg.get('v')
+                if not isinstance(v, int) or v > 0 or v < -127:
+                    return
+                if self.mode != 'api':
+                    self.mode = 'api'
+                    self.motion.min_thr = 1.2          # WLAN API steps are whole dB
+                    self.event('INFO', 'Using the Windows Wi-Fi API: real dBm readings about 10 times a second, '
+                                       'and fresh scans every few seconds.')
+                self.last_rssi_t = now
+                lk = dict(self.link_meta or {})
+                lk['dbm'] = float(v)
+                lk['pct'] = int(max(0, min(100, round((v + 100) * 2))))
+                lk.setdefault('ssid', '(reading…)')
+                self._process_link(now, lk)
+            elif k == 'bss':
+                self.last_bss_t = now
+                aps = _nm_wifi_api_aps(msg.get('aps'), self.ap_meta)
+                if aps:
+                    self.ingest_aps({'t': now, 'ok': True, 'aps': aps, 'raw': ''})
+            elif k == 'err':
+                self.api_err = str(msg.get('msg', ''))
+                self.event('INFO', f'Wi-Fi API helper: {self.api_err}')
+        except Exception:
+            _exc('wifi api msg')
+
+    # ── ingestion ──────────────────────────────────────────────────────────
+    def _remember_link(self, r):
+        with self.lock:
+            self.err_link = '' if r.get('ok') else r.get('error', '')
+            self.raw_link = r.get('raw', '') or self.raw_link
+            self.adapters = r.get('adapters', self.adapters)
+            lk = r.get('link')
+            if lk:
+                self.link_meta = {k: v for k, v in lk.items() if k not in ('dbm', 'pct')}
+
+    def _remember_ap_meta(self, aps):
+        for a in aps:
+            self.ap_meta[a['bssid']] = {'ssid': a.get('ssid'), 'auth': a.get('auth', ''), 'radio': a.get('radio', ''),
+                                        'band': a.get('band', '?'), 'channel': a.get('channel')}
+
+    def ingest_link(self, r):
+        """A parsed 'link' poll result (netsh mode, or a test)."""
+        self._remember_link(r)
+        lk = r.get('link')
+        if lk is None:
+            self._process_nolink(r.get('t', time.time()))
+        else:
+            self._process_link(r.get('t', time.time()), lk)
+
+    def _process_nolink(self, t):
+        with self.lock:
+            self.link = None
+            if self.move_start is not None:
+                self.moves.append((self.move_start, t))
+                self.move_start = None
+
+    def _flush_minute(self):
+        m = self._minute
+        if m and m['n'] >= 5 and self.db is not None:
+            _nm_wifi_db_put_minute(self.db, m['key'], m['mov'] / m['n'], m['sig'] / m['n'], m['dbm'] / m['n'], m['n'])
+        self._minute = None
+
+    def _acc(self, t, info, dbm):
+        key = datetime.fromtimestamp(t).strftime('%Y-%m-%dT%H:%M')
+        if self._minute is None or self._minute['key'] != key:
+            self._flush_minute()
+            self._minute = {'key': key, 'n': 0, 'mov': 0, 'sig': 0.0, 'dbm': 0.0}
+        m = self._minute
+        m['n'] += 1
+        m['mov'] += 1 if info['moving'] else 0
+        m['sig'] += info['std'] or 0.0
+        m['dbm'] += dbm
+
+    def _process_link(self, t, lk):
+        with self.lock:
+            prev = self.link
+            self.link = lk
+            self.link_t = t
+            self.link_hist.append((t, lk['dbm']))
+            if (prev and prev.get('bssid') and lk.get('bssid') and prev['bssid'] != lk['bssid']
+                    and prev.get('ssid') == lk.get('ssid')):
+                self.event('ROAM', f"{lk['ssid']}: moved from {prev['bssid']} to {lk['bssid']} ({lk['dbm']:.0f} dBm)")
+            info = self.motion.add(t, lk['dbm'])
+            self._acc(t, info, lk['dbm'])
+            if info['moving'] and self.move_start is None:
+                self.move_start = t
+                away = self.is_away()
+                self.event('MOVEMENT', f"signal swinging (σ {info['std']:.1f} dB vs quiet baseline "
+                                       f"{(info['base'] or 0):.1f} dB)" + (' — while you are away' if away else ''),
+                           alert=bool(away and self.prefs.get('alert_away', True)), sev='warn',
+                           key='MOVEMENT', debounce=300.0)
+            elif not info['moving'] and self.move_start is not None:
+                self.moves.append((self.move_start, t))
+                self.moves = self.moves[-40:]
+                self.move_start = None
+
+    def _maker(self, bssid):
+        v = self._vendor_cache.get(bssid)
+        if v is None:
+            v = _nm_wifi_vendor(bssid)
+            self._vendor_cache[bssid] = v
+        return v
+
+    def ingest_aps(self, r):
+        """A parsed 'aps' result: update the list, trackers, learning, findings, health."""
+        with self.lock:
+            self.err_aps = '' if r.get('ok') else r.get('error', '')
+            self.raw_aps = r.get('raw', '') or self.raw_aps
+            aps = r.get('aps') or []
+            if not aps:
+                return
+            now = time.time()
+            t = r.get('t', now)
+            self.aps_t = t
+            learning = now < self.meta['learn_until']
+            mine_ssid = (self.link or {}).get('ssid')
+            if learning and not self._learn_msg and not self.seen:
+                self._learn_msg = True
+                self.event('LEARNING', 'Learning which Wi-Fi networks are normal here for 10 minutes. Windows shows '
+                                       'neighbours gradually, so nothing is flagged yet; after that, any new strong '
+                                       'network raises an alarm.')
+            for a in aps:
+                b = a['bssid']
+                a['maker'] = self._maker(b)
+                a['dev'] = _nm_wifi_device_key(b)
+                self.aptrk.add(t, b, a['dbm'])
+                st = self.aptrk.state.get(b, {})
+                a['disturbed'] = bool(st.get('disturbed'))
+                a['dscore'] = float(st.get('score', 0.0))
+                rec = self.seen.get(b)
+                if rec is None:
+                    rec = {'ssid': a['ssid'], 'first': now, 'n': 0, 'learned': learning, 'alerted': False}
+                    self.seen[b] = rec
+                rec['n'] = rec.get('n', 0) + 1
+                rec['last'] = now
+                if not rec.get('learned') and now - rec.get('first', now) < 86400:
+                    a['_new'] = True
+                if (not rec.get('learned') and not rec.get('alerted') and not learning
+                        and now - rec['first'] >= self.meta['min_age'] and rec['n'] >= 3
+                        and a['dbm'] >= self.meta['min_dbm']):
+                    rec['alerted'] = True
+                    note = (' — same name as your network: an extra mesh node, or a look-alike'
+                            if (mine_ssid and a['ssid'] == mine_ssid) else '')
+                    self.event('NEW AP', f"{a['ssid']} ({b}) ch {a.get('channel', '?')} {a['dbm']:.0f} dBm{note}",
+                               alert=self.is_away() or bool(note), sev='warn', key='NEW AP ' + b, debounce=3600.0)
+            self.aptrk.forget({a['bssid'] for a in aps}, t)
+            if not learning and not self.meta['announced']:
+                self.meta['announced'] = True
+                self.event('LEARNED', f"{sum(1 for v in self.seen.values() if v.get('learned'))} access points are "
+                                      f"normal here; new strong ones from now on are flagged.")
+            self._save_seen()
+            self.aps = aps
+            learned = {b for b, v in self.seen.items() if v.get('learned')}
+            self.findings = _nm_wifi_findings(aps, self.link, learned)
+            for f in self.findings:
+                if f['sev'] in ('high', 'warn') and f['bssid'] not in self._flagged:
+                    self._flagged.add(f['bssid'])
+                    self.event('ROGUE', f['text'], alert=(f['sev'] == 'high') or self.is_away(),
+                               sev='crit' if f['sev'] == 'high' else 'warn', key='ROGUE ' + f['bssid'],
+                               debounce=86400.0)
+            self.health = _nm_wifi_health(self.link, aps, self.motion.base, self.findings)
+            self.advice = _nm_wifi_channel_advice(aps, self.link)
+
+    # ── read side ──────────────────────────────────────────────────────────
+    def snapshot(self):
+        """Compact state for the web page / 3D layer."""
+        with self.lock:
+            aps = [{'ssid': a['ssid'], 'bssid': a['bssid'], 'dbm': a['dbm'], 'band': a.get('band', '?'),
+                    'channel': a.get('channel'), 'maker': a.get('maker', ''), 'dev': a.get('dev', ''),
+                    'new': bool(a.get('_new')), 'disturbed': bool(a.get('disturbed'))} for a in self.aps]
+            lk = dict(self.link) if self.link else None
+            ev = [{'t': e['t'], 'kind': e['kind'], 'detail': e['detail']} for e in list(self.events)[-6:]]
+            return {'link': lk, 'aps': aps, 'moving': self.move_start is not None,
+                    'away': self.is_away(), 'mode': self.mode, 'events': ev,
+                    'health': ({'score': self.health['score'], 'grade': self.health['grade']}
+                               if self.health else None),
+                    'findings': [{'sev': f['sev'], 'text': f['text']} for f in self.findings],
+                    'running': self._started}
+
+
+
+
+# ── Wi-Fi: survey helpers ────────────────────────────────────────────────────
+
+def _nm_wifi_field(xs, ys, vs, W, H, sigma=1.6, nx=96):
+    """Smooth scattered survey samples into a continuous field over a W x H metre
+    plan. Normalised Gaussian weighting, same idea as the heatmap smoother: the
+    value is the weighted mean of nearby samples, and 'coverage' says how much
+    real data supports each pixel so the painter can fade out guesses."""
+    xs = np.asarray(xs, float); ys = np.asarray(ys, float); vs = np.asarray(vs, float)
+    ny = max(8, int(round(nx * H / max(W, 1e-6))))
+    gx = (np.arange(nx) + 0.5) / nx * W
+    gy = (np.arange(ny) + 0.5) / ny * H
+    dx = gx[None, :, None] - xs[None, None, :]
+    dy = gy[:, None, None] - ys[None, None, :]
+    w = np.exp(-(dx ** 2 + dy ** 2) / (2.0 * sigma ** 2))
+    sw = w.sum(2)
+    field = (w * vs[None, None, :]).sum(2) / np.maximum(sw, 1e-300)
+    cov = 1.0 - np.exp(-sw * 2.5)
+    return gx, gy, field, cov
+
+
+def _nm_wifi_dead_spots(gx, gy, fld, cov, thr=-75.0, router=None, min_cells=6):
+    """Connected areas where the smoothed signal is below `thr` and real samples
+    support the estimate. Returns {'regions': [{cx, cy, area, worst}], 'mask',
+    'suggest': (x, y) | None}. The suggestion is a spot for an extra node: halfway
+    between the router and the biggest dead area if the router is marked, else the
+    nearest well-covered strong spot to that dead area."""
+    mask = (cov > 0.55) & (fld < thr)
+    ny, nx = mask.shape
+    lab = np.zeros(mask.shape, int)
+    regions, keep, cur = [], np.zeros(mask.shape, bool), 0
+    cw = float(gx[1] - gx[0]) if len(gx) > 1 else 1.0
+    ch = float(gy[1] - gy[0]) if len(gy) > 1 else 1.0
+    for y0, x0 in zip(*np.nonzero(mask)):
+        if lab[y0, x0]:
+            continue
+        cur += 1
+        stack = [(y0, x0)]
+        lab[y0, x0] = cur
+        cells = []
+        while stack:
+            y, x = stack.pop()
+            cells.append((y, x))
+            for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                yy, xx = y + dy, x + dx
+                if 0 <= yy < ny and 0 <= xx < nx and mask[yy, xx] and not lab[yy, xx]:
+                    lab[yy, xx] = cur
+                    stack.append((yy, xx))
+        if len(cells) >= min_cells:
+            ys_ = np.array([c[0] for c in cells]); xs_ = np.array([c[1] for c in cells])
+            for c in cells:
+                keep[c] = True
+            regions.append({'cx': float(np.mean(gx[xs_])), 'cy': float(np.mean(gy[ys_])),
+                            'area': len(cells) * cw * ch, 'worst': float(np.min(fld[ys_, xs_]))})
+    regions.sort(key=lambda r: -r['area'])
+    suggest = None
+    if regions:
+        r0 = regions[0]
+        if router:
+            suggest = ((router[0] + r0['cx']) / 2.0, (router[1] + r0['cy']) / 2.0)
+        else:
+            strong = (cov > 0.55) & (fld >= -62)
+            if strong.any():
+                ys_, xs_ = np.nonzero(strong)
+                d = (gx[xs_] - r0['cx']) ** 2 + (gy[ys_] - r0['cy']) ** 2
+                k = int(np.argmin(d))
+                suggest = (float(gx[xs_[k]]), float(gy[ys_[k]]))
+    return {'regions': regions, 'mask': keep, 'suggest': suggest}
+
+
+def _nm_open_wifi(monitor, watcher=None, state_dir=None):
+    """Wi-Fi Signal window: Live (link + movement + disturbed paths), Networks
+    (list, makers, findings, health, channels), Activity (history) and Signal map
+    (walk-around survey: 2D, band comparison, dead spots, 3D)."""
+    import tkinter as tk
+    import time as _t
+    from tkinter import ttk as _ttk, filedialog
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    import matplotlib.figure as _mf
+    import matplotlib.patches as _mp
+    from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
+
+    D = _NM_WIFI_DASH
+    cmap = _nm_vivid_cmap(True)
+    DBM_NORM = Normalize(-90.0, -35.0)
+    W_ = watcher or _nm_wifi_get_watcher(monitor, state_dir=state_dir)
+    W_.start()
+
+    win = tk.Toplevel()
+    win.title('Wi-Fi Signal')
+    win.configure(bg=D['bg'])
+    win.geometry('1240x800')
+    win.minsize(980, 640)
+    _nm_apply_ttk_theme(win)
+    survey_path = 'wifi_survey.json'
+
+    # survey state (the watcher owns live data; the survey is the window's)
+    _sd = _nm_wifi_load(survey_path, {}, state_dir)
+    if not isinstance(_sd, dict):
+        _sd = {}
+    survey = list(_sd.get('samples', []))
+    plan = dict(_sd.get('plan', {}))
+    plan.setdefault('images', {}); plan.setdefault('routers', {})
+    cursor = {'x': None, 'y': None}
+    mode = {'router': False}
+
+    # ── header ──────────────────────────────────────────────────────────────
+    head = tk.Frame(win, bg=D['bg'])
+    head.pack(fill='x', padx=16, pady=(10, 0))
+    hdr_var = tk.StringVar(value='Looking for your Wi-Fi link…')
+    tk.Label(head, textvariable=hdr_var, bg=D['bg'], fg=D['text'], font=(_NM_MONO, 12, 'bold'),
+             anchor='w').pack(side='left')
+    chip = tk.Label(head, text='CALIBRATING', bg='#1c2b52', fg=D['text2'], font=(_NM_MONO, 9, 'bold'),
+                    padx=10, pady=3)
+    chip.pack(side='right')
+    mode_var = tk.StringVar(value='')
+    tk.Label(head, textvariable=mode_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8)).pack(side='right', padx=10)
+    sub_var = tk.StringVar(value='')
+    tk.Label(win, textvariable=sub_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w',
+             justify='left', wraplength=1180).pack(fill='x', padx=18, pady=(0, 2))
+
+    opts = tk.Frame(win, bg=D['bg'])
+    opts.pack(fill='x', padx=14, pady=(0, 4))
+    away_v = tk.BooleanVar(value=bool(W_.prefs.get('away')))
+    auto_v = tk.BooleanVar(value=int(W_.prefs.get('auto_away_min') or 0) > 0)
+    bg_v = tk.BooleanVar(value=bool(W_.prefs.get('background')))
+    _ttk.Checkbutton(opts, text='Away mode (alert me on movement)', variable=away_v,
+                     command=lambda: W_.set_pref('away', bool(away_v.get()))).pack(side='left', padx=(0, 12))
+    _ttk.Checkbutton(opts, text='Away when PC idle 10 min', variable=auto_v,
+                     command=lambda: W_.set_pref('auto_away_min', 10 if auto_v.get() else 0)).pack(side='left', padx=(0, 12))
+    _ttk.Checkbutton(opts, text='Keep watching when this window is closed', variable=bg_v,
+                     command=lambda: W_.set_pref('background', bool(bg_v.get()))).pack(side='left', padx=(0, 12))
+    _scan_map = {'Gentle (30 s)': 30, 'Normal (12 s)': 12, 'Fast (6 s)': 6}
+    scan_v = tk.StringVar(value={30: 'Gentle (30 s)', 12: 'Normal (12 s)', 6: 'Fast (6 s)'}.get(
+        int(W_.prefs.get('scan_s') or 12), 'Normal (12 s)'))
+    _ttk.Label(opts, text='Network scan').pack(side='left', padx=(0, 4))
+    scan_cb = _ttk.Combobox(opts, textvariable=scan_v, width=14, state='readonly', values=list(_scan_map))
+    scan_cb.pack(side='left')
+    scan_cb.bind('<<ComboboxSelected>>', lambda e: W_.set_pref('scan_s', _scan_map.get(scan_v.get(), 12)))
+
+    def _copy_raw():
+        txt = ('--- netsh wlan show interfaces ---\n' + W_.raw_link + '\n\n--- netsh wlan show networks mode=bssid ---\n'
+               + W_.raw_aps + '\n\n--- state ---\nmode=%s api_err=%s link=%s' % (W_.mode, W_.api_err, W_.link))
+        try:
+            win.clipboard_clear(); win.clipboard_append(txt)
+            sub_var.set('Raw output + state copied to the clipboard — paste it to me if anything looks wrong.')
+        except Exception:
+            _exc_debug('wifi copy raw')
+    _ttk.Button(opts, text='Copy raw output', command=_copy_raw).pack(side='right')
+
+    nb = _ttk.Notebook(win)
+    nb.pack(fill='both', expand=True, padx=12, pady=(0, 10))
+    tab_live = _ttk.Frame(nb); tab_net = _ttk.Frame(nb); tab_act = _ttk.Frame(nb); tab_map = _ttk.Frame(nb)
+    tab_csi = tk.Frame(nb, bg=D['bg'])
+    for tab, txt in ((tab_live, '  Live  '), (tab_net, '  Networks  '), (tab_act, '  Activity  '),
+                     (tab_map, '  Signal map  '), (tab_csi, '  CSI (ESP32)  ')):
+        nb.add(tab, text=txt)
+
+    def _style_ax(a):
+        a.set_facecolor(D['panel'])
+        for sp in a.spines.values():
+            sp.set_color('#26365f')
+        a.tick_params(colors=D['text2'], labelsize=7, length=2)
+        a.grid(True, color='white', alpha=0.06, linewidth=0.6)
+
+    # ── LIVE ────────────────────────────────────────────────────────────────
+    fig_l = _mf.Figure(figsize=(11, 4.6), facecolor=D['bg'])
+    cv_l = FigureCanvasTkAgg(fig_l, master=tab_live)
+    cv_l.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
+    ev_tree = _ttk.Treeview(tab_live, columns=('time', 'kind', 'detail'), show='headings', height=5)
+    for c, w_, t_ in (('time', 90, 'Time'), ('kind', 100, 'Event'), ('detail', 960, 'Detail')):
+        ev_tree.heading(c, text=t_); ev_tree.column(c, width=w_, anchor='w')
+    for k_, col in (('NEW AP', '#ff9a1e'), ('MOVEMENT', '#ff3d2e'), ('ROAM', '#38b8f0'), ('ROGUE', '#ff5c8a'),
+                    ('INFO', '#8fa8cc')):
+        ev_tree.tag_configure(k_, foreground=col)
+    ev_tree.pack(fill='x', padx=8, pady=(0, 6))
+    last_ev = {'id': 0}
+
+    def _sync_events():
+        with W_.lock:
+            evs = [e for e in W_.events if e['id'] > last_ev['id']]
+        for e in evs:
+            ev_tree.insert('', 0, values=(_t.strftime('%H:%M:%S', _t.localtime(e['t'])), e['kind'], e['detail']),
+                           tags=(e['kind'],))
+            last_ev['id'] = e['id']
+        for k in ev_tree.get_children()[300:]:
+            ev_tree.delete(k)
+
+    def _draw_live():
+        fig_l.clear()
+        gs = fig_l.add_gridspec(3, 1, height_ratios=[3, 2, 2], hspace=0.62,
+                                left=0.07, right=0.985, top=0.94, bottom=0.09)
+        a1 = fig_l.add_subplot(gs[0]); a2 = fig_l.add_subplot(gs[1], sharex=a1); a3 = fig_l.add_subplot(gs[2])
+        for a in (a1, a2, a3):
+            _style_ax(a)
+        now = _t.time()
+        with W_.lock:
+            pts = [(t - now, v) for (t, v) in W_.link_hist if now - t <= 300]
+            moves = list(W_.moves) + ([(W_.move_start, now)] if W_.move_start else [])
+            sd = [(t - now, s) for (t, s) in W_.motion.stds if now - t <= 300]
+            thr = W_.motion.thr
+            aps = sorted(W_.aps, key=lambda a: -a['dbm'])[:8]
+            mode_ = W_.mode
+        a1.set_title('Link signal (dBm) — last 5 minutes' + ('  ·  real dBm, ~10/s' if mode_ == 'api' else ''),
+                     loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        a2.set_title('Disturbance (rolling σ of the signal, dB)', loc='left', color=D['text'], fontsize=9,
+                     fontweight='bold')
+        a3.set_title('Which paths are disturbed — swing of each access point in the last minute (experimental)',
+                     loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        a1.set_xlim(-300, 0); a2.set_xlim(-300, 0)
+        if len(pts) >= 2:
+            xs = np.array([p[0] for p in pts]); ys = np.array([p[1] for p in pts])
+            lo = min(ys.min() - 4, -80); hi = max(ys.max() + 4, -40)
+            a1.set_ylim(lo, hi)
+            for k in range(1, 9):
+                a1.fill_between(xs, lo, np.minimum(ys, lo + (ys - lo) * k / 8.0), color='#38b8f0', alpha=0.04, lw=0)
+            a1.plot(xs, ys, color='#bfe6ff', lw=3.0, alpha=0.16)
+            a1.plot(xs, ys, color='#e8f6ff', lw=1.0)
+            a1.scatter([xs[-1]], [ys[-1]], s=22, color='white', zorder=5)
+        else:
+            a1.text(0.5, 0.5, 'waiting for signal samples…', transform=a1.transAxes, ha='center',
+                    color=D['text2'], fontsize=9)
+        for (t0, t1) in moves:
+            for a in (a1, a2):
+                a.axvspan(max(t0 - now, -300), min(t1 - now, 0), color='#ff3d2e', alpha=0.16, lw=0)
+        if len(sd) >= 2:
+            sx = np.array([p[0] for p in sd]); sy = np.array([p[1] for p in sd])
+            a2.fill_between(sx, 0, sy, color='#ff9a1e', alpha=0.25, lw=0)
+            a2.plot(sx, sy, color='#ffb84d', lw=1.1)
+            a2.axhline(thr, color='#ff3d2e', lw=0.9, ls='--', alpha=0.8)
+            a2.text(-298, thr, ' movement threshold', color='#ff6b5a', fontsize=6.5, va='bottom')
+            a2.set_ylim(0, max(2.0, float(sy.max()) * 1.2, thr * 1.3))
+        a2.set_xlabel('seconds ago', color=D['text2'], fontsize=7)
+        if len(aps) >= 2:
+            sw = []
+            for a in aps:
+                st = W_.aptrk.state.get(a['bssid'], {})
+                sw.append(float(st.get('swing', 0.0)))
+            cols = ['#ff3d2e' if a.get('disturbed') else '#38b8f0' for a in aps]
+            a3.bar(range(len(aps)), sw, color=cols, alpha=0.85, width=0.7)
+            a3.set_xticks(range(len(aps)))
+            a3.set_xticklabels([f"{a['ssid'][:9]}\n{a['bssid'][-5:]}" for a in aps], fontsize=6)
+            a3.set_ylabel('dB swing', color=D['text2'], fontsize=7)
+            a3.axhline(6.0, color='#ff3d2e', lw=0.8, ls='--', alpha=0.6)
+        else:
+            a3.text(0.5, 0.5, 'needs two or more access points in range', transform=a3.transAxes, ha='center',
+                    color=D['text2'], fontsize=8)
+        cv_l.draw_idle()
+
+    # ── NETWORKS ────────────────────────────────────────────────────────────
+    cols_n = ('ssid', 'maker', 'bssid', 'band', 'ch', 'dbm', 'bars', 'sec', 'move', 'flag')
+    net_tree = _ttk.Treeview(tab_net, columns=cols_n, show='headings', height=8)
+    for c, w_, t_ in (('ssid', 150, 'Network'), ('maker', 130, 'Made by'), ('bssid', 130, 'BSSID'), ('band', 60, 'Band'),
+                      ('ch', 40, 'Ch'), ('dbm', 55, 'dBm'), ('bars', 70, 'Signal'), ('sec', 120, 'Security'),
+                      ('move', 70, 'Path Δ'), ('flag', 280, 'Note')):
+        net_tree.heading(c, text=t_); net_tree.column(c, width=w_, anchor='w')
+    net_tree.tag_configure('mine', foreground='#2fe07a')
+    net_tree.tag_configure('new', foreground='#ff9a1e')
+    net_tree.tag_configure('rogue', foreground='#ff5c8a')
+    net_tree.pack(fill='x', padx=8, pady=(6, 2))
+    mid = tk.Frame(tab_net, bg=D['bg'])
+    mid.pack(fill='x', padx=8)
+    info_txt = tk.Text(mid, height=9, bg=D['panel'], fg=D['text'], font=(_NM_MONO, 8), relief='flat', wrap='word',
+                       padx=8, pady=6)
+    info_txt.pack(fill='x')
+    for tg, col in (('h', D['accent']), ('good', '#2fe07a'), ('warn', '#ff9a1e'), ('bad', '#ff5c8a'),
+                    ('dim', D['text2'])):
+        info_txt.tag_configure(tg, foreground=col)
+    info_txt.tag_configure('big', font=(_NM_MONO, 14, 'bold'))
+    fig_n = _mf.Figure(figsize=(11, 2.6), facecolor=D['bg'])
+    cv_n = FigureCanvasTkAgg(fig_n, master=tab_net)
+    cv_n.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
+
+    def _bars(dbm):
+        n = int(np.clip(round((dbm + 95) / 11.0), 0, 5))
+        return '▮' * n + '▯' * (5 - n)
+
+    def _draw_nets():
+        with W_.lock:
+            aps = sorted(W_.aps, key=lambda a: -a['dbm'])
+            link = dict(W_.link) if W_.link else None
+            findings = list(W_.findings); health = W_.health; advice = list(W_.advice)
+        mine = (link or {}).get('bssid'); my_ssid = (link or {}).get('ssid')
+        bad = {f['bssid']: f for f in findings if f['sev'] in ('high', 'warn')}
+        net_tree.delete(*net_tree.get_children())
+        for a in aps:
+            flag, tags = '', ()
+            if a['bssid'] == mine:
+                flag, tags = 'connected', ('mine',)
+            elif a['bssid'] in bad:
+                flag, tags = {'high': 'OPEN LOOK-ALIKE', 'warn': 'check this one'}[bad[a['bssid']]['sev']], ('rogue',)
+            elif a.get('_new'):
+                flag, tags = 'new here (not seen in the learning period)', ('new',)
+            if a['bssid'] != mine and my_ssid and a['ssid'] == my_ssid and not tags:
+                flag = 'same name as yours (mesh node?)'
+            net_tree.insert('', 'end', tags=tags, values=(
+                a['ssid'], a.get('maker') or ('virtual / guest address' if int(a['bssid'][:2], 16) & 2 else ''),
+                a['bssid'], a['band'], a.get('channel', ''), f"{a['dbm']:.0f}", _bars(a['dbm']),
+                a.get('auth', ''), ('MOVED' if a.get('disturbed') else f"{a.get('dscore', 0):.1f}"), flag))
+        info_txt.configure(state='normal'); info_txt.delete('1.0', 'end')
+        if health:
+            col = 'good' if health['score'] >= 70 else ('warn' if health['score'] >= 45 else 'bad')
+            info_txt.insert('end', f"Wi-Fi health {health['score']}/100  grade {health['grade']}\n", (col, 'big'))
+            for (nm, pts, mx, note) in health['factors']:
+                info_txt.insert('end', f"  {nm:<20}{pts:5.1f}" + (f" / {mx}" if mx else '      ') + f"   {note}\n", 'dim')
+        else:
+            info_txt.insert('end', 'Health score needs a Wi-Fi link.\n', 'dim')
+        info_txt.insert('end', '\nChannel advice\n', 'h')
+        for ln in advice or ['(no advice yet — waiting for a scan)']:
+            info_txt.insert('end', '  ' + ln + '\n')
+        info_txt.insert('end', '\nSuspicious networks\n', 'h')
+        if findings:
+            for f in findings:
+                info_txt.insert('end', '  ' + f['text'] + '\n', {'high': 'bad', 'warn': 'warn', 'info': 'dim'}[f['sev']])
+        else:
+            info_txt.insert('end', '  none — every network using your name looks consistent with your router.\n', 'good')
+        info_txt.configure(state='disabled')
+        fig_n.clear()
+        axs = fig_n.subplots(1, 2, gridspec_kw={'width_ratios': [1, 1.6]})
+        fig_n.subplots_adjust(left=0.06, right=0.985, top=0.86, bottom=0.2, wspace=0.18)
+        for ax, band in ((axs[0], '2.4 GHz'), (axs[1], '5 GHz')):
+            _style_ax(ax)
+            ax.set_title(band + ' channels', loc='left', color=D['text'], fontsize=9, fontweight='bold')
+            sel = [a for a in aps if a['band'] == band and a.get('channel')]
+            for a in sel:
+                h = max(a['dbm'] + 100.0, 1.0)
+                col = '#2fe07a' if a['bssid'] == mine else cmap(DBM_NORM(a['dbm']))
+                ax.bar(a['channel'], h, width=1.6 if band == '2.4 GHz' else 3.0, color=col, alpha=0.55,
+                       edgecolor=col, lw=1.0)
+            ax.set_ylim(0, 60); ax.set_ylabel('strength', color=D['text2'], fontsize=7)
+            if band == '2.4 GHz':
+                ax.set_xticks(range(1, 14)); ax.set_xlim(0, 14)
+            elif sel:
+                chs = sorted({a['channel'] for a in sel})
+                ax.set_xticks(chs); ax.set_xlim(min(chs) - 3, max(chs) + 3)
+            else:
+                ax.text(0.5, 0.5, 'no 5 GHz networks seen', transform=ax.transAxes, ha='center',
+                        color=D['text2'], fontsize=8)
+        cv_n.draw_idle()
+
+    # ── ACTIVITY ────────────────────────────────────────────────────────────
+    fig_a = _mf.Figure(figsize=(11, 3.6), facecolor=D['bg'])
+    cv_a = FigureCanvasTkAgg(fig_a, master=tab_act)
+    cv_a.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
+    hist_tree = _ttk.Treeview(tab_act, columns=('time', 'kind', 'detail'), show='headings', height=6)
+    for c, w_, t_ in (('time', 150, 'When'), ('kind', 100, 'Event'), ('detail', 920, 'Detail')):
+        hist_tree.heading(c, text=t_); hist_tree.column(c, width=w_, anchor='w')
+    for k_, col in (('NEW AP', '#ff9a1e'), ('MOVEMENT', '#ff3d2e'), ('ROAM', '#38b8f0'), ('ROGUE', '#ff5c8a')):
+        hist_tree.tag_configure(k_, foreground=col)
+    hist_tree.pack(fill='x', padx=8, pady=(0, 6))
+
+    def _draw_activity():
+        fig_a.clear()
+        db = W_.db
+        if db is None:
+            fig_a.text(0.5, 0.5, 'History needs the app database (USE_DB).', ha='center', color=D['text2'])
+            cv_a.draw_idle(); return
+        grid, counts, last24 = _nm_wifi_activity_grid(db, 30)
+        axs = fig_a.subplots(1, 2, gridspec_kw={'width_ratios': [1.7, 1]})
+        fig_a.subplots_adjust(left=0.06, right=0.985, top=0.88, bottom=0.14, wspace=0.16)
+        a1, a2 = axs
+        _style_ax(a1)
+        a1.set_title('Movement by day & hour — % of time movement was detected (last 30 days)', loc='left',
+                     color=D['text'], fontsize=9, fontweight='bold')
+        if np.isfinite(grid).any():
+            try:
+                sm = _nm_heatmap_paint(a1, grid, _nm_theme_ui(monitor), (monitor.colors if monitor is not None
+                                       else THEMES['Ocean']), 'download', True, smooth=True, vivid=True)
+                a1.set_xticks(range(0, 24, 2)); a1.set_xticklabels([f'{h:02d}' for h in range(0, 24, 2)])
+                a1.set_yticks(range(7)); a1.set_yticklabels(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])
+                a1.grid(False)
+                cb = fig_a.colorbar(sm, ax=a1, fraction=0.025, pad=0.02)
+                cb.ax.tick_params(colors=D['text2'], labelsize=6)
+                cb.outline.set_edgecolor('#26365f')
+            except Exception:
+                _exc_debug('wifi activity heat')
+        else:
+            a1.text(0.5, 0.5, 'No history yet — it fills in while the app is running\n'
+                              '(turn on “Keep watching” to record with this window closed).',
+                    transform=a1.transAxes, ha='center', va='center', color=D['text2'], fontsize=9)
+        _style_ax(a2)
+        a2.set_title('Movement minutes per hour — last 24 h', loc='left', color=D['text'], fontsize=9,
+                     fontweight='bold')
+        if last24:
+            vals = [x[1] for x in last24]
+            mx = max(max(vals), 1.0)
+            for i, (hk, s, n) in enumerate(last24):
+                if n:
+                    a2.bar(i, s, color=cmap(min(1.0, s / mx)), alpha=0.9, width=0.8)
+                else:
+                    a2.bar(i, 0.4, color='#26365f', alpha=0.7, width=0.8)
+            a2.set_xticks(range(0, 24, 4)); a2.set_xticklabels([last24[i][0].strftime('%H') for i in range(0, 24, 4)])
+            a2.set_ylim(0, max(2.0, mx * 1.2)); a2.set_ylabel('minutes', color=D['text2'], fontsize=7)
+        cv_a.draw_idle()
+        hist_tree.delete(*hist_tree.get_children())
+        for ts, kind, detail in _nm_wifi_db_events(db, 200):
+            hist_tree.insert('', 'end', values=(ts.replace('T', ' '), kind, detail), tags=(kind,))
+
+    # ── SIGNAL MAP ──────────────────────────────────────────────────────────
+    ctl = tk.Frame(tab_map, bg=D['bg']); ctl.pack(fill='x', padx=8, pady=(6, 0))
+    ctl2 = tk.Frame(tab_map, bg=D['bg']); ctl2.pack(fill='x', padx=8, pady=(2, 2))
+    floor_v = tk.StringVar(value='0'); w_v = tk.StringVar(value=str(plan.get('w', 12)))
+    h_v = tk.StringVar(value=str(plan.get('h', 8))); what_v = tk.StringVar(value='Connected link')
+    td_v = tk.BooleanVar(value=False); dead_v = tk.BooleanVar(value=True)
+    _ttk.Label(ctl, text='Floor').pack(side='left', padx=(0, 4))
+    _ttk.Spinbox(ctl, from_=0, to=9, width=3, textvariable=floor_v, command=lambda: _draw_map()).pack(side='left', padx=(0, 12))
+    _ttk.Label(ctl, text='Plan size (m)').pack(side='left', padx=(0, 4))
+    _ttk.Entry(ctl, textvariable=w_v, width=5).pack(side='left')
+    _ttk.Label(ctl, text='×').pack(side='left', padx=3)
+    _ttk.Entry(ctl, textvariable=h_v, width=5).pack(side='left', padx=(0, 12))
+    _ttk.Label(ctl, text='Show').pack(side='left', padx=(0, 4))
+    what_cb = _ttk.Combobox(ctl, textvariable=what_v, width=34, state='readonly',
+                            values=['Connected link', 'Band comparison (my network)'])
+    what_cb.pack(side='left', padx=(0, 12))
+    map_var = tk.StringVar(value='')
+    fig_m = _mf.Figure(figsize=(8, 4.6), facecolor=D['bg'])
+    cv_m = FigureCanvasTkAgg(fig_m, master=tab_map)
+    _img_cache = {}
+
+    def _plan_wh():
+        try:
+            return max(2.0, float(w_v.get())), max(2.0, float(h_v.get()))
+        except Exception:
+            return 12.0, 8.0
+
+    def _floor():
+        try:
+            return int(float(floor_v.get()))
+        except Exception:
+            return 0
+
+    def _what_map():
+        with W_.lock:
+            return {f"{a['ssid']}  {a['bssid'][-8:]}  ({a['band']})": a['bssid'] for a in W_.aps}
+
+    def _metric_of(s):
+        sel = what_v.get()
+        if sel == 'Connected link':
+            return s.get('link')
+        b = _what_map().get(sel)
+        return (s.get('aps') or {}).get(b) if b else None
+
+    def _save_survey():
+        W, Hh = _plan_wh()
+        plan['w'], plan['h'] = W, Hh
+        _nm_wifi_save(survey_path, {'plan': plan, 'samples': survey}, state_dir)
+
+    def _recent_link(sec=5.0):
+        now = _t.time()
+        with W_.lock:
+            v = [d for (t, d) in W_.link_hist if now - t <= sec]
+        return float(np.mean(v)) if v else None
+
+    def _sample_here():
+        if cursor['x'] is None:
+            map_var.set('Click the floor plan where you are standing first, then press Sample here.')
+            return
+        lk = _recent_link()
+        if lk is None:
+            map_var.set('Not connected to Wi-Fi, so there is no signal to sample.')
+            return
+        with W_.lock:
+            aps = list(W_.aps); link = dict(W_.link) if W_.link else {}
+        apd = {a['bssid']: round(a['dbm'], 1) for a in aps}
+        bands = {}
+        for a in aps:
+            if link.get('ssid') and a['ssid'] == link['ssid'] and a['band'] in ('2.4 GHz', '5 GHz'):
+                k = '2.4' if a['band'] == '2.4 GHz' else '5'
+                bands[k] = max(bands.get(k, -999.0), round(a['dbm'], 1))
+        survey.append({'x': round(cursor['x'], 2), 'y': round(cursor['y'], 2), 'z': _floor(), 'link': round(lk, 1),
+                       'bssid': link.get('bssid'), 't': _t.time(), 'aps': apd, 'bands': bands})
+        _save_survey(); _draw_map()
+
+    def _undo():
+        if survey:
+            survey.pop(); _save_survey(); _draw_map()
+
+    def _clear_floor():
+        f = _floor()
+        survey[:] = [s for s in survey if s['z'] != f]
+        _save_survey(); _draw_map()
+
+    def _load_plan():
+        p = filedialog.askopenfilename(title='Floor plan image', filetypes=[('Images', '*.png *.jpg *.jpeg *.bmp *.gif'),
+                                                                            ('All files', '*.*')])
+        if p:
+            plan['images'][str(_floor())] = p
+            _save_survey(); _draw_map()
+
+    def _clear_plan():
+        plan['images'].pop(str(_floor()), None)
+        _save_survey(); _draw_map()
+
+    def _router_mode():
+        mode['router'] = True
+        map_var.set('Click the plan where your router is.')
+
+    def _export():
+        p = filedialog.asksaveasfilename(defaultextension='.png', filetypes=[('PNG image', '*.png')],
+                                         initialfile='wifi-signal-map.png')
+        if p:
+            try:
+                fig_m.savefig(p, dpi=150, facecolor=fig_m.get_facecolor())
+                map_var.set(f'Saved {p}')
+            except Exception as ex:
+                map_var.set(f'Could not save: {ex}')
+    _ttk.Button(ctl, text='Sample here', style='Accent.TButton', command=_sample_here).pack(side='left', padx=(0, 6))
+    _ttk.Button(ctl, text='Undo', command=_undo).pack(side='left', padx=(0, 6))
+    _ttk.Button(ctl, text='Clear floor', command=_clear_floor).pack(side='left', padx=(0, 12))
+    _ttk.Checkbutton(ctl, text='3D view', variable=td_v, command=lambda: _draw_map()).pack(side='left')
+    _ttk.Button(ctl2, text='Floor plan image…', command=_load_plan).pack(side='left', padx=(0, 6))
+    _ttk.Button(ctl2, text='Remove image', command=_clear_plan).pack(side='left', padx=(0, 12))
+    _ttk.Button(ctl2, text='Place router', command=_router_mode).pack(side='left', padx=(0, 12))
+    _ttk.Checkbutton(ctl2, text='Mark dead spots', variable=dead_v, command=lambda: _draw_map()).pack(side='left', padx=(0, 12))
+    _ttk.Button(ctl2, text='Export PNG…', command=_export).pack(side='left')
+    tk.Label(tab_map, textvariable=map_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w',
+             justify='left', wraplength=1150).pack(fill='x', padx=10)
+    cv_m.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
+    what_cb.bind('<<ComboboxSelected>>', lambda e: _draw_map())
+    _soon = {'job': None}
+
+    def _draw_map_soon(*_a):
+        try:
+            if _soon['job']:
+                win.after_cancel(_soon['job'])
+            _soon['job'] = win.after(400, _draw_map)
+        except Exception:
+            _exc_debug('wifi map soon')
+    w_v.trace_add('write', _draw_map_soon); h_v.trace_add('write', _draw_map_soon)
+
+    def _paint_plan(ax, pts, getter, W, Hh, f, title):
+        """One floor map: image, field, contours, dead spots, dots, router, cursor."""
+        _style_ax(ax)
+        ax.set_xlim(0, W); ax.set_ylim(0, Hh); ax.set_aspect('equal', adjustable='box')
+        ax.set_xlabel('metres', color=D['text2'], fontsize=7)
+        ax.set_title(title, loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        ip = plan['images'].get(str(f))
+        if ip:
+            try:
+                if ip not in _img_cache:
+                    from PIL import Image
+                    _img_cache[ip] = np.asarray(Image.open(ip).convert('RGB'))
+                ax.imshow(_img_cache[ip], extent=(0, W, 0, Hh), origin='upper', aspect='auto', alpha=0.55, zorder=1)
+            except Exception:
+                _exc_debug('wifi plan image')
+        info = ''
+        rt = plan['routers'].get(str(f))
+        if len(pts) >= 3:
+            xs = np.array([s['x'] for s in pts]); ys = np.array([s['y'] for s in pts])
+            vs = np.array([getter(s) for s in pts], float)
+            gx, gy, fld, cov = _nm_wifi_field(xs, ys, vs, W, Hh)
+            rgba = np.asarray(cmap(DBM_NORM(fld)), float)
+            rgba[..., 3] = np.clip(cov, 0, 1) * 0.9
+            ax.imshow(rgba, extent=(0, W, 0, Hh), origin='lower', aspect='auto', interpolation='bicubic', zorder=2)
+            try:
+                m = np.ma.masked_where(cov < 0.35, fld)
+                if m.count() > 6:
+                    ax.contour(gx, gy, m, levels=np.arange(-90, -30, 5), colors='white', linewidths=0.5, alpha=0.3,
+                               zorder=3)
+            except Exception:
+                _exc_debug('wifi map contour')
+            if dead_v.get():
+                ds = _nm_wifi_dead_spots(gx, gy, fld, cov, -75.0, tuple(rt) if rt else None)
+                if ds['regions']:
+                    try:
+                        ax.contourf(gx, gy, ds['mask'].astype(float), levels=[0.5, 1.5], colors='none',
+                                    hatches=['///'], zorder=4)
+                        ax.contour(gx, gy, ds['mask'].astype(float), levels=[0.5], colors='#ff5c8a', linewidths=1.2,
+                                   zorder=4)
+                    except Exception:
+                        _exc_debug('wifi dead hatch')
+                    r0 = ds['regions'][0]
+                    info = (f"Dead spot(s) below -75 dBm: {len(ds['regions'])} area(s), biggest ≈ {r0['area']:.0f} m² "
+                            f"around ({r0['cx']:.1f}, {r0['cy']:.1f}) m, down to {r0['worst']:.0f} dBm.")
+                    if ds['suggest']:
+                        sx, sy = ds['suggest']
+                        ax.scatter([sx], [sy], s=260, marker='*', color='#ffd23f', edgecolors='black', zorder=7)
+                        ax.text(sx, sy - 0.45, 'try a node here', color='#ffd23f', fontsize=7, ha='center', zorder=7)
+                        info += f" Suggestion: put a mesh node / extender near ({sx:.1f}, {sy:.1f}) m."
+                else:
+                    info = 'No dead spots (below -75 dBm) in the surveyed area.'
+        for s in pts:
+            v = getter(s)
+            ax.scatter([s['x']], [s['y']], s=46, color=cmap(DBM_NORM(v)), edgecolors='white', linewidths=0.8, zorder=5)
+            ax.text(s['x'], s['y'] + 0.18, f'{v:.0f}', color='white', fontsize=6, ha='center', zorder=6)
+        if rt:
+            ax.scatter([rt[0]], [rt[1]], s=150, marker='^', color='#38b8f0', edgecolors='white', linewidths=1.2, zorder=8)
+            ax.text(rt[0], rt[1] + 0.35, 'router', color='white', fontsize=7, ha='center', zorder=8)
+        if cursor['x'] is not None:
+            ax.axvline(cursor['x'], color=D['accent'], lw=0.8, alpha=0.7, zorder=4)
+            ax.axhline(cursor['y'], color=D['accent'], lw=0.8, alpha=0.7, zorder=4)
+            ax.scatter([cursor['x']], [cursor['y']], s=120, facecolors='none', edgecolors=D['accent'], linewidths=1.4,
+                       zorder=6)
+        if len(pts) < 3:
+            ax.text(0.5, 0.5, 'Click the plan where you are standing, press “Sample here”,\nthen walk to another spot. '
+                              '3+ samples draw the map.', transform=ax.transAxes, ha='center', va='center',
+                    color=D['text2'], fontsize=9)
+        return info
+
+    def _draw_map():
+        fig_m.clear()
+        W, Hh = _plan_wh(); f = _floor()
+        sm = ScalarMappable(norm=DBM_NORM, cmap=cmap)
+        info = ''
+        sel = what_v.get()
+        if td_v.get():
+            from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+            allp = [s for s in survey if _metric_of(s) is not None]
+            ax = fig_m.add_axes([0.0, 0.02, 0.86, 0.86], projection='3d')
+            ax.set_facecolor(D['bg'])
+            for pane in (ax.xaxis, ax.yaxis, ax.zaxis):
+                try:
+                    pane.set_pane_color((0.05, 0.08, 0.18, 0.6))
+                except Exception:
+                    _exc_debug('wifi 3d pane')
+            if allp:
+                xs = [s['x'] for s in allp]; ys = [s['y'] for s in allp]
+                zs = [s['z'] * 3.0 + 1.0 for s in allp]; vs = [_metric_of(s) for s in allp]
+                ax.scatter(xs, ys, zs, c=[cmap(DBM_NORM(v)) for v in vs], s=90, depthshade=True, edgecolors='white',
+                           linewidths=0.4)
+                for x, y, z in zip(xs, ys, zs):
+                    ax.plot([x, x], [y, y], [0, z], color=(1, 1, 1, 0.12), lw=0.6)
+            for fl, rt in plan['routers'].items():
+                try:
+                    ax.scatter([rt[0]], [rt[1]], [int(fl) * 3.0 + 1.0], s=160, marker='^', color='#38b8f0',
+                               edgecolors='white')
+                except Exception:
+                    _exc_debug('wifi 3d router')
+            zmax = max(3.5, 3.0 * (max([s['z'] for s in allp] + [0]) + 1))
+            ax.set_xlim(0, W); ax.set_ylim(0, Hh); ax.set_zlim(0, zmax)
+            try:
+                ax.set_box_aspect((W, Hh, zmax * 2.2))
+            except Exception:
+                _exc_debug('wifi 3d aspect')
+            ax.set_xlabel('x (m)', color=D['text2'], fontsize=7); ax.set_ylabel('y (m)', color=D['text2'], fontsize=7)
+            ax.set_zlabel('height (m)', color=D['text2'], fontsize=7); ax.tick_params(colors=D['text2'], labelsize=6)
+            ax.set_title(f'Signal survey — {len(allp)} samples, all floors (drag to rotate)', color=D['text'],
+                         fontsize=9, fontweight='bold')
+            cb = fig_m.colorbar(sm, cax=fig_m.add_axes([0.92, 0.15, 0.018, 0.7]))
+        elif sel.startswith('Band comparison'):
+            axs = fig_m.subplots(1, 2)
+            fig_m.subplots_adjust(left=0.05, right=0.9, top=0.9, bottom=0.12, wspace=0.12)
+            parts = []
+            for ax, key, nm in ((axs[0], '2.4', '2.4 GHz'), (axs[1], '5', '5 GHz')):
+                pts = [s for s in survey if s['z'] == f and key in (s.get('bands') or {})]
+                parts.append(f'{nm}: ' + (_paint_plan(ax, pts, lambda s, k=key: s['bands'][k], W, Hh, f,
+                                                      f'Floor {f} — {nm} ({len(pts)} samples)') or 'needs 3+ samples'))
+            info = '   |   '.join(parts)
+            cb = fig_m.colorbar(sm, cax=fig_m.add_axes([0.92, 0.15, 0.015, 0.7]))
+        else:
+            pts = [s for s in survey if s['z'] == f and _metric_of(s) is not None]
+            ax = fig_m.add_subplot(111)
+            info = _paint_plan(ax, pts, _metric_of, W, Hh, f, f'Floor {f} — {len(pts)} samples')
+            cb = fig_m.colorbar(sm, ax=ax, fraction=0.025, pad=0.02)
+        try:
+            cb.set_label('dBm', color=D['text2'], fontsize=7)
+            cb.ax.tick_params(colors=D['text2'], labelsize=6)
+            cb.outline.set_edgecolor('#26365f')
+        except Exception:
+            _exc_debug('wifi map colorbar')
+        if info:
+            map_var.set(info)
+        cv_m.draw_idle()
+
+    def _map_click(ev):
+        if td_v.get() or ev.inaxes is None or ev.xdata is None:
+            return
+        f = _floor()
+        if mode['router'] and ev.button == 1:
+            plan['routers'][str(f)] = [round(float(ev.xdata), 2), round(float(ev.ydata), 2)]
+            mode['router'] = False
+            map_var.set('Router position saved for this floor.')
+            _save_survey()
+        elif ev.button == 3:
+            near = [(((s['x'] - ev.xdata) ** 2 + (s['y'] - ev.ydata) ** 2) ** 0.5, i) for i, s in enumerate(survey)
+                    if s['z'] == f]
+            if near and min(near)[0] < 0.8:
+                survey.pop(min(near)[1]); _save_survey()
+        else:
+            cursor['x'], cursor['y'] = float(ev.xdata), float(ev.ydata)
+        _draw_map()
+    fig_m.canvas.mpl_connect('button_press_event', _map_click)
+
+    # ── refresh loop ────────────────────────────────────────────────────────
+    stop = {'v': False}
+    tick = {'n': 0, 'aps_t': 0.0}
+
+    def _refresh_header():
+        with W_.lock:
+            lk = dict(W_.link) if W_.link else None
+            errs = [e for e in (W_.err_link, W_.err_aps) if e]
+            moving = W_.move_start is not None
+            base = W_.motion.base
+            mode_ = W_.mode
+        if lk:
+            rate = f"   {lk.get('rx') or 0:.0f}/{lk.get('tx') or 0:.0f} Mbps" if (lk.get('rx') or lk.get('tx')) else ''
+            hdr_var.set(f"{lk.get('ssid') or '(hidden)'}   {lk['dbm']:.1f} dBm ({lk['pct']}%)   "
+                        f"ch {lk.get('channel', '?')} · {lk.get('band', '?')}{rate}")
+        else:
+            hdr_var.set('Not connected to Wi-Fi')
+        mode_var.set({'api': 'Windows Wi-Fi API', 'starting': 'starting Wi-Fi API…', 'netsh': 'netsh (fallback)'}.get(mode_, mode_))
+        if lk is None and not errs:
+            sub_var.set('The live graph and movement detector need a Wi-Fi link. The Networks tab can still list '
+                        'access points in range if your PC has a Wi-Fi adapter.')
+        elif errs:
+            sub_var.set(' | '.join(errs)[:400])
+        else:
+            sub_var.set('Signal strength only (no CSI): this sees “something moved between you and the router”, not '
+                        'who or where. Away mode raises an alert when that happens while you are out.')
+        if lk is None:
+            chip.configure(text='NO LINK', bg='#1c2b52', fg=D['text2'])
+        elif moving:
+            chip.configure(text='MOVEMENT', bg='#7a1d12', fg='#ffd5cf')
+        elif base is None:
+            chip.configure(text='CALIBRATING', bg='#1c2b52', fg=D['text2'])
+        else:
+            chip.configure(text='AWAY · QUIET' if W_.is_away() else 'QUIET', bg='#12482b', fg='#c8ffe0')
+
+    def _drain():
+        if stop['v']:
+            return
+        try:
+            _refresh_header()
+            _sync_events()
+            cur = nb.index(nb.select())
+            if cur == 0:
+                _draw_live()
+            if W_.aps_t != tick['aps_t']:
+                tick['aps_t'] = W_.aps_t
+                names = ['Connected link', 'Band comparison (my network)'] + sorted(_what_map())
+                what_cb.configure(values=names)
+                _draw_nets()
+            tick['n'] += 1
+            if cur == 2 and tick['n'] % 20 == 0:
+                _draw_activity()
+        except Exception:
+            _exc('wifi refresh')
+        if not stop['v']:
+            win._nm_after = win.after(1000, _drain)
+
+    def _tab_changed(_e=None):
+        c = nb.index(nb.select())
+        if c == 2:
+            _draw_activity()
+        elif c == 3:
+            _draw_map()
+    nb.bind('<<NotebookTabChanged>>', _tab_changed)
+
+    csi_ctl = _nm_csi_build_tab(tab_csi, D, win, state_dir)
+
+    def _on_destroy(ev):
+        if ev.widget is win:
+            stop['v'] = True
+            try:
+                csi_ctl['close']()
+            except Exception:
+                _exc_debug('csi close')
+            if not W_.prefs.get('background'):
+                W_.stop()
+    win.bind('<Destroy>', _on_destroy, add='+')
+    win._nm_state = {'W': W_, 'survey': survey, 'plan': plan, 'cursor': cursor, 'td': td_v, 'what': what_v,
+                     'event_tree': ev_tree, 'net_tree': net_tree, 'hist_tree': hist_tree, 'nb': nb,
+                     'figs': (fig_l, fig_n, fig_a, fig_m), 'drain': _drain, 'draw_map': _draw_map,
+                     'draw_activity': _draw_activity, 'draw_nets': _draw_nets, 'draw_live': _draw_live,
+                     'sample': _sample_here, 'info': info_txt, 'map_var': map_var, 'mode': mode,
+                     'tick_click': _map_click, 'what_cb': what_cb, 'csi': csi_ctl}
+    _draw_map()
+    _drain()
+    return win
+
+
+
+
+
+# ── Wi-Fi CSI: ESP32 pair over USB serial ────────────────────────────────────
+# CSI (channel state information) is the per-subcarrier amplitude/phase a Wi-Fi
+# receiver measures for every packet. An ordinary PC Wi-Fi card does not expose
+# it; an ESP32 does. Two ESP32 boards: one transmits ~100 packets a second
+# (csi_send), the other receives them and prints each packet's CSI over USB as
+# text (csi_recv). This block reads that text, and turns it into: a subcarrier
+# waterfall, a motion score against an empty-room reference, a "room differs
+# from empty" score, and an experimental breathing-rate estimate.
+#
+# Serial access uses the Windows API through ctypes (and termios elsewhere), so
+# no extra Python package has to be installed or bundled.
+
+_NM_CSI_BAUD = 921600
+
+
+def _nm_csi_parse_line(line):
+    """Parse one esp-csi style line (tolerant of extra/missing header fields):
+    CSI_DATA,id,mac,rssi,rate,sig_mode,mcs,cwb,smoothing,not_sounding,aggregation,stbc,
+    fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,
+    sig_len,rx_state,len,first_word,"[imag0,real0,imag1,real1,...]"
+    Returns None for anything else, for a damaged line, or when the `len` field
+    disagrees with the number of values (a line cut short by a serial glitch)."""
+    if not line or 'CSI_DATA' not in line:
+        return None
+    s = line[line.find('CSI_DATA'):].strip()
+    lb, rb = s.rfind('['), s.rfind(']')
+    if lb < 0 or rb < lb:
+        return None
+    try:
+        raw = [int(x) for x in s[lb + 1:rb].replace(' ', '').split(',') if x != '']
+    except ValueError:
+        return None
+    if len(raw) % 2:
+        raw = raw[:-1]
+    if len(raw) < 16:
+        return None
+    head = s[:lb].rstrip(', "').split(',')
+
+    def gi(k):
+        try:
+            return int(head[k])
+        except (IndexError, ValueError):
+            return None
+    declared = gi(22)
+    if declared is not None and declared != len(raw):
+        return None
+    arr = np.asarray(raw, dtype=float).reshape(-1, 2)          # [imag, real] per subcarrier
+    return {'seq': gi(1), 'mac': head[2].strip() if len(head) > 2 else '', 'rssi': gi(3), 'channel': gi(16),
+            'esp_ts': gi(18), 'n': arr.shape[0], 'amp': np.hypot(arr[:, 0], arr[:, 1]),
+            'phase': np.arctan2(arr[:, 0], arr[:, 1])}
+
+
+# ── serial port (no pyserial needed) ─────────────────────────────────────────
+
+def _nm_csi_list_ports(with_names=True):
+    """[(port, description, likely_esp32)] -- registry for the list, PowerShell for names."""
+    ports = []
+    if _NM_IS_WIN:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'HARDWARE\DEVICEMAP\SERIALCOMM') as k:
+                i = 0
+                while True:
+                    try:
+                        _n, v, _t = winreg.EnumValue(k, i)
+                        ports.append(str(v))
+                        i += 1
+                    except OSError:
+                        break
+        except Exception:
+            _exc_debug('_nm_csi_list_ports registry')
+        names = {}
+        if with_names and ports:
+            rc, out = _nm_run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                               "Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match '\\(COM\\d+\\)' } "
+                               "| ForEach-Object { $_.Name }"], timeout=20)
+            if rc == 0:
+                for ln in out.splitlines():
+                    m = re.search(r'\((COM\d+)\)', ln)
+                    if m:
+                        names[m.group(1)] = ln.strip()
+        res = []
+        for p in sorted(set(ports), key=lambda x: int(re.sub(r'\D', '', x) or 0)):
+            d = names.get(p, '')
+            res.append((p, d or p, bool(re.search(r'cp210|ch34|ch91|ftdi|usb[- ]?serial|uart|esp', d, re.I))))
+        return res
+    import glob
+    for p in sorted(glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*') + glob.glob('/dev/cu.usb*')):
+        ports.append((p, p, True))
+    return ports
+
+
+class _NMSerial:
+    """Minimal blocking serial reader. DTR/RTS are held LOW: on ESP32 dev boards
+    they drive the reset and boot-mode pins, so leaving them asserted can reset the
+    chip or drop it into download mode."""
+
+    def __init__(self, port, baud=_NM_CSI_BAUD):
+        self.port = port
+        self.baud = int(baud)
+        self.h = None
+        self.fd = None
+
+    def open(self):
+        if _NM_IS_WIN:
+            import ctypes
+            from ctypes import wintypes as wt
+            k32 = ctypes.windll.kernel32
+            k32.CreateFileW.restype = ctypes.c_void_p
+            k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD,
+                                        ctypes.c_void_p]
+            h = k32.CreateFileW('\\\\.\\' + self.port, 0xC0000000, 0, None, 3, 0, None)
+            if h in (None, ctypes.c_void_p(-1).value, 0xFFFFFFFF):
+                err = ctypes.get_last_error() or k32.GetLastError()
+                raise OSError(f'cannot open {self.port} (Windows error {err}) -- is another program using it '
+                              f'(Arduino IDE, PuTTY, a flasher)?')
+            self.h = ctypes.c_void_p(h)
+
+            class DCB(ctypes.Structure):
+                _fields_ = [('DCBlength', wt.DWORD), ('BaudRate', wt.DWORD), ('flags', wt.DWORD),
+                            ('wReserved', wt.WORD), ('XonLim', wt.WORD), ('XoffLim', wt.WORD),
+                            ('ByteSize', wt.BYTE), ('Parity', wt.BYTE), ('StopBits', wt.BYTE),
+                            ('XonChar', ctypes.c_char), ('XoffChar', ctypes.c_char), ('ErrorChar', ctypes.c_char),
+                            ('EofChar', ctypes.c_char), ('EvtChar', ctypes.c_char), ('wReserved1', wt.WORD)]
+
+            class TO(ctypes.Structure):
+                _fields_ = [('ReadIntervalTimeout', wt.DWORD), ('ReadTotalTimeoutMultiplier', wt.DWORD),
+                            ('ReadTotalTimeoutConstant', wt.DWORD), ('WriteTotalTimeoutMultiplier', wt.DWORD),
+                            ('WriteTotalTimeoutConstant', wt.DWORD)]
+            k32.SetupComm(self.h, 1 << 16, 1 << 14)
+            d = DCB()
+            d.DCBlength = ctypes.sizeof(d)
+            if not k32.GetCommState(self.h, ctypes.byref(d)):
+                self.close()
+                raise OSError(f'{self.port} is not a serial port')
+            d.BaudRate = self.baud
+            d.ByteSize, d.Parity, d.StopBits = 8, 0, 0
+            d.flags = 0x1                         # fBinary only: no flow control, DTR and RTS disabled
+            if not k32.SetCommState(self.h, ctypes.byref(d)):
+                self.close()
+                raise OSError(f'{self.port}: could not set {self.baud} baud')
+            to = TO(0xFFFFFFFF, 0xFFFFFFFF, 50, 0, 0)       # return at once with data, else wait up to 50 ms
+            k32.SetCommTimeouts(self.h, ctypes.byref(to))
+            k32.EscapeCommFunction(self.h, 6)             # CLRDTR
+            k32.EscapeCommFunction(self.h, 4)             # CLRRTS
+            return
+        import termios, tty
+        self.fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            tty.setraw(self.fd)
+            attrs = termios.tcgetattr(self.fd)
+            sp = getattr(termios, 'B%d' % self.baud, None)
+            if sp is not None:
+                attrs[4] = attrs[5] = sp
+                termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+        except Exception:
+            pass                                       # a pty (tests) has no baud rate
+
+    def read(self, n=8192):
+        """Up to n bytes; b'' after a 50 ms quiet period. Raises OSError if the port vanished."""
+        if _NM_IS_WIN:
+            import ctypes
+            from ctypes import wintypes as wt
+            k32 = ctypes.windll.kernel32
+            buf = ctypes.create_string_buffer(n)
+            got = wt.DWORD(0)
+            if not k32.ReadFile(self.h, buf, n, ctypes.byref(got), None):
+                raise OSError(f'{self.port}: read failed (unplugged?)')
+            return buf.raw[:got.value]
+        import select
+        r, _w, _x = select.select([self.fd], [], [], 0.05)
+        if not r:
+            return b''
+        try:
+            return os.read(self.fd, n)
+        except BlockingIOError:
+            return b''
+
+    def close(self):
+        try:
+            if _NM_IS_WIN and self.h is not None:
+                import ctypes
+                ctypes.windll.kernel32.CloseHandle(self.h)
+            elif self.fd is not None:
+                os.close(self.fd)
+        except Exception:
+            _exc_debug('_NMSerial.close')
+        self.h = None
+        self.fd = None
+
+
+# ── simulated feed (clearly labelled in the UI; also what the tests drive) ───
+
+class _NMCsiSim:
+    """Generates esp-csi style text lines for a made-up room, so the tab can be tried
+    (and tested) without hardware. States: 'empty', 'walking', 'still' (a person sitting
+    still, breathing at `bpm`)."""
+
+    NULLS = [0] + list(range(27, 38))
+
+    def __init__(self, seed=1, bpm=15.0):
+        rs = np.random.RandomState(seed)
+        self.rs = rs
+        k = np.arange(64)
+        base = 34 + 14 * np.sin(k / 5.0 + 0.7) + 9 * np.sin(k / 2.3) + rs.uniform(-3, 3, 64)
+        self.base = np.clip(base, 14, 62)
+        self.base[self.NULLS] = 0.0
+        self.th_b = rs.uniform(0, 2 * np.pi, 64)
+        self.fw = rs.uniform(0.7, 3.2, 64)
+        self.th_w = rs.uniform(0, 2 * np.pi, 64)
+        self.bpm = bpm
+        self.state = 'empty'
+        self.seq = 0
+
+    def frame(self, t):
+        rs = self.rs
+        a = self.base.copy()
+        if self.state == 'walking':
+            a *= 1 + 0.16 * np.sin(2 * np.pi * self.fw * t + self.th_w) * rs.uniform(0.5, 1.2)
+        elif self.state == 'still':
+            a *= 1 + 0.035 * np.sin(2 * np.pi * (self.bpm / 60.0) * t + self.th_b)
+        a *= rs.normal(1.0, 0.07)                       # AGC gain differs packet to packet
+        ph = rs.uniform(-np.pi, np.pi) + np.linspace(-1, 1, 64) * rs.normal(0, 0.3)
+        re = np.clip(np.round(a * np.cos(ph) + rs.normal(0, 0.5, 64)), -127, 127).astype(int)
+        im = np.clip(np.round(a * np.sin(ph) + rs.normal(0, 0.5, 64)), -127, 127).astype(int)
+        re[self.NULLS] = 0
+        im[self.NULLS] = 0
+        vals = ','.join(f'{int(i)},{int(r)}' for i, r in zip(im, re))
+        self.seq += 1
+        rssi = int(-48 + rs.randint(-2, 3))
+        return (f'CSI_DATA,{self.seq},1a:00:00:00:00:01,{rssi},11,0,0,0,1,1,0,0,0,0,-92,0,11,0,'
+                f'{int(t * 1e6) & 0x7fffffff},0,0,0,128,0,"[{vals}]"')
+
+
+class _NMCsiAnalyzer:
+    """Feeds on (time, amplitude-vector) frames."""
+
+    def __init__(self, win_s=1.0, base_s=120.0):
+        from collections import deque
+        self.win_s = win_s
+        self.base_s = base_s
+        self.t = deque(maxlen=6000)
+        self.X = deque(maxlen=6000)             # gain-normalised amplitudes
+        self.lvl = deque(maxlen=600)            # (t, mean raw amplitude)
+        self.rssi = deque(maxlen=600)
+        self.turb = deque(maxlen=2400)          # (t, turbulence)
+        self.dev = deque(maxlen=600)            # (t, deviation of the recent profile from the empty one)
+        self.n_sc = None
+        self.valid = None
+        self.mismatch = 0
+        self.frames = 0
+        self.empty = None                       # {'mean', 'mu', 'sd', 'dmu', 'dsd', 'n', 'when'}
+        self.cal = None
+        self.moving = False
+        self._last_hot = -1e9
+        self._last_turb_t = -1e9
+        self._last_dev_t = -1e9
+        self.state = {'moving': False, 'turb': None, 'mu': None, 'thr': None, 'score': 0.0, 'z': 0.0,
+                      'calibrated': False, 'ready': False}
+        self.breath = {'bpm': None, 'snr': 0.0, 'freqs': None, 'power': None, 'why': 'collecting data (needs ~25 s)'}
+        self._last_breath_t = -1e9
+
+    # ── calibration ───────────────────────────────────────────────────────
+    def start_calibration(self, t, dur=20.0):
+        self.cal = {'t0': t, 'dur': dur, 'turb': [], 'vecs': [], 'dev_src': []}
+
+    def clear_calibration(self):
+        self.empty = None
+        self.cal = None
+        self.dev.clear()
+
+    def cal_progress(self, t):
+        if not self.cal:
+            return None
+        return max(0.0, min(1.0, (t - self.cal['t0']) / self.cal['dur']))
+
+    def _finish_cal(self):
+        c, self.cal = self.cal, None
+        if len(c['turb']) < 15 or len(c['vecs']) < 30:
+            return False
+        tv = np.asarray(c['turb'])
+        mu = float(np.median(tv))
+        sd = max(1.4826 * float(np.median(np.abs(tv - mu))), 0.02 * mu, 1e-4)
+        V = np.asarray(c['vecs'])
+        mean = V.mean(axis=0)
+        ds = []
+        for i in range(0, max(1, len(V) - 50), 10):
+            seg = V[i:i + 50].mean(axis=0)
+            ds.append(float(np.linalg.norm(seg - mean) / (np.linalg.norm(mean) + 1e-9)))
+        ds = np.asarray(ds) if ds else np.asarray([0.0])
+        self.empty = {'mean': mean, 'mu': mu, 'sd': sd, 'dmu': float(np.median(ds)),
+                      'dsd': max(float(np.std(ds)), 0.004), 'n': len(V), 'when': time.time()}
+        self.dev.clear()
+        return True
+
+    # ── per frame ─────────────────────────────────────────────────────────
+    def add(self, t, amp, rssi=None):
+        amp = np.asarray(amp, float)
+        if self.n_sc is None:
+            self.n_sc = len(amp)
+        if len(amp) != self.n_sc:
+            self.mismatch += 1
+            return
+        self.frames += 1
+        if rssi is not None:
+            self.rssi.append((t, rssi))
+        if self.valid is None or self.frames % 200 == 0:
+            src = np.asarray(list(self.X)[-100:]) if len(self.X) >= 20 else amp[None, :]
+            m = src.mean(axis=0)
+            v = m > 0.2 * m.max()               # guard-band / DC subcarriers carry (almost) nothing
+            self.valid = v if v.sum() >= 8 else np.ones(self.n_sc, bool)
+        valid = self.valid
+        lvl = float(amp[valid].mean())
+        self.lvl.append((t, lvl))
+        x = amp / max(lvl, 1e-6)                # removes the per-packet gain wobble
+        self.t.append(t)
+        self.X.append(x)
+        if self.cal is not None:
+            self.cal['vecs'].append(x)
+        if t - self._last_turb_t >= 0.099 and len(self.t) >= 8:
+            self._last_turb_t = t
+            self._update_turb(t)
+        if t - self._last_dev_t >= 1.0:
+            self._last_dev_t = t
+            self._update_dev(t)
+        if self.cal is not None and t - self.cal['t0'] >= self.cal['dur']:
+            self._finish_cal()
+        if t - self._last_breath_t >= 2.0:
+            self._last_breath_t = t
+            self._update_breath(t)
+
+    def _window(self, t, sec):
+        n = 0
+        for tt in reversed(self.t):
+            if t - tt > sec:
+                break
+            n += 1
+        if n == 0:
+            return None
+        X = np.asarray(list(self.X)[-n:])
+        return X
+
+    def _update_turb(self, t):
+        X = self._window(t, self.win_s)
+        if X is None or X.shape[0] < 8:
+            return
+        Xv = X[:, self.valid]
+        m = np.maximum(Xv.mean(axis=0), 1e-6)
+        turb = float(np.mean(Xv.std(axis=0) / m))
+        self.turb.append((t, turb))
+        if self.cal is not None:
+            self.cal['turb'].append(turb)
+        s = self.state
+        s['turb'] = turb
+        if self.empty is not None:
+            mu, sd = self.empty['mu'], self.empty['sd']
+            thr = mu + max(5.0 * sd, 0.30 * mu)
+            s['calibrated'] = True
+            s['ready'] = True
+        else:
+            tv = [v for (tt, v) in self.turb if t - tt <= self.base_s]
+            s['calibrated'] = False
+            if len(tv) < 200:
+                s['ready'] = False
+                s['mu'], s['thr'] = None, None
+                return
+            mu = float(np.percentile(tv, 25))
+            sd = max(1.4826 * float(np.median(np.abs(np.asarray(tv) - np.median(tv)))), 0.02 * mu, 1e-4)
+            thr = mu + max(6.0 * sd, 0.45 * mu)
+            s['ready'] = True
+        s['mu'], s['thr'] = mu, thr
+        z = (turb - mu) / max(thr - mu, 1e-9)
+        s['z'] = z
+        s['score'] = float(max(0.0, min(100.0, 50.0 * z)))
+        if turb >= thr:
+            self._last_hot = t
+            self.moving = True
+        elif self.moving and t - self._last_hot > 3.0 and turb < mu + 0.8 * (thr - mu):
+            self.moving = False
+        s['moving'] = self.moving
+
+    def _update_dev(self, t):
+        if self.empty is None:
+            return
+        X = self._window(t, 5.0)
+        if X is None or X.shape[0] < 20:
+            return
+        mean = X.mean(axis=0)
+        e = self.empty['mean']
+        d = float(np.linalg.norm(mean - e) / (np.linalg.norm(e) + 1e-9))
+        self.dev.append((t, d))
+
+    def room_state(self, t=None):
+        """('match'|'differs'|None, deviation, threshold)."""
+        if self.empty is None or not self.dev:
+            return None, None, None
+        e = self.empty
+        thr = e['dmu'] + max(5.0 * e['dsd'], 0.5 * e['dmu'] + 0.01)
+        d = self.dev[-1][1]
+        return ('differs' if d > thr else 'match'), d, thr
+
+    # ── breathing ─────────────────────────────────────────────────────────
+    def _update_breath(self, t, win=30.0, fs=10.0):
+        """Breathing rate from the dominant slow rhythm across all subcarriers. Slow room
+        drift also lives at these frequencies, so a rate is only reported when the peak
+        (1) is a real local maximum inside 9-30 breaths/min, (2) stands well above the
+        band, and (3) shows up at the same rate in both halves of the window. Anything
+        weaker is reported as 'no clear rhythm' rather than guessed."""
+        b = self.breath
+        if len(self.t) < 100 or t - self.t[0] < 25.0:
+            b.update(bpm=None, snr=0.0, freqs=None, power=None, why='collecting data (needs ~25 s)')
+            return
+        tt = np.asarray(self.t)
+        sel = tt >= t - win
+        if sel.sum() < 100:
+            b.update(bpm=None, snr=0.0, freqs=None, power=None, why='too few packets (needs ≥ 5 per second)')
+            return
+        ts = tt[sel]
+        if float(np.median(np.diff(ts))) > 0.2:
+            b.update(bpm=None, snr=0.0, freqs=None, power=None, why='packet rate too low (needs ≥ 5 per second)')
+            return
+        X = np.asarray(list(self.X))[sel][:, self.valid]
+        grid = np.arange(ts[0], ts[-1], 1.0 / fs)
+        if len(grid) < 150:
+            return
+        Y = np.stack([np.interp(grid, ts, X[:, j]) for j in range(X.shape[1])], axis=1)
+        Y = Y - Y.mean(axis=0)
+        k = int(fs * 6)                          # high-pass: take out anything slower than ~6 s
+        ker = np.ones(k) / k
+        Y = Y - np.stack([np.convolve(np.pad(Y[:, j], (k // 2, k - k // 2 - 1), mode='edge'), ker, mode='valid')
+                          for j in range(Y.shape[1])], axis=1)
+        U, S, Vt = np.linalg.svd(Y, full_matrices=False)
+        FLO, FHI = 0.15, 0.5
+
+        def spec(sig, n_target):
+            nfft = 1 << int(np.ceil(np.log2(n_target * 8)))
+            fr = np.fft.rfftfreq(nfft, 1.0 / fs)
+            p = np.abs(np.fft.rfft((sig - sig.mean()) * np.hanning(len(sig)), nfft)) ** 2
+            bd = (fr >= FLO) & (fr <= FHI)
+            return fr[bd], p[bd]
+
+        def peak(fr, pb):
+            """(freq, ratio-to-median) of the strongest INTERIOR, SHARP local maximum, else None."""
+            if len(pb) < 5:
+                return None
+            ok = np.zeros(len(pb), bool)
+            ok[2:-2] = (pb[2:-2] >= pb[1:-3]) & (pb[2:-2] >= pb[3:-1]) & (pb[2:-2] > pb[:-4]) & (pb[2:-2] > pb[4:])
+            if not ok.any():
+                return None
+            i = int(np.argmax(np.where(ok, pb, -1.0)))
+            near = np.abs(fr - fr[i]) <= 0.06
+            conc = float(pb[near].sum() / (pb.sum() + 1e-12))       # a breathing line is sharp; drift is a broad hump
+            if conc < 0.55:
+                return None
+            return float(fr[i]), float(pb[i] / (np.median(pb) + 1e-12))
+        best = None
+        half = len(grid) * 2 // 3
+        for c in range(min(3, U.shape[1])):
+            sig = U[:, c] * S[c]
+            fr, pb = spec(sig, len(sig))
+            pk = peak(fr, pb)
+            if pk is None:
+                continue
+            f1 = peak(*spec(sig[:half], half))
+            f2 = peak(*spec(sig[-half:], half))
+            stable = (f1 is not None and f2 is not None and abs(f1[0] - pk[0]) <= 0.045
+                      and abs(f2[0] - pk[0]) <= 0.045)
+            if best is None or (stable, pk[1]) > (best[0], best[1]):
+                best = (stable, pk[1], pk[0], fr, pb)
+        if best is None:
+            b.update(bpm=None, snr=0.0, freqs=None, power=None, why='no clear breathing rhythm')
+            return
+        stable, snr, f0, fr, pb = best
+        quiet = True
+        mv = [v for (tx, v) in self.turb if tx >= t - win]
+        thr = self.state.get('thr')
+        if mv and thr is not None:
+            quiet = (np.mean(np.asarray(mv) >= thr) < 0.05)
+        b['freqs'], b['power'], b['snr'] = fr, pb / (pb.max() + 1e-12), snr
+        if not quiet:
+            b.update(bpm=None, why='too much movement for a breathing estimate — sit still for 30 s')
+        elif snr < 25.0 or not stable:
+            b.update(bpm=None, why=f'no clear breathing rhythm (best peak {snr:.0f}× background, '
+                                   f'{"steady" if stable else "not steady"}; needs ≥ 25× and steady)')
+        else:
+            b.update(bpm=float(60.0 * f0), why='')
+
+    # ── read side ─────────────────────────────────────────────────────────
+    def rate(self, t):
+        n = sum(1 for tt in reversed(self.t) if t - tt <= 2.0)
+        return n / 2.0
+
+    def waterfall(self, t, sec=30.0, rows=120):
+        """rows x n_sc matrix of per-subcarrier z-scores (blank rows = no data yet)."""
+        out = np.full((rows, self.n_sc or 64), np.nan)
+        if len(self.t) < 5:
+            return out
+        tt = np.asarray(self.t)
+        X = np.asarray(list(self.X))
+        grid = np.linspace(t - sec, t, rows)
+        idx = np.searchsorted(tt, grid, side='right') - 1          # latest frame at or before each row
+        ok = (idx >= 0) & (grid >= tt[0])
+        Z = X[np.clip(idx, 0, len(tt) - 1)]
+        mu = X[-min(len(X), 600):].mean(axis=0)
+        sd = X[-min(len(X), 600):].std(axis=0) + 1e-3
+        Z = (Z - mu) / sd
+        out[ok] = Z[ok]
+        if self.valid is not None:
+            out[:, ~self.valid] = np.nan
+        return out
+
+    def snapshot(self, t):
+        s = dict(self.state)
+        rs, d, thr = self.room_state()
+        s.update(rate=self.rate(t), rssi=(self.rssi[-1][1] if self.rssi else None), frames=self.frames,
+                 n_sc=self.n_sc, room=rs, dev=d, dev_thr=thr, breath=dict(self.breath),
+                 cal=self.cal_progress(t), mismatch=self.mismatch)
+        return s
+
+
+class _NMCsiSource:
+    """Reads lines from a serial port (or the simulator) on a thread and feeds the analyzer."""
+
+    def __init__(self, analyzer, port=None, baud=_NM_CSI_BAUD, sim=None, serial_cls=None, clock=None):
+        import threading
+        from collections import deque
+        self.an = analyzer
+        self.port = port
+        self.baud = baud
+        self.sim = sim
+        self.serial_cls = serial_cls or _NMSerial
+        self.clock = clock or time.time
+        self.raw = deque(maxlen=6000)           # (t, line) -- CSI lines
+        self.log = deque(maxlen=300)            # (t, line) -- everything else the board printed
+        self.bytes = 0
+        self.lines = 0
+        self.bad = 0
+        self.error = ''
+        self.t_start = 0.0
+        self.t_last_byte = 0.0
+        self.t_last_csi = 0.0
+        self.macs = {}
+        self.stop_ev = threading.Event()
+        self.thread = None
+        self.lock = threading.Lock()
+
+    def start(self):
+        import threading
+        self.stop_ev.clear()
+        self.t_start = self.clock()
+        self.thread = threading.Thread(target=self._run_sim if self.sim is not None else self._run_serial,
+                                       daemon=True, name='nm-csi')
+        self.thread.start()
+
+    def stop(self):
+        self.stop_ev.set()
+
+    def alive(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def feed_line(self, line, t=None):
+        t = self.clock() if t is None else t
+        self.lines += 1
+        p = _nm_csi_parse_line(line)
+        if p is None:
+            if 'CSI_DATA' in line:
+                self.bad += 1
+            elif line.strip():
+                self.log.append((t, line.strip()[:300]))
+            return
+        self.raw.append((t, line))
+        self.t_last_csi = t
+        self.macs[p['mac']] = self.macs.get(p['mac'], 0) + 1
+        with self.lock:
+            self.an.add(t, p['amp'], p['rssi'])
+
+    def _run_sim(self):
+        t0 = self.clock()
+        n = 0
+        while not self.stop_ev.is_set():
+            now = self.clock()
+            due = int((now - t0) * 100.0)
+            while n < due and not self.stop_ev.is_set():
+                tt = t0 + n / 100.0
+                self.t_last_byte = tt
+                self.feed_line(self.sim.frame(tt - t0), tt)
+                n += 1
+            self.stop_ev.wait(0.02)
+
+    def _run_serial(self):
+        ser = None
+        try:
+            ser = self.serial_cls(self.port, self.baud)
+            ser.open()
+        except Exception as ex:
+            self.error = str(ex)
+            return
+        buf = b''
+        try:
+            while not self.stop_ev.is_set():
+                chunk = ser.read(8192)
+                if chunk:
+                    self.bytes += len(chunk)
+                    self.t_last_byte = self.clock()
+                    buf += chunk
+                    if len(buf) > 400000:
+                        buf = buf[-100000:]
+                    while True:
+                        i = buf.find(b'\n')
+                        if i < 0:
+                            break
+                        ln, buf = buf[:i], buf[i + 1:]
+                        self.feed_line(ln.decode('utf-8', 'replace').rstrip('\r'))
+        except Exception as ex:
+            self.error = str(ex)
+        finally:
+            if ser is not None:
+                ser.close()
+
+    def hint(self):
+        """Plain-language reason nothing is arriving, else ''."""
+        now = self.clock()
+        if self.error:
+            return self.error
+        if self.sim is not None or now - self.t_start < 4.0:
+            return ''
+        if self.bytes == 0:
+            return ('Nothing is coming from this port. Check: the right COM port, baud ' + str(self.baud) +
+                    ', and that this board is flashed with the csi_recv firmware (press its EN/RESET button '
+                    'once to restart it).')
+        if self.t_last_csi == 0.0:
+            last = self.log[-1][1] if self.log else ''
+            return ('The board is talking but sending no CSI lines. It is probably not running csi_recv, or '
+                    'csi_send is not powered. Last thing it printed: ' + last[:120])
+        if now - self.t_last_csi > 4.0:
+            return 'CSI stopped arriving — is the transmitter (csi_send) board still powered and in range?'
+        return ''
+
+    def copy_text(self, seconds=20.0):
+        now = self.clock()
+        rows = [ln for (t, ln) in list(self.raw) if now - t <= seconds]
+        return '\n'.join(rows)
+
+
+
+# ── Wi-Fi window: CSI (ESP32) tab ────────────────────────────────────────────
+
+def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None):
+    """Builds the CSI tab inside `parent`. Returns a controller dict (also used by tests)."""
+    import tkinter as tk
+    from tkinter import ttk as _ttk
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    import matplotlib.figure as _mf
+
+    clock = clock or time.time
+    cmap = _nm_vivid_cmap(True)
+    prefs = _nm_wifi_load('csi_prefs.json', {}, state_dir)
+    if not isinstance(prefs, dict):
+        prefs = {}
+    S = {'an': _NMCsiAnalyzer(), 'src': None, 'sim': None, 'ports': [], 'cal_after': None, 'dead': False,
+         'last_draw': 0.0}
+    SCEN = {'Empty room': 'empty', 'Someone walking about': 'walking',
+            'Someone sitting still (15 breaths/min)': 'still'}
+
+    top = tk.Frame(parent, bg=D['bg'])
+    top.pack(fill='x', padx=10, pady=(8, 2))
+    tk.Label(top, text='Receiver board', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='left')
+    port_var = tk.StringVar(value=prefs.get('port', ''))
+    port_cb = _ttk.Combobox(top, textvariable=port_var, width=46, state='readonly')
+    port_cb.pack(side='left', padx=(6, 4))
+    baud_var = tk.StringVar(value=str(prefs.get('baud', _NM_CSI_BAUD)))
+    conn_btn = _ttk.Button(top, text='Connect')
+    ref_btn = _ttk.Button(top, text='Refresh')
+    ref_btn.pack(side='left')
+    tk.Label(top, text='baud', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='left', padx=(10, 2))
+    _ttk.Combobox(top, textvariable=baud_var, width=8, values=('115200', '460800', '921600', '1500000', '2000000')
+                  ).pack(side='left')
+    conn_btn.pack(side='left', padx=8)
+    tk.Frame(top, bg='#26365f', width=1, height=18).pack(side='left', padx=8)
+    scen_var = tk.StringVar(value='Someone walking about')
+    scen_cb = _ttk.Combobox(top, textvariable=scen_var, width=36, state='readonly', values=list(SCEN))
+    demo_btn = _ttk.Button(top, text='Try demo (simulated)')
+    demo_btn.pack(side='left')
+    scen_cb.pack(side='left', padx=6)
+    badge = tk.Label(top, text='', bg=D['bg'], fg=D['bg'], font=(_NM_MONO, 9, 'bold'), padx=8)
+    badge.pack(side='right')
+
+    mid = tk.Frame(parent, bg=D['bg'])
+    mid.pack(fill='x', padx=10, pady=2)
+    chip_m = tk.Label(mid, text='NOT CONNECTED', bg='#1c2b52', fg=D['text2'], font=(_NM_MONO, 10, 'bold'), padx=12, pady=4)
+    chip_m.pack(side='left')
+    chip_r = tk.Label(mid, text='ROOM: no reference', bg='#1c2b52', fg=D['text2'], font=(_NM_MONO, 10, 'bold'),
+                      padx=12, pady=4)
+    chip_r.pack(side='left', padx=8)
+    breath_var = tk.StringVar(value='breathing: —')
+    tk.Label(mid, textvariable=breath_var, bg=D['bg'], fg=D['text'], font=(_NM_MONO, 12, 'bold')).pack(side='left',
+                                                                                                       padx=12)
+    stats_var = tk.StringVar(value='')
+    tk.Label(mid, textvariable=stats_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='right')
+
+    bar = tk.Frame(parent, bg=D['bg'])
+    bar.pack(fill='x', padx=10, pady=2)
+    cal_btn = _ttk.Button(bar, text='Calibrate empty room (10 s to leave, then 20 s)')
+    cal_btn.pack(side='left')
+    clr_btn = _ttk.Button(bar, text='Clear calibration')
+    clr_btn.pack(side='left', padx=6)
+    cal_var = tk.StringVar(value='')
+    tk.Label(bar, textvariable=cal_var, bg=D['bg'], fg=D['warn'], font=(_NM_MONO, 9)).pack(side='left', padx=8)
+    copy_btn = _ttk.Button(bar, text='Copy raw data (last 20 s)')
+    copy_btn.pack(side='right')
+    log_btn = _ttk.Button(bar, text='Copy board messages')
+    log_btn.pack(side='right', padx=6)
+
+    hint_var = tk.StringVar(value='')
+    hint_lbl = tk.Label(parent, textvariable=hint_var, bg=D['bg'], fg=D['warn'], font=(_NM_MONO, 9), anchor='w',
+                        justify='left', wraplength=1100)
+    hint_lbl.pack(fill='x', padx=12, pady=(2, 0))
+
+    fig = _mf.Figure(figsize=(11, 4.6), facecolor=D['bg'])
+    cv = FigureCanvasTkAgg(fig, master=parent)
+    cv.get_tk_widget().pack(fill='both', expand=True, padx=8, pady=(2, 2))
+    tk.Label(parent, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w', justify='left', wraplength=1150,
+             text=('How to read this: each row of the waterfall is one moment, each column one Wi-Fi subcarrier; bands of '
+                   'colour that shift mean the radio path between the two boards is changing. MOTION compares the last '
+                   'second to a quiet baseline. ROOM compares the average pattern to the empty-room reference you '
+                   'calibrated, so it can notice that something is different even when nothing is moving. BREATHING is '
+                   'experimental: it only reports a rate when someone sits still near the line between the boards for '
+                   '30 s and a steady rhythm stands clear of the background. It detects movement and change, not who or '
+                   'how many. For your own home, with the people there aware of it.')
+             ).pack(fill='x', padx=12, pady=(0, 6))
+
+    def _style_ax(a):
+        a.set_facecolor(D['panel'])
+        for sp in a.spines.values():
+            sp.set_color('#26365f')
+        a.tick_params(colors=D['text2'], labelsize=7, length=2)
+        a.grid(True, color='white', alpha=0.06, linewidth=0.6)
+
+    def _save_prefs():
+        _nm_wifi_save('csi_prefs.json', {'port': port_var.get(), 'baud': baud_var.get()}, state_dir)
+
+    def _fill_ports(ports):
+        S['ports'] = ports
+        vals = [f"{p}  —  {d if d != p else 'serial port'}{'  ★' if esp else ''}" for (p, d, esp) in ports]
+        port_cb.configure(values=vals)
+        cur = port_var.get()
+        if cur and any(v.startswith(cur + ' ') for v in vals):
+            port_var.set(next(v for v in vals if v.startswith(cur + ' ')))
+        elif vals:
+            star = [v for v, pp in zip(vals, ports) if pp[2]]
+            port_var.set((star or vals)[0])
+        else:
+            port_var.set('')
+        if not ports:
+            hint_var.set('No serial ports found. Plug the receiver ESP32 in with a data-capable USB cable '
+                         '(some cables are charge-only), then press Refresh.')
+        elif hint_var.get().startswith('No serial ports'):
+            hint_var.set('')
+
+    def _refresh_ports():
+        import threading
+
+        def work():
+            try:
+                ports = _nm_csi_list_ports()
+            except Exception:
+                _exc_debug('csi list ports')
+                ports = []
+            try:
+                if not S['dead']:
+                    win.after(0, lambda: _fill_ports(ports))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _port_name():
+        v = port_var.get().strip()
+        return v.split()[0] if v else ''
+
+    def _stop():
+        if S['src'] is not None:
+            S['src'].stop()
+        S['src'] = None
+        S['sim'] = None
+        conn_btn.configure(text='Connect')
+        demo_btn.configure(text='Try demo (simulated)')
+        badge.configure(text='', bg=D['bg'])
+
+    def _begin(sim=None):
+        _stop()
+        S['an'] = _NMCsiAnalyzer()
+        S['cal_after'] = None
+        cal_var.set('')
+        if sim is not None:
+            S['sim'] = sim
+            S['src'] = _NMCsiSource(S['an'], sim=sim, clock=clock)
+            badge.configure(text='SIMULATED — not real data', bg='#7a4a00', fg='#ffe6b0')
+            demo_btn.configure(text='Stop demo')
+        else:
+            port = _port_name()
+            if not port:
+                hint_var.set('Pick a serial port first (press Refresh if the list is empty).')
+                return
+            try:
+                baud = int(baud_var.get())
+            except ValueError:
+                baud = _NM_CSI_BAUD
+            _save_prefs()
+            S['src'] = _NMCsiSource(S['an'], port=port, baud=baud, clock=clock)
+            conn_btn.configure(text='Disconnect')
+            badge.configure(text='LIVE', bg='#12482b', fg='#c8ffe0')
+        hint_var.set('')
+        S['src'].start()
+
+    def _toggle_conn():
+        if S['src'] is not None and S['sim'] is None:
+            _stop()
+        else:
+            _begin()
+
+    def _toggle_demo():
+        if S['sim'] is not None:
+            _stop()
+        else:
+            sim = _NMCsiSim(seed=int(clock()) & 0xffff)
+            sim.state = SCEN.get(scen_var.get(), 'walking')
+            _begin(sim)
+
+    def _scen_changed(_e=None):
+        if S['sim'] is not None:
+            S['sim'].state = SCEN.get(scen_var.get(), 'walking')
+
+    def _calibrate():
+        if S['src'] is None:
+            hint_var.set('Connect the receiver (or start the demo) first, then calibrate.')
+            return
+        S['cal_after'] = clock() + 10.0
+        cal_var.set('Leave the room now — calibration starts in 10 s…')
+
+    def _clear_cal():
+        with S['src'].lock if S['src'] is not None else _nullctx():
+            S['an'].clear_calibration()
+        S['cal_after'] = None
+        cal_var.set('Calibration cleared; using a self-learned baseline.')
+
+    class _nullctx:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _copy_raw():
+        txt = S['src'].copy_text(20.0) if S['src'] is not None else ''
+        if not txt:
+            hint_var.set('Nothing to copy yet — no CSI lines have arrived.')
+            return
+        try:
+            win.clipboard_clear()
+            win.clipboard_append(txt)
+            hint_var.set(f'Copied {len(txt.splitlines())} raw CSI lines to the clipboard.')
+        except Exception:
+            _exc_debug('csi copy raw')
+
+    def _copy_log():
+        src = S['src']
+        txt = '\n'.join(l for (_t, l) in list(src.log)) if src is not None else ''
+        txt = txt or '(the board has printed nothing besides CSI lines)'
+        try:
+            win.clipboard_clear()
+            win.clipboard_append(txt)
+            hint_var.set('Copied the board\'s own messages to the clipboard.')
+        except Exception:
+            _exc_debug('csi copy log')
+
+    def _draw(force=False):
+        an = S['an']
+        now = clock()
+        src = S['src']
+        with (src.lock if src is not None else _nullctx()):
+            snap = an.snapshot(now)
+            wf = an.waterfall(now, 30.0, 120)
+            turb = [(t - now, v) for (t, v) in list(an.turb) if now - t <= 60]
+            dev = [(t - now, v) for (t, v) in list(an.dev) if now - t <= 60]
+            prof = None
+            if an.n_sc and len(an.X) > 10:
+                prof = np.asarray(list(an.X)[-50:]).mean(axis=0)
+            empty = an.empty
+            valid = an.valid
+        # chips / text
+        if src is None:
+            chip_m.configure(text='NOT CONNECTED', bg='#1c2b52', fg=D['text2'])
+        elif snap['frames'] == 0:
+            chip_m.configure(text='WAITING FOR DATA', bg='#1c2b52', fg=D['text2'])
+        elif not snap['ready']:
+            chip_m.configure(text='LEARNING BASELINE…', bg='#1c2b52', fg=D['text2'])
+        elif snap['moving']:
+            chip_m.configure(text=f"MOTION  {snap['score']:.0f}", bg='#7a1d12', fg='#ffd5cf')
+        else:
+            chip_m.configure(text=f"STILL  {snap['score']:.0f}", bg='#12482b', fg='#c8ffe0')
+        rs = snap['room']
+        if rs == 'differs':
+            chip_r.configure(text=f"ROOM: DIFFERENT FROM EMPTY ({snap['dev']:.2f})", bg='#6b3d00', fg='#ffe0b0')
+        elif rs == 'match':
+            chip_r.configure(text='ROOM: matches empty reference', bg='#12482b', fg='#c8ffe0')
+        else:
+            chip_r.configure(text='ROOM: no reference' if empty is None else 'ROOM: measuring…', bg='#1c2b52',
+                             fg=D['text2'])
+        b = snap['breath']
+        breath_var.set(f"breathing: {b['bpm']:.0f} per min" if b['bpm'] else 'breathing: —')
+        stats_var.set((f"{snap['rate']:.0f} packets/s" if snap['frames'] else '') +
+                      (f"   RSSI {snap['rssi']} dBm" if snap['rssi'] is not None else '') +
+                      (f"   {snap['n_sc']} subcarriers" if snap['n_sc'] else '') +
+                      (f"   · {src.bad} damaged lines skipped" if src is not None and src.bad else ''))
+        ca = S['cal_after']
+        if ca is not None:
+            if now < ca:
+                cal_var.set(f'Leave the room now — calibration starts in {ca - now:.0f} s…')
+            else:
+                with (src.lock if src is not None else _nullctx()):
+                    an.start_calibration(now, 20.0)
+                S['cal_after'] = None
+        pr = snap['cal']
+        if pr is not None:
+            cal_var.set(f'Calibrating the empty room… {int(pr * 20)}/20 s — keep the room empty and still')
+        elif ca is None and an.empty is not None and cal_var.get().startswith(('Calibrating', 'Leave')):
+            cal_var.set(f"Calibrated {datetime.fromtimestamp(an.empty['when']).strftime('%H:%M:%S')} — the empty-room "
+                        f"reference is now used.")
+        if src is not None and not src.error:
+            h = src.hint()
+            if h or hint_var.get() in ('',) or hint_var.get().startswith(('Nothing is coming', 'The board is talking',
+                                                                         'CSI stopped')):
+                hint_var.set(h)
+        elif src is not None and src.error:
+            hint_var.set(src.error)
+            _stop()
+        if not force and (now - S['last_draw']) < 0.45:
+            return
+        S['last_draw'] = now
+        fig.clear()
+        gs = fig.add_gridspec(3, 2, width_ratios=[1.45, 1], height_ratios=[1, 1, 1], hspace=0.78, wspace=0.18,
+                              left=0.06, right=0.985, top=0.94, bottom=0.09)
+        aw = fig.add_subplot(gs[:, 0]); am = fig.add_subplot(gs[0, 1]); ap = fig.add_subplot(gs[1, 1])
+        ab = fig.add_subplot(gs[2, 1])
+        for a in (aw, am, ap, ab):
+            _style_ax(a)
+        aw.set_title('Subcarrier waterfall — last 30 s (z-score per subcarrier)', loc='left', color=D['text'],
+                     fontsize=9, fontweight='bold')
+        if np.isfinite(wf).any():
+            aw.imshow(np.ma.masked_invalid(wf), aspect='auto', cmap=cmap, vmin=-3, vmax=3, origin='lower',
+                      extent=[0, wf.shape[1], -30, 0], interpolation='nearest')
+        else:
+            aw.text(0.5, 0.5, 'waiting for CSI…' if src is not None else 'connect the receiver board, or try the demo',
+                    transform=aw.transAxes, ha='center', va='center', color=D['text2'], fontsize=9)
+        aw.set_xlabel('subcarrier', color=D['text2'], fontsize=7); aw.set_ylabel('seconds ago', color=D['text2'], fontsize=7)
+        aw.grid(False)
+        am.set_title('Motion (turbulence of the last second)', loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        if turb:
+            xs = [x for x, _ in turb]; ys = [y for _, y in turb]
+            am.plot(xs, ys, color='#38b8f0', linewidth=1.2)
+            am.fill_between(xs, ys, color='#38b8f0', alpha=0.15)
+            if snap['thr'] is not None:
+                am.axhline(snap['thr'], color='#ff5c4d', linestyle='--', linewidth=0.9)
+                am.text(xs[0], snap['thr'], ' motion threshold', color='#ff5c4d', fontsize=7, va='bottom')
+            if snap['mu'] is not None:
+                am.axhline(snap['mu'], color='#2fe07a', linestyle=':', linewidth=0.8)
+        am.set_xlim(-60, 0)
+        ap.set_title('Subcarrier pattern now vs empty room', loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        if prof is not None:
+            ks = np.arange(len(prof))
+            pm = np.where(valid, prof, np.nan)
+            ap.plot(ks, pm, color='#ffd23f', linewidth=1.2, label='now')
+            if empty is not None:
+                ap.plot(ks, np.where(valid, empty['mean'], np.nan), color='#2fe07a', linewidth=1.0, linestyle='--',
+                        label='empty room')
+                ap.legend(fontsize=7, facecolor=D['panel'], edgecolor='#26365f', labelcolor=D['text2'], loc='upper right')
+        ab.set_title('Breathing spectrum (breaths per minute)', loc='left', color=D['text'], fontsize=9, fontweight='bold')
+        if b['freqs'] is not None:
+            ab.plot(b['freqs'] * 60.0, b['power'], color='#bf5af2', linewidth=1.2)
+            ab.fill_between(b['freqs'] * 60.0, b['power'], color='#bf5af2', alpha=0.18)
+            if b['bpm']:
+                ab.axvline(b['bpm'], color='#2fe07a', linewidth=1.4)
+            ab.set_xlim(9, 30)
+        else:
+            ab.text(0.5, 0.5, b['why'], transform=ab.transAxes, ha='center', va='center', color=D['text2'],
+                    fontsize=8, wrap=True)
+        if b['freqs'] is not None and not b['bpm'] and b['why']:
+            ab.text(0.98, 0.9, 'no steady rhythm', transform=ab.transAxes, ha='right', color=D['warn'], fontsize=7)
+        cv.draw_idle()
+
+    def _tick():
+        if S['dead']:
+            return
+        try:
+            if parent.winfo_ismapped() or S['src'] is not None:
+                _draw()
+        except Exception:
+            _exc('csi tick')
+        S['job'] = win.after(500, _tick)
+
+    def _on_close():
+        S['dead'] = True
+        _stop()
+
+    conn_btn.configure(command=_toggle_conn)
+    ref_btn.configure(command=_refresh_ports)
+    demo_btn.configure(command=_toggle_demo)
+    scen_cb.bind('<<ComboboxSelected>>', _scen_changed)
+    cal_btn.configure(command=_calibrate)
+    clr_btn.configure(command=_clear_cal)
+    copy_btn.configure(command=_copy_raw)
+    log_btn.configure(command=_copy_log)
+    _refresh_ports()
+    S['job'] = win.after(500, _tick)
+    ctl = {'S': S, 'close': _on_close, 'draw': _draw, 'begin': _begin, 'stop': _stop, 'calibrate': _calibrate,
+           'toggle_demo': _toggle_demo, 'scen_var': scen_var, 'port_var': port_var, 'copy_raw': _copy_raw,
+           'chip_m': chip_m, 'chip_r': chip_r, 'breath_var': breath_var, 'hint_var': hint_var, 'cal_var': cal_var,
+           'badge': badge, 'fig': fig, 'fill_ports': _fill_ports, 'clear_cal': _clear_cal, 'stats_var': stats_var,
+           'toggle_conn': _toggle_conn}
+    return ctl
+
 
 
 # ── Outage log window ────────────────────────────────────────────────────────
@@ -6160,6 +9222,9 @@ def _nm_shutdown_all(monitor=None, root=None, confirm_parent=None):
         if m is not None:
             try: m._stopping = True
             except Exception: _exc_debug('_nm_shutdown_all')
+
+    try: _nm_wifi_stop_all()
+    except Exception: _exc_debug('_nm_shutdown_all wifi')
 
     # 2. EtherApe windows — stop captures/replays before destroying the window,
     #    otherwise the render callbacks fire against dead widgets.
@@ -21089,6 +24154,7 @@ class UserGuideWindow:
         ('Colour Themes',            'colours'),
         ('Export Data',              'export'),
         ('Reports & Scheduling',     'report'),
+        ('Wi-Fi Signal & CSI',       'wifi'),
         ('Wireshark Monitor',        'wireshark'),
         ('EtherApe Topology',        'etherape'),
         ('  Country Search',         'topology_search'),
@@ -21109,6 +24175,7 @@ class UserGuideWindow:
         ('Settings',                 'settings'),
         ('Licence',                  'licence'),
         ('Troubleshooting',          'trouble'),
+        ('What\'s New',              'whatsnew'),
     ]
 
     CONTENT = {
@@ -21170,13 +24237,20 @@ class UserGuideWindow:
             ('bullet', '⊞ AGENTS — manage and view remote agents'),
             ('bullet', '⇪ PUSH — deploy the agent onto another machine over the network'),
             ('bullet', '◱ MONITOR — live interface/process monitor'),
-            ('bullet', '▦ HEATMAP — speed by hour of the week'),
+            ('bullet', '▦ HEATMAP — speed by hour of the week, drawn as a dark dashboard: the weekday-by-hour '
+                       'field in the middle, with best/worst slot, daily trend and hour-of-day panels beside it'),
             ('bullet', '⚠ OUTAGES — every recorded loss of service'),
             ('bullet', '◈ QUALITY — bufferbloat grade, jitter and packet loss trends, '
                        'bandwidth by destination, device inventory and anomaly scoring'),
             ('bullet', '⎙ EVIDENCE — one-click PDF for your ISP: uptime, median vs '
                        'advertised speed, and a timestamped outage log'),
             ('bullet', '☉ PI-HOLE — Pi-hole status and controls, if configured'),
+            ('bullet', '≈ WI-FI — watches your Wi-Fi from the Windows Wi-Fi API: live signal in dBm '
+                       'with a room-movement detector, every access point in range with its maker, '
+                       'rogue / look-alike detection, a 0-100 health score and channel advice, a '
+                       'day-by-hour activity history (with away-mode alerts that keep watching in '
+                       'the background), and a walk-around signal map with floor plan, dead spots '
+                       'and band comparison in 2D and 3D. Signal strength only, not CSI; Windows only.'),
             ('bullet', '⎙ REPORT — generate the full HTML report'),
             ('bullet', '⬇ EXPORT — export recorded data to CSV or JSON'),
             ('bullet', '⚒ TOOLS — MobaXterm hosted inside the app'),
@@ -21542,7 +24616,8 @@ class UserGuideWindow:
             ('bullet', 'Hold — freeze node/flow decay so the graph does not shrink during quiet periods'),
             ('bullet', 'Labels — toggle IP address labels on nodes'),
             ('bullet', 'Legend — toggle the protocol colour key'),
-            ('bullet', '⊕ GEO MAP — open the global geographic map window'),
+            ('bullet', '⊕ GEO MAP — open the global geographic map window (uses the sharp NASA night map once '
+                       'the 3D globe has downloaded it; zooming in loads a full-resolution crop)'),
             ('bullet', '🖧 LAN SCAN — open the live LAN network map (see LAN Scan section below)'),
             ('bullet', '⊛ SPREAD — redistribute nodes into a clean radial layout'),
             ('bullet', '⇉ SANKEY / ◎ RADIAL — switch between the bipartite ribbon layout '
@@ -22239,6 +25314,113 @@ class UserGuideWindow:
                     'traffic is plain HTTP, so treat a key like any shared credential on a '
                     'trusted network.'),
         ],
+        'wifi': [
+            ('h1', 'Wi-Fi Signal & CSI'),
+            ('p',  'Press ≈ WI-FI on the left rail. The window watches your Wi-Fi from Windows\' own Wi-Fi API '
+                   '(falling back to the slower netsh command if that is unavailable; the header says which). '
+                   'It is Windows-only and reads signal strength, which is coarse: it can tell that something '
+                   'moved or changed, not who or how many. Use it in your own home, with the people there aware.'),
+            ('h2', 'Live tab'),
+            ('bullet', 'Your link\'s real signal in dBm (about ten readings a second through the Windows API), '
+                       'a disturbance graph (rolling spread of the signal against a learned quiet baseline) and a '
+                       'MOVEMENT / QUIET chip. The baseline takes a couple of minutes to learn.'),
+            ('bullet', 'Which paths are disturbed: every access point is a different radio path; one that starts '
+                       'swinging while the others stay steady means activity near that path (experimental).'),
+            ('bullet', 'An event list: movement, roaming between access points, new networks, suspicious networks.'),
+            ('h2', 'Networks tab'),
+            ('bullet', 'Every access point in range with its maker (looked up from its address), channel, band and '
+                       'security, and how far its signal has swung.'),
+            ('bullet', 'A 0–100 health score with the factors that make it up (signal, band, congestion, security, '
+                       'stability, link rate), plain-language channel advice, and any findings.'),
+            ('bullet', 'Rogue detection: an open or weak copy of your network name is flagged high severity; a '
+                       'same-name network from a different maker than your router is a warning (unless it was '
+                       'learned as normal); a same-name network with weaker security is information only.'),
+            ('bullet', 'New-network alarm: for the first 10 minutes on a new setup the window only learns what is '
+                       'normal. After that a strong new network that persists raises one alarm.'),
+            ('h2', 'Activity tab, away mode and background watching'),
+            ('bullet', 'Movement is recorded every minute in the app database. The tab shows a weekday-by-hour '
+                       'heatmap of how often movement was detected, the last 24 hours as bars, and the event history.'),
+            ('bullet', 'Keep watching — tick "Keep watching when this window is closed" and the watcher keeps running with '
+                       'the window closed and starts again with the app.'),
+            ('bullet', 'Away mode — tick "Away mode" yourself, or tick "Away when PC idle 10 min" to have it switch on '
+                       'after ten minutes without keyboard or mouse use. While away, movement and new-network events become real alerts through the '
+                       'app\'s desktop toast, push and webhook channels (at most one every five minutes).'),
+            ('h2', 'Signal map tab'),
+            ('bullet', 'Walk-around survey: "Floor plan image…" loads a picture of your floor, click on it where you are '
+                       'standing, press "Sample here". It builds a smoothed map; "Place router" then a click marks the router.'),
+            ('bullet', '"Mark dead spots": areas below −75 dBm, where real samples support the estimate, are outlined, '
+                       'and a star suggests where an extra node or extender would help.'),
+            ('bullet', 'Layers: your connection, each access point, or 2.4 vs 5 GHz of your network side by side; '
+                       'tick "3D view" for a point cloud across floors; "Export PNG…" saves the picture.'),
+            ('h2', 'Wi-Fi in the 3D view'),
+            ('p',  'The 3D page has a ≈ WI-FI button in its toolbar. AIR mode puts you at the centre and every access '
+                   'point around you as an orb: distance is signal strength, height is band, colour is dBm; '
+                   'amber rings are disturbed paths, red rings new or suspicious networks. SURVEY mode shows your '
+                   'walk-around samples as a coloured volume, floor by floor. Drag to orbit, scroll to zoom, hover '
+                   'an orb for details. It reads the same watcher as the Wi-Fi window.'),
+            ('h2', 'CSI (ESP32) tab'),
+            ('p',  'CSI is the detailed per-subcarrier measurement a Wi-Fi receiver makes for every packet. A PC Wi-Fi '
+                   'card does not expose it; an ESP32 does. With two ESP32 boards, one (csi_send) transmits about 100 '
+                   'packets a second and the other (csi_recv, plugged into this PC by USB) reports each packet\'s CSI '
+                   'as text, which this tab reads directly — no extra software to install.'),
+            ('bullet', 'Receiver board — pick the COM port (USB-serial bridges are starred) and press Connect. '
+                       'Default 921600 baud. Close any other program using that port first.'),
+            ('bullet', 'Waterfall — one row per moment, one column per subcarrier; shifting colour bands mean the '
+                       'path between the boards is changing.'),
+            ('bullet', 'MOTION — the last second compared to a quiet baseline (learned automatically, or the '
+                       'empty-room reference). ROOM — the average pattern compared to your empty-room reference; it '
+                       'can notice that something is different even when nothing is moving.'),
+            ('bullet', 'Calibrate empty room — press it, leave the room within 10 s and keep it empty and still for '
+                       '20 s. Redo it after you move furniture or the boards.'),
+            ('bullet', 'Breathing — experimental. A rate appears only when someone sits still near the line between '
+                       'the boards for about 30 s and a steady rhythm stands well clear of the background; otherwise '
+                       'it says why not. Heavy room drift, fans or pets can still fool it, so treat it as a '
+                       'curiosity, never as a health measurement.'),
+            ('bullet', 'Copy raw data (last 20 s) — puts the CSI lines on the clipboard, useful for checking what '
+                       'the boards really send. Copy board messages — the board\'s own boot and error text.'),
+            ('bullet', 'Try demo (simulated) — a made-up room so you can see the tab working without hardware. It is '
+                       'labelled SIMULATED and is never real data.'),
+            ('tip', 'If nothing arrives, the tab says what it can tell: wrong port or baud, board not running '
+                    'csi_recv, or the transmitter off. A charge-only USB cable shows no port at all.'),
+            ('tip', 'The firmware source for the two boards, with a build-and-flash script, is in the esp32_csi '
+                    'folder of the project (not part of the installed app). Attach the antenna to a board before '
+                    'powering it.'),
+        ],
+
+        'whatsnew': [
+            ('h1', 'What\'s New'),
+            ('p',  'The recent changes in one place, newest first.'),
+            ('h2', 'Wi-Fi Signal window and the CSI tab'),
+            ('bullet', 'New ≈ WI-FI window: live signal via the Windows Wi-Fi API, per-access-point disturbance, '
+                       'rogue/look-alike detection with makers, health score, channel advice, activity history, '
+                       'away-mode alerts, background watching, floor-plan signal map with dead spots, and a CSI tab '
+                       'for a pair of ESP32 boards. See the Wi-Fi Signal & CSI section.'),
+            ('bullet', 'The 3D view has a ≈ WI-FI button (access points as orbs, your survey as a volume).'),
+            ('h2', 'Time-of-day heatmap'),
+            ('bullet', 'Restyled as a dark dashboard: the weekday-by-hour field in the middle with glowing cells, '
+                       'and side panels (best and worst slot, daily trend, hour-of-day profile) computed from the '
+                       'same data, so the numbers always agree with the field.'),
+            ('h2', 'Geo Map'),
+            ('bullet', 'The map is no longer a stretched low-resolution image: it uses the NASA Black Marble night '
+                       'map when the 3D globe has fetched it, and loads a native-resolution crop as you zoom in.'),
+            ('h2', '3D view: Top Flow Talkers'),
+            ('bullet', 'Cleaner ribbons with a calmer circuit texture, gradient surface and glowing edges; host names '
+                       'moved into cards on the right (country chip, name, org, protocol, volume, share, trend, '
+                       'blocked/suspicious markers); light pulses instead of diamonds; hovering a ribbon or card '
+                       'focuses it and shows a tooltip.'),
+            ('h2', '3D view: World View globe'),
+            ('bullet', 'Sharper day and night maps (NASA, fetched once in the background and cached), a denser '
+                       'globe mesh, smaller orbs that sit on their true coordinates, and stacks of hosts at one '
+                       'place fanned out around the busiest with a dot marking the true point.'),
+            ('bullet', 'Hosts on your own network are placed at this PC\'s location, guessed from your public IP; '
+                       'to pin it exactly, put "lat, lon" in a file named .nm_home_location in your home folder '
+                       '(behind a VPN the guess is the VPN exit).'),
+            ('h2', 'Housekeeping'),
+            ('bullet', 'Capture scratch files are now cleaned up even after an abnormal exit.'),
+            ('bullet', 'The spaceship effects and ship-model pipeline were removed.'),
+            ('bullet', 'Fixes from an external code review were verified one by one and applied.'),
+        ],
+
         'trouble': [
             ('h1', 'Troubleshooting'),
             ('h2', 'Gauges stuck at zero / no data'),
@@ -29450,6 +32632,7 @@ html,body{max-width:100%;overflow-x:hidden}
   </div>
   <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
   <button class="tbtn" id="btnTalkers" onclick="toggleTalkers()">▦ TOP TALKERS</button>
+  <button class="tbtn" id="btnWifi" onclick="toggleWifi3D()" title="Access points and your signal survey in 3D">≈ WI-FI</button>
 </div>
 
 <!-- Top Flow Talkers overlay -->
@@ -29537,6 +32720,25 @@ html,body{max-width:100%;overflow-x:hidden}
       </div>
       <div id="talkersAiResult" style="line-height:1.7;white-space:pre-wrap"></div>
     </div>
+  </div>
+</div>
+<div id="wifiOverlay" style="display:none;position:fixed;inset:36px 0 0 0;z-index:41;
+  background:#060a1c;overflow:hidden;flex-direction:column">
+  <div style="display:flex;align-items:center;padding:8px 14px;gap:10px;flex-shrink:0;flex-wrap:wrap">
+    <span style="font-family:monospace;font-size:15px;color:#38b8f0;font-weight:bold;letter-spacing:1.5px">≈ WI-FI IN 3D</span>
+    <span id="wifiSub" style="font-family:monospace;font-size:11px;color:#6a9ab8;flex:1;min-width:0"></span>
+    <button class="tbtn active" id="wifiBtnAir" onclick="_wifi3dMode('air')" title="Access points around you: closer = stronger">◎ AIR</button>
+    <button class="tbtn" id="wifiBtnSur" onclick="_wifi3dMode('survey')" title="Your walk-around survey as a signal volume">▦ SURVEY</button>
+    <button class="tbtn" onclick="toggleWifi3D()">✕ CLOSE</button>
+  </div>
+  <div style="position:relative;flex:1;min-height:0">
+    <canvas id="wifiCanvas" style="position:absolute;inset:0;width:100%;height:100%;cursor:grab"></canvas>
+    <div id="wifiLegend" style="position:absolute;left:14px;bottom:12px;font-family:monospace;font-size:10px;color:#8fa8cc;line-height:1.7;pointer-events:none;
+      background:rgba(6,10,28,.72);padding:8px 10px;border:1px solid #1c2b52;border-radius:6px"></div>
+    <div id="wifiTip" style="display:none;position:absolute;pointer-events:none;font-family:monospace;font-size:11px;color:#e8f1ff;
+      background:rgba(13,22,48,.94);border:1px solid #2a4170;border-radius:6px;padding:6px 9px;white-space:pre"></div>
+    <div id="wifiMsg" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:monospace;
+      font-size:12px;color:#8fa8cc;text-align:center;padding:0 30px;pointer-events:none"></div>
   </div>
 </div>
 <div id="info">
@@ -33138,6 +36340,226 @@ function _build3DTalkers(){
 document.addEventListener('fullscreenchange',()=>{ setTimeout(_onResize,200); });
 document.addEventListener('webkitfullscreenchange',()=>{ setTimeout(_onResize,200); });
 
+/* ── Wi-Fi in 3D ────────────────────────────────────────────────────────────
+   A separate full-screen panel with its OWN renderer/scene/camera (like the
+   Top Talkers 3D view), so it can never disturb the network scene. AIR mode:
+   you at the centre, every access point as an orb -- distance = signal
+   strength, height = band, colour = dBm; rings show -50/-60/-70/-80 dBm; the
+   one you're connected to is linked to you; disturbed paths and suspicious
+   look-alikes pulse. SURVEY mode: the walk-around samples as a coloured
+   volume, floor by floor, with the router marked. */
+let _wf={open:false,mode:'air',data:null,renderer:null,scene:null,camera:null,raf:null,
+         rotY:0.6,rotX:0.62,zoom:27,drag:false,lx:0,ly:0,pick:[],pulse:[],busy:false,timer:null,gen:0};
+function _wfLab(t,c){const s=makeSprite(t,c);s.scale.set(4.6,0.74,1);return s;}
+function _wifiCol(dbm){
+  // -90 deep blue .. -35 red-orange, same ramp as the app's heat maps
+  const u=Math.max(0,Math.min(1,(dbm+90)/55));
+  const st=[[0,'#1b2a9a'],[0.25,'#1fa3e8'],[0.5,'#23d96a'],[0.75,'#f2e033'],[1,'#ff4a1c']];
+  let i=0;while(i<st.length-2&&u>st[i+1][0])i++;
+  const a=new THREE.Color(st[i][1]),b=new THREE.Color(st[i+1][1]);
+  const k=(u-st[i][0])/(st[i+1][0]-st[i][0]);
+  return a.lerp(b,Math.max(0,Math.min(1,k)));
+}
+function _wifiHash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0)/4294967295;}
+function toggleWifi3D(){
+  _wf.open=!_wf.open;
+  const ov=document.getElementById('wifiOverlay');
+  ov.style.display=_wf.open?'flex':'none';
+  document.getElementById('btnWifi').classList.toggle('active',_wf.open);
+  if(_wf.open){
+    setTimeout(()=>{_wifiInit();_wifiPoll(true);},40);
+  }else{
+    if(_wf.raf)cancelAnimationFrame(_wf.raf);_wf.raf=null;
+    if(_wf.timer)clearTimeout(_wf.timer);_wf.timer=null;
+  }
+}
+function _wifi3dMode(m){
+  _wf.mode=m;_wf.zoom=(m==='air'?27:30);
+  document.getElementById('wifiBtnAir').classList.toggle('active',m==='air');
+  document.getElementById('wifiBtnSur').classList.toggle('active',m==='survey');
+  _wifiBuild();
+}
+function _wifiInit(){
+  const T=window.THREE;if(!T)return;
+  const cv=document.getElementById('wifiCanvas');
+  if(!_wf.renderer){
+    _wf.renderer=new T.WebGLRenderer({canvas:cv,antialias:true});
+    _wf.renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));
+    _wf.renderer.setClearColor(0x060a1c,1);
+    cv.addEventListener('mousedown',e=>{_wf.drag=true;_wf.lx=e.clientX;_wf.ly=e.clientY;cv.style.cursor='grabbing';});
+    window.addEventListener('mouseup',()=>{_wf.drag=false;cv.style.cursor='grab';});
+    window.addEventListener('mousemove',e=>{
+      if(!_wf.open)return;
+      if(_wf.drag){_wf.rotY+=(e.clientX-_wf.lx)*0.008;_wf.rotX=Math.max(0.05,Math.min(1.5,_wf.rotX+(e.clientY-_wf.ly)*0.006));_wf.lx=e.clientX;_wf.ly=e.clientY;}
+      _wifiHover(e);
+    });
+    cv.addEventListener('wheel',e=>{e.preventDefault();_wf.zoom=Math.max(5,Math.min(48,_wf.zoom*(1+Math.sign(e.deltaY)*0.08)));},{passive:false});
+    window.addEventListener('resize',()=>{if(_wf.open)_wifiSize();});
+  }
+  _wifiSize();
+  if(!_wf.raf)_wifiLoop();
+}
+function _wifiSize(){
+  const cv=document.getElementById('wifiCanvas');if(!cv||!_wf.renderer)return;
+  const W=cv.clientWidth||800,H=cv.clientHeight||500;
+  _wf.renderer.setSize(W,H,false);
+  if(_wf.camera){_wf.camera.aspect=W/Math.max(H,1);_wf.camera.updateProjectionMatrix();}
+}
+function _wifiPoll(first){
+  if(!_wf.open||_wf.busy)return;
+  _wf.busy=true;
+  fetch('/api/wifi'+(first?'?start=1':'')).then(r=>r.json()).then(d=>{
+    _wf.data=d;_wifiBuild();
+  }).catch(e=>{_wf.data=null;_wifiMsg('Could not read Wi-Fi data from the app.');})
+  .finally(()=>{_wf.busy=false;if(_wf.open){_wf.timer=setTimeout(()=>_wifiPoll(false),_wf.mode==='air'?3000:8000);}});
+}
+function _wifiMsg(t){const m=document.getElementById('wifiMsg');if(m)m.textContent=t||'';}
+function _wifiDisposeScene(){
+  if(!_wf.scene)return;
+  _wf.scene.traverse(o=>{
+    if(o.geometry)o.geometry.dispose();
+    if(o.material){const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>{if(m.map)m.map.dispose();m.dispose();});}
+  });
+}
+function _wifiBuild(){
+  const T=window.THREE;if(!T||!_wf.open)return;
+  const d=_wf.data||{};
+  _wifiDisposeScene();
+  const scene=new T.Scene();scene.fog=new T.FogExp2(0x060a1c,0.012);
+  scene.add(new T.AmbientLight(0xffffff,0.55));
+  const dl=new T.DirectionalLight(0x9fd8ff,0.9);dl.position.set(6,12,8);scene.add(dl);
+  _wf.scene=scene;_wf.pick=[];_wf.pulse=[];
+  if(!_wf.camera)_wf.camera=new T.PerspectiveCamera(50,1,0.1,300);
+  _wifiSize();
+  const sub=document.getElementById('wifiSub'),leg=document.getElementById('wifiLegend');
+  if(!d.ok){_wifiMsg(d.error||'Wi-Fi data is not available (this feature reads the Windows Wi-Fi adapter).');sub.textContent='';leg.innerHTML='';return;}
+  const lk=d.link;
+  sub.textContent=(lk?('connected: '+(lk.ssid||'?')+'  '+(lk.dbm!=null?Math.round(lk.dbm)+' dBm':'')):'not connected')+
+     '   ·   '+((d.aps||[]).length)+' access points'+(d.health?('   ·   health '+d.health.score+'/100 ('+d.health.grade+')'):'')+
+     (d.moving?'   ·   MOVEMENT':'')+(d.away?'   ·   away mode':'');
+  if(_wf.mode==='air')_wifiBuildAir(d,scene,T,leg);else _wifiBuildSurvey(d,scene,T,leg);
+}
+function _wifiBuildAir(d,scene,T,leg){
+  const aps=d.aps||[];
+  _wifiMsg(aps.length?'':(d.running?'Waiting for the first Wi-Fi scan…':'Starting the Wi-Fi watcher…'));
+  const R=dbm=>1.6+((-35-Math.max(-95,Math.min(-35,dbm)))/60)*9.5;   // -35 dBm -> 1.6, -95 dBm -> 11.1
+  // rings
+  [-50,-60,-70,-80].forEach(v=>{
+    const r=R(v);
+    const g=new T.RingGeometry(r-0.02,r+0.02,96);g.rotateX(-Math.PI/2);
+    scene.add(new T.Mesh(g,new T.MeshBasicMaterial({color:0x2a4170,transparent:true,opacity:0.55,side:T.DoubleSide})));
+    const sp=_wfLab(v+' dBm','#5a78b0');sp.position.set(r,0.05,0);sp.scale.set(3.2,0.5,1);scene.add(sp);
+  });
+  const grid=new T.GridHelper(24,24,0x0f1a3a,0x0b1430);grid.position.y=-0.01;scene.add(grid);
+  // you
+  const you=new T.Mesh(new T.SphereGeometry(0.42,24,18),new T.MeshPhongMaterial({color:0xffffff,emissive:0x38b8f0,emissiveIntensity:0.9}));
+  you.position.set(0,0.4,0);scene.add(you);
+  const ys=_wfLab('YOU','#38b8f0');ys.position.set(0,1.2,0);scene.add(ys);
+  const bandY={'2.4 GHz':0.9,'5 GHz':2.2,'6 GHz':3.5};
+  const flagged=new Set((d.findings||[]).filter(f=>f.sev==='high'||f.sev==='warn').map(f=>f.text.split(' ')[0]));
+  aps.forEach(a=>{
+    if(a.dbm==null)return;
+    const ang=_wifiHash(a.dev||a.bssid)*Math.PI*2+(_wifiHash(a.bssid)-0.5)*0.35;
+    const r=R(a.dbm),y=bandY[a.band]!==undefined?bandY[a.band]:1.5;
+    const x=Math.cos(ang)*r,z=Math.sin(ang)*r;
+    const col=_wifiCol(a.dbm);
+    const isLink=!!(d.link&&d.link.bssid&&a.bssid===d.link.bssid);
+    const size=0.16+Math.max(0,Math.min(1,(a.dbm+95)/60))*0.34;
+    const orb=new T.Mesh(new T.SphereGeometry(size,20,14),new T.MeshPhongMaterial({color:col,emissive:col,emissiveIntensity:isLink?1.0:0.7,transparent:true,opacity:0.95}));
+    orb.position.set(x,y,z);orb.userData={ap:a};scene.add(orb);_wf.pick.push(orb);
+    // glow
+    const gl=new T.Mesh(new T.SphereGeometry(size*2.1,16,12),new T.MeshBasicMaterial({color:col,transparent:true,opacity:0.12}));
+    gl.position.copy(orb.position);scene.add(gl);
+    // stalk to the floor + a soft cone toward you
+    scene.add(new T.Line(new T.BufferGeometry().setFromPoints([new T.Vector3(x,0,z),new T.Vector3(x,y,z)]),
+      new T.LineBasicMaterial({color:col,transparent:true,opacity:0.35})));
+    const apPos=new T.Vector3(x,y,z),youPos=new T.Vector3(0,0.4,0),dir=apPos.clone().sub(youPos),len=Math.max(0.5,dir.length());
+    const cone=new T.Mesh(new T.ConeGeometry(Math.max(0.12,size*1.1),len,18,1,true),
+      new T.MeshBasicMaterial({color:col,transparent:true,opacity:isLink?0.16:0.07,side:T.DoubleSide,depthWrite:false}));
+    cone.position.copy(youPos.clone().add(apPos).multiplyScalar(0.5));
+    cone.quaternion.setFromUnitVectors(new T.Vector3(0,-1,0),dir.clone().normalize());   // wide end at the AP, point at you
+    scene.add(cone);
+    if(isLink){
+      scene.add(new T.Line(new T.BufferGeometry().setFromPoints([new T.Vector3(0,0.4,0),new T.Vector3(x,y,z)]),
+        new T.LineBasicMaterial({color:0x38b8f0})));
+    }
+    const lab=_wfLab((a.ssid&&a.ssid!=='(hidden)'?a.ssid:'(hidden)')+(isLink?'  ●':''),isLink?'#38b8f0':'#c8dff0');
+    lab.position.set(x,y+size+0.45,z);scene.add(lab);
+    if(a.disturbed||a.new){
+      const rg=new T.Mesh(new T.RingGeometry(size*2.4,size*2.7,40),new T.MeshBasicMaterial({color:a.disturbed?0xff9a1e:0xff3d2e,transparent:true,opacity:0.8,side:T.DoubleSide}));
+      rg.position.copy(orb.position);scene.add(rg);_wf.pulse.push({m:rg,s:size});
+    }
+  });
+  (d.findings||[]).forEach(f=>{
+    if(f.sev!=='high')return;
+    const b=f.text.split(' ')[0];
+    const o=_wf.pick.find(m=>m.userData.ap.bssid===b);
+    if(o){const rg=new T.Mesh(new T.RingGeometry(0.9,1.05,40),new T.MeshBasicMaterial({color:0xff3d2e,transparent:true,opacity:0.9,side:T.DoubleSide}));
+      rg.position.copy(o.position);scene.add(rg);_wf.pulse.push({m:rg,s:0.6});}
+  });
+  leg.innerHTML='<b style="color:#e8f1ff">Reading the picture</b><br>distance from YOU = signal strength (rings: -50 … -80 dBm)<br>height = band (low 2.4 GHz · mid 5 · high 6)<br>'+
+    'orb colour = strength · amber ring = path disturbed · red ring = new / suspicious<br>drag to orbit · scroll to zoom · hover an orb';
+}
+function _wifiBuildSurvey(d,scene,T,leg){
+  const S=d.survey||[];
+  _wifiMsg(S.length?'':'No survey yet. In the app: WI-FI window → Signal map → click the floor plan where you stand → Sample here.');
+  if(!S.length){leg.innerHTML='';return;}
+  let maxX=1,maxY=1;S.forEach(s=>{maxX=Math.max(maxX,s.x);maxY=Math.max(maxY,s.y);});
+  const sc=16/Math.max(maxX,maxY,6),cx=maxX*sc/2,cz=maxY*sc/2;
+  const floors=[...new Set(S.map(s=>s.z))].sort((a,b)=>a-b),GAP=3.2;
+  const gw=Math.max(maxX*sc,4)+2,gd=Math.max(maxY*sc,4)+2;
+  floors.forEach(f=>{
+    const y=f*GAP;
+    const pl=new T.Mesh(new T.PlaneGeometry(gw,gd),new T.MeshBasicMaterial({color:0x0d1630,transparent:true,opacity:0.55,side:T.DoubleSide}));
+    pl.rotation.x=-Math.PI/2;pl.position.set(0,y-0.02,0);scene.add(pl);
+    const ed=new T.LineSegments(new T.EdgesGeometry(new T.PlaneGeometry(gw,gd)),new T.LineBasicMaterial({color:0x2a4170}));
+    ed.rotation.x=-Math.PI/2;ed.position.set(0,y-0.01,0);scene.add(ed);
+    const ls=_wfLab('floor '+f,'#5a78b0');ls.position.set(-gw/2-0.6,y+0.2,-gd/2);scene.add(ls);
+  });
+  S.forEach(s=>{
+    const v=(s.link!=null?s.link:-80),col=_wifiCol(v);
+    const u=Math.max(0,Math.min(1,(v+95)/60));
+    const sz=0.22+u*0.55;
+    const m=new T.Mesh(new T.BoxGeometry(sz,sz,sz),new T.MeshPhongMaterial({color:col,emissive:col,emissiveIntensity:0.55,transparent:true,opacity:0.5+0.45*u}));
+    m.position.set(s.x*sc-cx,s.z*GAP+0.2+sz/2,s.y*sc-cz);m.userData={sv:s};scene.add(m);_wf.pick.push(m);
+    scene.add(new T.Line(new T.BufferGeometry().setFromPoints([new T.Vector3(m.position.x,s.z*GAP,m.position.z),m.position]),
+      new T.LineBasicMaterial({color:col,transparent:true,opacity:0.4})));
+  });
+  const rt=d.routers||{};
+  Object.keys(rt).forEach(k=>{
+    const p=rt[k];if(!p)return;
+    const c=new T.Mesh(new T.ConeGeometry(0.4,0.9,4),new T.MeshPhongMaterial({color:0xffffff,emissive:0x38b8f0,emissiveIntensity:0.9}));
+    c.position.set(p[0]*sc-cx,(parseInt(k)||0)*GAP+0.6,p[1]*sc-cz);scene.add(c);
+    const l=_wfLab('router','#38b8f0');l.position.set(c.position.x,c.position.y+0.9,c.position.z);scene.add(l);
+  });
+  leg.innerHTML='<b style="color:#e8f1ff">Survey volume</b><br>each cube = a place you sampled; bigger, brighter = stronger<br>colour: blue weak … green … red strong · '+S.length+' samples on '+floors.length+' floor(s)<br>drag to orbit · scroll to zoom';
+}
+function _wifiHover(e){
+  const tip=document.getElementById('wifiTip');if(!tip||!_wf.camera||!_wf.pick.length||_wf.drag){if(tip)tip.style.display='none';return;}
+  const cv=document.getElementById('wifiCanvas'),r=cv.getBoundingClientRect();
+  const x=((e.clientX-r.left)/r.width)*2-1,y=-((e.clientY-r.top)/r.height)*2+1;
+  if(Math.abs(x)>1||Math.abs(y)>1){tip.style.display='none';return;}
+  const T=window.THREE,rc=new T.Raycaster();rc.setFromCamera({x:x,y:y},_wf.camera);
+  const hit=rc.intersectObjects(_wf.pick,false)[0];
+  if(!hit){tip.style.display='none';return;}
+  const u=hit.object.userData;let txt='';
+  if(u.ap){const a=u.ap;txt=(a.ssid||'(hidden)')+'\n'+a.bssid+(a.maker?'  ·  '+a.maker:'')+'\n'+Math.round(a.dbm)+' dBm  ·  '+(a.band||'?')+' ch '+(a.channel==null?'?':a.channel)+(a.disturbed?'\npath disturbed':'')+(a.new?'\nnew since baseline':'');}
+  else if(u.sv){const s=u.sv;txt='sample at ('+s.x+', '+s.y+') m, floor '+s.z+'\nlink '+(s.link!=null?Math.round(s.link)+' dBm':'?')+(s.bands&&s.bands['5']!=null?'\n5 GHz '+Math.round(s.bands['5'])+' dBm':'')+(s.bands&&s.bands['2.4']!=null?'\n2.4 GHz '+Math.round(s.bands['2.4'])+' dBm':'');}
+  tip.textContent=txt;tip.style.display='block';
+  tip.style.left=Math.min(r.width-230,e.clientX-r.left+14)+'px';tip.style.top=Math.max(4,e.clientY-r.top+12)+'px';
+}
+function _wifiLoop(){
+  if(!_wf.open){_wf.raf=null;return;}
+  _wf.raf=requestAnimationFrame(_wifiLoop);
+  if(!_wf.scene||!_wf.camera)return;
+  const now=performance.now()*0.001;
+  _wf.pulse.forEach(p=>{const k=1+0.35*Math.sin(now*4);p.m.scale.setScalar(k);p.m.material.opacity=0.45+0.4*Math.abs(Math.sin(now*2));p.m.lookAt(_wf.camera.position);});
+  const c=_wf.camera,z=_wf.zoom;
+  c.position.set(Math.sin(_wf.rotY)*z*Math.cos(_wf.rotX),Math.sin(_wf.rotX)*z+(_wf.mode==='survey'?2:0.6),Math.cos(_wf.rotY)*z*Math.cos(_wf.rotX));
+  c.lookAt(0,_wf.mode==='survey'?2:1,0);
+  _wf.renderer.render(_wf.scene,c);
+}
+
 // ── animate ────────────────────────────────────────────────────────────────
 function sampleCurve(pts,u){
   // Guard: a non-finite u (from a flow missing `frac`) used to index pts[NaN]
@@ -36173,6 +39595,34 @@ ol.steps li{margin:6px 0}
         except Exception as e:
             handler._json(200, {'ok': False, 'error': str(e)})
 
+    def _serve_wifi(self, handler):
+        """Live Wi-Fi snapshot for the 3D page: link, access points, health, findings,
+        plus the walk-around survey. ?start=1 starts the watcher (user opened the view)."""
+        try:
+            from urllib.parse import urlparse, parse_qs
+            if not _NM_IS_WIN and not os.environ.get('NM_WIFI_TEST'):
+                handler._json(200, {'ok': False, 'error': 'Wi-Fi view needs the Windows version of the app.'}); return
+            qs = parse_qs(urlparse(handler.path).query)
+            w = _nm_wifi_get_watcher(self._monitor, create=bool(qs.get('start')))
+            if w is None:
+                handler._json(200, {'ok': True, 'running': False, 'link': None, 'aps': [], 'findings': [],
+                                    'health': None, 'survey': [], 'routers': {}}); return
+            if qs.get('start') and not w._started:
+                w.start()
+            d = w.snapshot()
+            sv = _nm_wifi_load('wifi_survey.json', {}, w.state_dir)
+            if not isinstance(sv, dict):
+                sv = {}
+            d['survey'] = [{'x': s.get('x'), 'y': s.get('y'), 'z': s.get('z', 0), 'link': s.get('link'),
+                            'bands': s.get('bands', {})} for s in (sv.get('samples') or [])[-1500:]
+                           if s.get('x') is not None and s.get('y') is not None]
+            d['routers'] = (sv.get('plan') or {}).get('routers', {})
+            d['ok'] = True
+            handler._json(200, d)
+        except Exception as e:
+            _exc('_serve_wifi')
+            handler._json(200, {'ok': False, 'error': str(e)})
+
     def _serve_heatmap(self, handler):
         """7x24 weekday-by-hour median grid for a metric (NaN cells -> null)."""
         try:
@@ -36613,6 +40063,8 @@ ol.steps li{margin:6px 0}
                         self.send_header('Pragma', 'no-cache')
                         self.end_headers()
                         self.wfile.write(body)
+                    elif path == '/api/wifi':
+                        server_self._serve_wifi(self)
                     elif path == '/api/topology3d':
                         server_self._serve_topology3d(self)
                     elif path.startswith('/vendor/'):
@@ -38266,6 +41718,7 @@ class ModernWindow:
         btn('◈', 'QUALITY',  self._open_quality,   '#a371f7')
         btn('⎙', 'EVIDENCE', self._open_evidence,  '#39ff14')
         btn('☉', 'PI-HOLE', self._open_pihole, '#38f0a8')
+        btn('≈', 'WI-FI',   self._open_wifi,   '#38b8f0')
         tk.Frame(sb, bg=self.PANEL2).pack(fill='both', expand=True)
         div()
         btn('⎙', 'REPORT',  self._open_report,   '#ff9f43')
@@ -39165,6 +42618,12 @@ class ModernWindow:
         except Exception as ex:
             _m = str(ex); _exc('_open_heatmap'); log.error(f'[heatmap] {_m}')
 
+    def _open_wifi(self):
+        try:
+            self._wifi_win = _nm_open_wifi(self._monitor)
+        except Exception as ex:
+            _m = str(ex); _exc('_open_wifi'); log.error(f'[wifi] {_m}')
+
     def _open_outages(self):
         try:
             _nm_open_outages(self._monitor)
@@ -39720,6 +43179,8 @@ if __name__ == "__main__":
     _nm_set_debug_logging(bool(monitor.config.get('debug_logging')))
     threading.Thread(target=_nm_ensure_ollama, daemon=True).start()
     threading.Thread(target=lambda: _nm_device_worker(monitor), daemon=True).start()
+    try: _nm_wifi_autostart(monitor)
+    except Exception: _exc('wifi autostart')
     threading.Thread(target=lambda: _nm_latency_worker(monitor), daemon=True).start()
     threading.Thread(target=lambda: _nm_intel_worker(monitor), daemon=True).start()
     threading.Thread(target=lambda: _nm_traffic_worker(monitor), daemon=True).start()
