@@ -1,170 +1,188 @@
-# Changes this session — build `b-9d41c7e6`
+# Changes this session — build `b-a7f2d915`
 
-One hundred and nine things this session. Build IDs for reference:
-1. `b-9d41c7e6` — fixes to the new Wi-Fi Signal window after your first real run (screenshots): (a) it said "Not connected to Wi-Fi" while you were connected — newer Windows 11 prints the router's address as `AP BSSID` (plus a separate `Band` line) and the parser only knew `BSSID`; it now accepts both, no longer needs the BSSID at all, and if an adapter is present but no link can be read it says exactly what it saw (state/signal/SSID) instead of a generic message; (b) every network was labelled NEW — the 'new' test counted anything first seen in the last hour (so the baseline itself) and Windows' first cached scan misses neighbours that show up a minute later; replaced with a 10-minute learning period on first run (networks seen then are normal, absorbed silently), after which a network only alarms if it is strong enough (-78 dBm or better), has persisted for at least 3 scans and 30 seconds, and only once per access point; known networks now live in `wifi_seen2.json` so the old file's wrong baseline is discarded; (c) the grid lines in the Wi-Fi charts were solid white because your matplotlib ignores transparency written inside a colour for grid lines and applies the default grid alpha of 1 — now set with `alpha=`; the same fix applies to the heatmap dashboard's cell grid, which had the same fault; (d) the 3D survey view was pushed to the right with the colour bar overlapping its labels — it now uses explicit axes with its own colour bar and the room's real proportions. `test_wifi_signal.py` gained Windows 11 label, no-BSSID, learning-period, persistence-threshold, once-only and faint-network checks.
-2. `b-3fa7d205` — new WI-FI button on the left rail opening a Wi-Fi Signal window (WiFi-3D-Fusion's tier that needs no special hardware; it reads signal strength from Windows' own `netsh wlan` output, not CSI). Live tab: your link's signal in dBm over the last 5 minutes plus a room-movement detector — rolling standard deviation of the signal against a learned quiet baseline, with hysteresis; movement shades the graph and logs an event, and a QUIET / MOVEMENT / CALIBRATING chip shows the state (a person crossing between you and the router swings the signal by several dB). Networks tab: every access point in range with band, channel, strength bars, security; a channel-congestion chart for 2.4 and 5 GHz with the quietest of channels 1/6/11; (superseded by b-9d41c7e6: first-run learning period, then alarms) the first scan is saved as the baseline for this place and any new access point afterwards raises a NEW AP alarm, with an extra warning when it reuses your own network name (extra mesh node or a look-alike). Signal map tab: set a plan size, click where you are standing, press Sample here, walk on; 3+ samples draw a smoothed signal field with contours, and a 3D view shows every sample across floors; the survey and the known-network list are saved under `%LOCALAPPDATA%\\NetworkMonitor`. A Copy raw netsh output button helps diagnose a Windows whose output the parser does not understand. Limits stated in the window and guide: signal strength only, Windows only, the OS caches the access-point scan (~1 min), and Windows may need Location allowed to scan. `test_wifi_signal.py` covers the parsers (including hidden SSID and translated labels), the detector, the survey smoother and the real window with a fake scanner.
-3. `b-e5b30c18` — Time-of-Day Heatmap window restyled as a dark glass dashboard, after you sent two reference images (a rainbow thermal-field dashboard, then a neon world-map dashboard with glass panels): the blocky teal grid is now a smooth rainbow heat field (deep blue → cyan → green → yellow → orange → hot red, warm = good, so latency is reversed) with contour lines, glowing best/worst markers and a glowing "now" box, sitting in a glass panel with radar rings; around it are a best-slot orb (with the worst slot), spectrum bar charts for speed by hour of day and by day of week (current hour/day highlighted), a gradient daily-trend area chart, a colour-scale legend with Excellent/Good/Fair/Poor swatches, and a summary panel (swing %, best/worst hour, best/worst day). The window opens larger (1260×740) and re-lays itself out when resized. Three new top-bar switches — Dashboard, Smooth, Vivid colours — all on by default; untick all three for the old classic theme-accent table. Hover tooltips, click-to-pin, metric/window selectors and theme re-render are unchanged. `test_heatmap_theme.py` now checks the new defaults as well as the classic path.
-4. `b-91a4d2f6` — Geo Map window (the matplotlib world map opened from the GEO MAP rail button) is no longer a 1440×720 image stretched across the screen: it now loads the NASA Black Marble night map that the 3D globe already caches in `~/.nm_vendor` (8192×4096), downsized to about 1.25× the screen width (2560–4096 px), instead of the embedded 1440×720 image; if that map is not cached yet it shows the old image straight away, starts the download in the background and swaps the sharp map in as soon as it lands; and when you zoom in or pan, a native-resolution crop of the 8192 map is layered over the base map (about 0.4 s after the zoom settles) so detail keeps up with the zoom instead of going blurry.
-5. `b-7c15e3d9` — Top Flow Talkers (the ribbon panel in the 3D view) redesigned: remote ends now line up with a column of host cards on the right (country chip, name, org/IP, protocol, volume, share, trend arrow, ⛔/⚠ flags) instead of tiny labels scattered over the ribbons; the loud circuit-trace wallpaper is now a quiet, rounded, much longer-repeating texture; ribbons have a gradient surface, sheen and glowing rim; the moving bits are glowing comet pulses (busiest three get a light sweep and faint binary); the layout fits the window (the bottom of the Incoming section was being clipped, because the legend row was not counted in the canvas height) with soft sqrt volume weighting and fixed-height remote ends so small flows stay readable; hovering a ribbon or card focuses it and dims the rest, with a tooltip on ribbons; the title, legend and subtitle text is larger; the end caps on incoming ribbons now sit where the ribbon actually ends (they were drawn with the other end's size); and a leftover debug GB-flag image in the corner of the 3D page was removed.
-6. `b-2d84f0a6` — follow-up to the globe work after you reported it "reverted to the old way" following a capture stop and app restart: I could not reproduce a revert in the code (installed build confirmed new, capture stop/restart simulated, real host data replayed), so this build hardens the likely weak points and makes the cause visible next time — orbs now get their correct globe size the instant they are created (previously only the per-frame animation applied it, so a page whose animation loop was paused showed full-size orbs), the 3D header now shows which build is serving the page, map download failures are written to the app log, and a cached medium-size fallback map is upgraded to 8192 on a later run instead of staying soft forever.
-7. `b-7a3e91c4` — the 3D globe's textures are now high-resolution and the orbs sit on their real coordinates: the first time World view is opened the app fetches NASA's public-domain Blue Marble (day) and Black Marble (night) maps once, downsizes them to 8192×4096 and caches them in `~/.nm_vendor` (the small embedded 2048/1440 px maps show until then, or permanently if the download can't happen); orbs are drawn at 45% size as a bead resting on the surface instead of a full-size ball floating a whole radius above it; the busiest host in a stack sits exactly on the true point with a dot and leader lines for the rest; LAN hosts now sit at this PC's real location instead of the first remote host that happened to geolocate; and host labels are now centred on their orb (they were drawn from the sprite's left edge, ~12° of arc to the left on the globe).
-8. `b-65001f47` — capture files are now cleaned up unconditionally, not just on a graceful shutdown: the app already deleted the shared `nm_wireshark.pcap` scratch file when you closed it normally (via the QUIT button or the window's X), but that step never ran if the app exited abnormally (crash, Task Manager kill, power loss) -- the file would just sit in temp forever. Startup now does the same delete for any capture file left behind by a previous run, before this launch could ever start a new one. See the section below for the full writeup.
-9. `b-63de2be2` — fixed the real findings from a pasted third-party code-review report, after independently verifying each one against the live source first (one of the eight, BUG-1, turned out to have the right diagnosis but the wrong reason — see the writeup below for what's actually going on). Covers: the licence-manager dialog's misplaced `@staticmethod`, six duplicated module-level blocks that could silently drift, three exception logs tagged with the wrong function name, unguarded numpy/matplotlib imports that used to crash with a raw traceback, a real race condition in the standalone agent script, four tests with a hardcoded CI-only path, and a fragile test double for the 3D server. One claim (BUG-7, a Playwright test needing a real browser + a cached vendor file) was confirmed accurate but isn't something to "fix" -- it's an environment requirement, not a bug. See the section below for the full writeup.
-10. `b-d35f0af4` — removed every spaceship: the raider that warped in and exploded on a real firewall block, the ambient flyby from the previous build, and the entire real ship-model GLB pipeline (parser, `/api/shipmodel` route, build-time bundling, the dormant per-node substitution plumbing) that only existed to feed them. The real block-event detonation (radar boom, kill counter, sonar ping) is untouched -- it just no longer also spawns a ship as a side effect. See the section below for the full writeup.
-11. `b-9cfc3b65` — the real ship model is no longer a per-node substitute at all (reverted the top-N-by-traffic LOD from the previous build after you reported it hid the flag/colour orb identity on your busiest nodes); it now powers an ambient "flyby" instead — a transient background pass that flies in, drifts across, and exits, the same motion the old low-poly cruiser had, triggered by newly-discovered hosts. See the section below for the full writeup.
+One hundred and thirty-three things this session. Build IDs for reference:
+130. `b-a7f2d915` — "also write all the changes to the guide, I've dropped some screen shots to use in the screenshots folder under setup": the guide is the page the app's '? GUIDE' button opens (`_ThreeDServer._build_guide_html`, text from `UserGuideWindow.CONTENT`, pictures embedded in `_GUIDE_SHOTS`), not the stale `Network Monitor — User Manual.html`, which has no Wi-Fi chapter at all and was left alone. The three new screenshots (`boards.png` = CSI tab, `activity.png`, `signal map.png`; the Windows pop-up/clock at the top cropped off, resized to 1700 px wide JPEGs) are embedded as `wifi_csi_tab`, `wifi_activity`, `wifi_signal_map` and appear inside the Wi-Fi Signal & CSI section next to their tabs (new inline `('shot', 'key|caption')` item). New text: Live tab Boards graph and walking man, Activity tab (ESP32 movement counted), Away mode when you are at the PC, CSI-tab walking man, auto-connect when Keep watching is on, receiver over Wi-Fi details and the Flash button, where to put the boards, three Troubleshooting entries, and a What's New block (boards over Wi-Fi, flash button, keep watching, Live boards graph, walking man, breathing and saved calibration, away mode). `test_guide_wifi.py` (27 checks: page renders, each picture is on the page, decodes as a JPEG, sits in the right section, text present). The guide's Live-tab walking man and the bay are described as built; none of this is in an installer yet.
+128. `b-a7f2d915` — "i want the walking man a much higher resolution and make it fit properly": the walking man is no longer drawn with chunky canvas dots but as a picture rendered every frame: about 2-3 thousand fine dots (spacing about 2.3 px, so a bigger figure gets more dots), drawn at triple size and shrunk back (antialiased, soft round dots) plus a faint glow, on the navy tile (`_nm_cloud_ppm`, numpy only, handed to Tk as PPM; 3-7 ms a frame). The body is better shaped (chest, waist, hips). He now fits: on the CSI tab the gap between the heat map and the movement graph is laid out for him (about a quarter of the window height, at least 100 px; graphs placed by hand) and he is sized to fill it without touching either graph (before he overlapped the heat map by 8 px); on the Live tab a bay is kept free to the right of the graphs while boards report, and he stands in it large (up to 260 px tall). `test_csi_walker.py`, `test_live_walker.py` updated.
+129. `b-a7f2d915` — "why am i getting alerts saying movement while you were away when im at the bloody machine": Trevor's saved settings had Away mode ticked (saved 09:07; it stays on until unticked) and nothing checked whether anyone was at the PC. Now a ticked Away mode only counts as away while the keyboard and mouse have been idle for 2 minutes (`at_pc()`, `AT_PC_S`), so typing at the machine never produces a 'movement while you are away' alert, and walking out and leaving the PC idle does. The checkbox says so. `test_wifi_signal.py` extended.
+127. `b-e3a09c47` — "yes put the walking man in the live tab, also make the animation look like [a glowing dotted 3-D body scan]": the walking man is now a point-cloud human (about 780 glowing dots on a dark navy tile): a 3-D body model (head, neck, torso, arms, thighs, shins, feet) sampled in rings, seen from the side, with the silhouette edge and the near side brightest (icy white) and the interior a dim blue, so it reads like a scan. A real stride: legs swing, knees bend as the leg passes through, arms swing against the legs, feet stay on the ground line and the body bobs. Same figure on the CSI tab (above the -30 s mark of the movement graph, 84x128 px) and on the Live tab (above the -150 s mark of the Boards graph; appears while the boards report movement and the Live tab is showing; hidden otherwise). `_nm_walker_cloud(phase, w, h)` (pure geometry), `_NMPointWalker` (pooled canvas dots, about 3 ms a frame). `test_csi_walker.py` rewritten, `test_live_walker.py` (10 checks). The old stick figure `_nm_walker_prims` is gone.
+126. `b-5d71a3e8` — "make the calibration stick its annoying to keep having to do it": the empty-room calibration is now saved (`csi_calibration.json`, one per board/port: the 64-value signal shape, quiet level, spread, when) every time one finishes, loaded again when the tab connects (it says 'Using the empty-room calibration saved on ...'), when the background watcher starts and after an app restart, so the movement threshold and the 'room differs' score work within seconds with no 2-minute learning and no re-calibrating. 'Clear calibration' forgets it on disk too. A saved calibration for a different channel width (other number of subcarriers) is ignored; a damaged file is ignored; the simulated demo neither loads nor saves. It does not know the furniture moved or the boards were repositioned: press Clear calibration (or calibrate again) after moving a board. `test_csi_calib_persist.py` (16 checks).
+125. `b-5d71a3e8` — "the breathing needs to be made a lot more sensitive": new selector next to the breathing readout, Normal / High (default) / Maximum. Normal is the old strict detector. High and Maximum integrate 60 s instead of 30 s, standardise every subcarrier so quiet-but-clean ones count as much as loud ones, search the top six components instead of three, use a narrower band (10-27 breaths/min, so slow room drift cannot leak into it) and only report a rate once the same rate has repeated in several 2-second evaluations in a row (High: 5 of 6 within 2/min; Maximum: 3 of 5 within 3/min, thresholds 8x and 5x instead of 25x). On SIMULATED rooms (weak breathing, 10 % packet loss, slow drift, noise; no real data) the old detector found 0 % of breathing that changes the signal by 0.4 % and 12 % at 0.5 %; High finds 75 % and 75 %, Maximum 75 % and 88 %; 0.8 % is found 100 % (old: 88 %); an empty drifting room reported a rate in 0 of 12 runs at High. Physics still limits it: below about 0.3-0.4 % nothing helps, and real rooms (fans, pets, someone in the next room) behave differently from my simulation. Also: 'Save raw (60 s)' button writes the last minute of raw CSI lines to `%LOCALAPPDATA%\\NetworkMonitor\\captures` so real data can be examined and the detector tuned on it. `test_breath_levels.py` (about 3 minutes, simulated). Existing engine tests pass with High as the default.
+124. `b-c82e1f94` — "on top of the movement graph directly above the -30 marker i want an animated walking man when movement is detected": the CSI tab's 'Movement level' graph (x axis -60..0, so -30 is its middle) now has an orange stick figure standing on its top edge, centred over the -30 mark, striding at about 14 frames a second (legs with knees, arms swinging against the legs, body bobbing) whenever the detector says movement; he vanishes when movement stops, when you are reviewing recorded history, when the board is disconnected and when the tab is hidden. The demo scenario 'Someone walking about' makes him walk too (the SIMULATED badge still shows). Drawn on a small canvas laid over the chart (the chart itself is redrawn only twice a second, too slow for a walk cycle); the position is read from the chart's own layout, so he stays centred when the window is resized. `_nm_walker_prims` holds the geometry; `test_csi_walker.py` (14 checks: figure shape, stays in its box, animates, centred within 3 px and standing on the edge, appears/disappears) plus a screenshot checked by eye. The Live tab's Boards panel (-300..0) does not have him; say if you want one there too.\n123. `b-4a8f27c6` — "the live still only works on wifi connection": I read this as the Wi-Fi window's Live tab, which only drew the PC's own Wi-Fi card (link dBm, disturbance, per-access-point swing), so with no Wi-Fi link on the PC, or with the boards doing the sensing, it was blank; that was how it was built and I had only merged the boards into alerts/history (#121), not into Live. Now: the watcher keeps a per-second board history (`csi_hist`: level, threshold, moving, RSSI); the Live tab gains a fourth panel 'Boards (ESP32): movement level, last 5 minutes' (line, threshold, red shading where movement was flagged) whenever board data exists, and says 'no Wi-Fi link on this PC right now (the Boards panel below still works)' in the signal panel instead of waiting forever; the header chip shows BOARDS · QUIET / AWAY / MOVEMENT when the PC has no link, with an explanatory sub-line. The CSI tab now also feeds this display when 'keep watching' is OFF (display only: no events, alerts or history rows), and never from the simulated demo. `test_live_boards.py` (7 checks + a rendered image checked by eye). If you meant the CSI tab's own live view (it already worked over USB and Wi-Fi alike), tell me what it showed.\n122. `b-91c3e5d0` — "the live window shows nothing now": after #121 the CSI tab was blank whenever 'Keep watching with this board' was on, because the background watcher holds the board (UDP port 4210 can only be bound once) and the tab only draws data from its own connection. Confirmed on the PC: `wifi_prefs.json` had csi_bg true, and the app process owned UDP 4210; no errors in the log. Fix: opening the CSI tab while the board is watched in the background now connects the tab to it automatically (the background steps aside, the calibration carries over, Disconnect or closing the window hands it back). Test added to `test_csi_bg.py`. If it was the Wi-Fi window's Live tab that is empty, that is a different cause (nothing in the log pointed to it).\n121. `b-2f9d60b8` — "yes i want that" (ESP32 movement in the away alerts and Activity history): new tick box in the CSI tab, 'Keep watching with this board'. With it on, the Wi-Fi watcher owns the receiver connection (it keeps running with the Wi-Fi window closed; the app starts it at launch and closing the window no longer stops the watcher) and reads the board once a second. Movement from the boards becomes a MOVEMENT event ('ESP32 boards: movement detected', stored in the same events table the Activity tab shows), a real alert while Away mode is on (own 5-minute debounce, separate from the Wi-Fi-card alert), and counts toward the Activity history: the per-minute row now keeps the LARGER of the card's and the boards' moving fraction (the card's signal figures are never overwritten; either order of writing works). The header chip shows BOARDS · MOVEMENT. Nothing is reported until the boards have a quiet baseline; if no data arrives for 90 s there is one ESP32 event with the reason (the source's own hint), and one when data returns; a dead USB source is retried every 30 s. The background analyzer skips the breathing estimate to save CPU. When the CSI tab connects to the same board the background source steps aside (the UDP port can only be bound once) and the tab feeds the watcher instead; on Disconnect or closing the window the board goes back to the background with the calibration made in the tab. The simulated demo never reaches the watcher. `/api/wifi` now has `csi: {on, moving}`. New `test_csi_bg.py` (35 checks, fake source) plus a run of the real analyzer and simulator through the background watcher (quiet 35 s: no event; walking: one event). Not run with a real board in the background yet, and not with the installed app at login. Limits: it cannot tell people from pets or a fan; the calibration is kept only while the app runs.
+120. `b-7c15e9a3` — "add a button in the csi tab that says flash esp32 ... pop up box to input the ssid required in caps and then flashes another esp32": new 'Flash ESP32…' button in the CSI tab. It opens a pop-up with Receiver / Transmitter, Wi-Fi name (with a 'Make it ALL CAPITALS' tick, on by default), password (hidden, 'show' tick), a 'Seen from this PC' list from a Wi-Fi scan (picking one fills name, channel and BSSID), channel, optional BSSID pin and the USB port (preselecting the CP210x), then Flash builds and uploads with PlatformIO and shows the output live. The firmware sources travel inside the app (`_NM_FW_BLOB`, generated from `esp32_csi`; bundled password and SSID are blank) so nothing has to be edited by hand; the settings are patched into a copy under `%LOCALAPPDATA%\\NetworkMonitor\\esp32_build` (a space-free path), the stale sdkconfig is removed, the password is masked in the output and blanked from the build folder afterwards, and the serial connection of the tab is closed first so the port is free. If the typed name differs from a scanned network only by capitals, the scanned spelling is used. Messages for 'Failed to connect' (hold BOOT), a busy port and missing PlatformIO. `test_csi_flash.py` (36 checks, fake pio): bundle equals the folder, validation, escaping, patched files, masking, the real pop-up filling from callbacks, flashing both roles. NOT run against a real board or real PlatformIO from here; the first real flash will show whether the upload step behaves as `flash.ps1` did.
+119. `b-d4e86b27` — real-board test of the Wi-Fi receiver (#117): both boards flashed, the receiver joined his Wi-Fi on channel 11 (pinned to the router's BSSID) and my unicast `CSI_SUBSCRIBE` pulled about 88 CSI datagrams a second (roughly 466 bytes each, from the transmitter's MAC, RSSI about -28, 128-byte CSI) to the PC; so the radio chain works. The board's once-a-second announcements were NOT heard by my test client (firewall or broadcast filtering suspected), so the app no longer depends on them: it enables `SO_BROADCAST`, sends `CSI_SUBSCRIBE` every 2 s both directly to the board and by broadcast, and learns the board's address from its first data packet, so it connects even with announcements blocked and does not raise a false 'no board heard' alarm. `test_csi_udp.py` gains a no-announcement scenario; all CSI tests, the Ollama tests and `selftest.py` pass. Not yet confirmed in the installed app with Windows Firewall in play; movement/breathing quality on real data still unproven.
+118. `b-9a41d7c3` — "AI unavailable ... Ollama HTTP 500 ... cudaMalloc failed: out of memory ... really again": checked the real machine first. RTX 3050 with 6144 MiB; Windows and the open apps (browsers, shell, overlays) were using 3695 MiB, leaving 2308 MiB; deepseek-r1:7b is 4.7 GB and Ollama tried to put a 3.66 GB buffer on the card. Nothing was broken (no model loaded, Ollama fine). The app had no handling for this error, so every AI question failed the same way. Now: on that error (out of memory / unable to allocate CUDA / cudaMalloc) it retries ONCE on the CPU (`num_gpu: 0`, timeout at least 240 s), returns the answer, and remembers (`_NM_AI_STATE['cpu']`) so later questions skip the failing GPU attempt until the app restarts. If the CPU retry fails too it says so plainly and suggests closing apps or a smaller model. Slower (CPU), but works. `test_ollama_oom.py` (5 checks) against a fake Ollama with his exact error; the three older Ollama tests still pass. Not run against his real Ollama yet. Bigger fix if wanted: a smaller model (a 3B) that fits in the ~2.3 GB the desktop leaves free.
+117. `b-5f2c8e19` — "the office is upstairs" (so a USB cable can't reach a receiver in the living or dining room): the CSI tab can now read the receiver board over your home Wi-Fi. Port list gets a last entry `wifi:4210`; choosing it listens on UDP port 4210. The csi_recv firmware (new `csi_config.h`: Wi-Fi name/password, optional router/extender BSSID, channel, optional fixed PC address) joins the network, announces `CSI_BOARD,...` about once a second, and streams one CSI line per datagram to whoever answers `CSI_SUBSCRIBE` (the app re-subscribes every 2 s, so a changing PC address doesn't matter; the board stops after 8 s of silence). Broadcasting the data itself was rejected because the router would re-send it to every device at the slowest rate. Hints explain: no board heard (power, flash, same network, firewall), board seen but no CSI (names the Wi-Fi channel csi_send must use), board went quiet, transmitter stopped. Also fixed: the CSI tab never restored your saved port choice (it compared the whole label to the port name). Firmware compiles on ESP-IDF 6.1; tested only against a fake board in `test_csi_udp.py` (21 checks) and the tab test; NEVER run on real boards or through a real router/extender.
+116. `b-c07a62d4` — "still looks crap" (screenshot of your tall plan drawn as a wide stretched picture): #114 said the picture kept its proportions and it did not. Real cause: `imshow(..., aspect='auto')` for the plan, the signal field and the line layers silently replaced the map's equal-aspect setting, so the map filled whatever box the window gave it. My own test only used a 2:1 picture in a roughly 2:1 box, which hid it. Fixed properly: every plan layer is drawn with equal aspect and the map re-asserts it after drawing; the plan height is now ALWAYS derived from the picture (you set the width, the height box shows '← from the picture' and is locked), so it cannot be stretched; the map and its colour bar are laid out as a pair and centred, sized to the picture's shape. The views are reworked: 'Signal on paper (see-through)' (default: white paper tinted by the signal with the plan's dark lines laid over it, like multiply, so walls stay black and text stays dark) and 'Signal on dark, plan lines on top' (true vivid colours instead of the dull mustard that came from blending at 87% alpha onto the dark panel, plan as dark lines with a thin pale halo), plus 'Signal only'. 'Match picture shape' button and the stretch warning are gone as there is nothing left to match. `test_plan_view.py` rewritten to test the thing that failed: box height/width equals the picture's shape for a 2:1 and a 3:2 portrait picture whatever width and height were typed, equal aspect, pair centred, layer counts per view. Rendered with a synthetic tall CAD-style plan (thick filled walls, small text); not with your image file.
+115. `b-3e68d05b` — "I want to be able to select what floor in the house I'm looking at, i.e. upstairs and downstairs": the Signal map's tiny numeric 'Floor' box is replaced by named floor buttons along the top (Downstairs / Upstairs by default, each showing how many samples it holds). Each floor now keeps its own samples, floor plan picture, router position and plan size (so a 2:1 downstairs plan and a 4:3 upstairs plan no longer fight over one height), switching floors clears the click position so you never sample at the wrong place, and the Sample button says which floor it records on ('Sample here (Upstairs)'). '＋ Floor above' / '＋ Floor below' add an attic or a basement (below uses a negative index), 'Rename' and 'Delete floor' (asks first when it holds samples or a picture) manage them; names, the selected floor and the sizes are saved and restored. An older survey (everything on floor 0, no names) opens as Downstairs with an empty Upstairs. Chart titles use the floor name; the matplotlib 3D view labels each floor and draws basements below zero; the browser 3D survey (`/api/wifi` now returns `floors`) labels floors and tooltips with your names. New `test_floors.py` (24 checks including a click-through of add / rename / delete with the dialogs stubbed, persistence across reopening, and migration from an old survey). Not tested against your real survey file.
+114. `b-a91c4e72` — "when you add a floor plan you can't see it properly" (screenshot): two faults, both mine. (1) The picture was stretched to whatever the plan size boxes said (12 × 8 m by default) whatever shape the picture really was; it now keeps its own proportions: loading a picture sets the plan height from the picture's shape at the current width, there is a 'Match picture shape' button, and a yellow note appears on the chart whenever the two disagree by more than 6%. (2) It was drawn at 55% strength underneath a signal layer that was 90% opaque, so on the dark window it showed as a grey ghost behind a yellow wash. Now a 'Plan view' choice: 'Signal over plan (see-through)' (default: the picture at full strength, the colour layer see-through on top, strength set by a slider), 'Plan lines over signal' (the picture is converted to line-art, dark lines with a pale halo, drawn above the colour so walls stay readable on any colour; works for light-paper and dark-paper plans) and 'Signal only'. The choice and the slider are saved with the survey. Large pictures are shrunk to 1800 px wide for speed. New `test_plan_view.py` (flag when stretched, match shape, the three views, walls clearly visible, checked by eye in renders); `test_wifi_signal.py` unchanged and passing. Only tested with a synthetic blueprint plus the 8-sample layout from your screenshot, not with your actual image file.
+113. `b-7d3f51a8` — "make the data historical in a database so I can scrub through time": the CSI tab now records itself. While a board (or the demo) is connected, a summary row is written once a second to `csi_history.db` in `%LOCALAPPDATA%\\NetworkMonitor` (SQLite, WAL): movement level and its threshold, motion score, room-differs deviation, breathing estimate, signal strength, packet rate and the eight channel-slice values that draw the strip; every 5 s the signal shape (and the empty-room reference, stored only when it changes); a per-minute table so the long-range timeline is instant; an event table with each stretch of movement. Raw packets are not stored (about 100 a second would be gigabytes a day); a day of summaries is about 18 MB and the last 7 days are kept (pruned hourly). Under the charts there is a timeline of everything recorded (10 min / 1 h / 6 h / 24 h / everything): click or drag to jump to a moment, and the four charts then show the minute ending there, stamped RECORDED with the date and time; chips are prefixed PAST. Buttons: back to live, earlier / later movement (lands ten seconds into the event so the calm lead-up is on screen), ±10 s, ±1 min, play at 1x / 4x / 16x. Live capture keeps recording while you review. Demo data is tagged: orange on the timeline and labelled SIMULATED in the review banner and on the chart, so it can never be mistaken for real data. If nothing arrived for 1.5 s no row is written, so outages show as gaps. 'Clear history' asks twice. New `_NMCsiHistory` and `_NMCsiAnalyzer.activity_now()`. New `test_csi_history.py` (45 checks: recorder, events, overview, shapes, restart, prune, simulated tagging, the real tab's scrub / step / jump / click / play / clear); the existing tests still pass. Not tested on real boards; on a very long capture the history file grows to roughly 130 MB before old days drop off.
+112. `b-e2a94c06` — the CSI tab's "waterfall" was too hard to read (your words), so it is gone. It was 64 rainbow columns of per-subcarrier z-scores with a blank gap for the guard band, which in an empty room is just confetti, and the axis said "subcarrier". Replaced with (1) a heat strip titled "Is the signal changing? Brighter = more change": time left to right (right edge = now), eight rows each a slice of the Wi-Fi channel, dark blue = steady, orange = some change, yellow/white = a lot, every slice judged against its own quiet level so a naturally noisy slice does not glow permanently; (2) directly under it, on the same time axis, the movement line with its threshold and the moments above it shaded red, so a bright patch and a red patch visibly coincide; (3) the signal-shape chart now says "now vs empty room" and hides meaningless numbers; (4) the breathing chart no longer always peaks at 1: with no steady rhythm it is grey and says "no breathing detected", only a real finding is purple with a green marker and "about N per minute". New `_NMCsiAnalyzer.activity()`; the old `waterfall()` is kept (tested) but no longer drawn. Guide bullets and the on-screen how-to text rewritten. `test_csi_tab.py` (screenshots checked by eye: calm is dark, walking lights up the strip and the red shading at the same moment) and `test_csi_engine.py` (one new check) pass. Still never seen real ESP32 data.
+1. `b-c51d7e93` — CSI (ESP32) tab added as the fifth tab of the Wi-Fi window, plus the in-app guide updated. The tab reads a pair of ESP32 boards (one transmitting about 100 packets a second, one plugged in by USB printing each packet's CSI as text): serial port picker (starred USB-serial bridges, baud, Connect/Disconnect) using the Windows API through ctypes so no extra package is needed (DTR/RTS held low so it never resets the board or drops it into download mode), subcarrier waterfall, motion score against a learned or calibrated quiet baseline, a 'room differs from the empty reference' score, empty-room calibration (10 s to leave, 20 s measure), an experimental breathing estimate, 'Copy raw data (last 20 s)' and 'Copy board messages', hints that say why nothing is arriving, and a clearly-badged SIMULATED demo feed. Guide: new 'Wi-Fi Signal & CSI' and 'What's New' sections; heatmap and Geo Map entries refreshed. New `esp32_csi/` folder: csi_send / csi_recv firmware source, PlatformIO and ESP-IDF project files, `flash.ps1`, README. Tested with `test_csi_engine.py` (parser incl. damaged lines, calibration, motion, room-differs, breathing, a real tty via pty, hints) and `test_csi_tab.py` (the real window under xvfb). The firmware is only syntax-checked against stand-in headers and has never run on a board; the tab has never seen real ESP32 data.
+2. `b-5c2e8a17` — Wi-Fi Signal upgrade (the six improvements): (1) reads the Windows Wi-Fi API directly through a crash-isolated PowerShell helper — real dBm about ten times a second and fresh scans on demand, falling back to `netsh` automatically if the helper cannot run; (2) a background watcher tracks every access point's path for disturbance, not just the one you are connected to; (3) activity history in the app database with a day-by-hour movement heatmap, last-24-hour bars, an event history, away mode (manual or auto after idle) and alerts through the app's toast / push / webhook; (4) Signal map: floor-plan image behind the map, router marker, dead-spot detection with a suggested spot for an extra node, 2.4 vs 5 GHz comparison, PNG export; (5) a WI-FI button in the 3D view with an AIR mode (access points as orbs around you) and a SURVEY mode (your samples as a volume), served from the new `/api/wifi`; (6) sharper rogue detection (maker lookup, open / weaker look-alikes of your network name), a 0-100 health score with its factors, and plain-language channel advice. Tested with 74 checks plus a headless-browser test of the 3D layer; the Windows API helper itself is only tested against a fake helper here, not on real hardware.
+3. `b-9d41c7e6` — fixes to the new Wi-Fi Signal window after your first real run (screenshots): (a) it said "Not connected to Wi-Fi" while you were connected — newer Windows 11 prints the router's address as `AP BSSID` (plus a separate `Band` line) and the parser only knew `BSSID`; it now accepts both, no longer needs the BSSID at all, and if an adapter is present but no link can be read it says exactly what it saw (state/signal/SSID) instead of a generic message; (b) every network was labelled NEW — the 'new' test counted anything first seen in the last hour (so the baseline itself) and Windows' first cached scan misses neighbours that show up a minute later; replaced with a 10-minute learning period on first run (networks seen then are normal, absorbed silently), after which a network only alarms if it is strong enough (-78 dBm or better), has persisted for at least 3 scans and 30 seconds, and only once per access point; known networks now live in `wifi_seen2.json` so the old file's wrong baseline is discarded; (c) the grid lines in the Wi-Fi charts were solid white because your matplotlib ignores transparency written inside a colour for grid lines and applies the default grid alpha of 1 — now set with `alpha=`; the same fix applies to the heatmap dashboard's cell grid, which had the same fault; (d) the 3D survey view was pushed to the right with the colour bar overlapping its labels — it now uses explicit axes with its own colour bar and the room's real proportions. `test_wifi_signal.py` gained Windows 11 label, no-BSSID, learning-period, persistence-threshold, once-only and faint-network checks.
+4. `b-3fa7d205` — new WI-FI button on the left rail opening a Wi-Fi Signal window (WiFi-3D-Fusion's tier that needs no special hardware; it reads signal strength from Windows' own `netsh wlan` output, not CSI). Live tab: your link's signal in dBm over the last 5 minutes plus a room-movement detector — rolling standard deviation of the signal against a learned quiet baseline, with hysteresis; movement shades the graph and logs an event, and a QUIET / MOVEMENT / CALIBRATING chip shows the state (a person crossing between you and the router swings the signal by several dB). Networks tab: every access point in range with band, channel, strength bars, security; a channel-congestion chart for 2.4 and 5 GHz with the quietest of channels 1/6/11; (superseded by b-9d41c7e6: first-run learning period, then alarms) the first scan is saved as the baseline for this place and any new access point afterwards raises a NEW AP alarm, with an extra warning when it reuses your own network name (extra mesh node or a look-alike). Signal map tab: set a plan size, click where you are standing, press Sample here, walk on; 3+ samples draw a smoothed signal field with contours, and a 3D view shows every sample across floors; the survey and the known-network list are saved under `%LOCALAPPDATA%\\NetworkMonitor`. A Copy raw netsh output button helps diagnose a Windows whose output the parser does not understand. Limits stated in the window and guide: signal strength only, Windows only, the OS caches the access-point scan (~1 min), and Windows may need Location allowed to scan. `test_wifi_signal.py` covers the parsers (including hidden SSID and translated labels), the detector, the survey smoother and the real window with a fake scanner.
+5. `b-e5b30c18` — Time-of-Day Heatmap window restyled as a dark glass dashboard, after you sent two reference images (a rainbow thermal-field dashboard, then a neon world-map dashboard with glass panels): the blocky teal grid is now a smooth rainbow heat field (deep blue → cyan → green → yellow → orange → hot red, warm = good, so latency is reversed) with contour lines, glowing best/worst markers and a glowing "now" box, sitting in a glass panel with radar rings; around it are a best-slot orb (with the worst slot), spectrum bar charts for speed by hour of day and by day of week (current hour/day highlighted), a gradient daily-trend area chart, a colour-scale legend with Excellent/Good/Fair/Poor swatches, and a summary panel (swing %, best/worst hour, best/worst day). The window opens larger (1260×740) and re-lays itself out when resized. Three new top-bar switches — Dashboard, Smooth, Vivid colours — all on by default; untick all three for the old classic theme-accent table. Hover tooltips, click-to-pin, metric/window selectors and theme re-render are unchanged. `test_heatmap_theme.py` now checks the new defaults as well as the classic path.
+6. `b-91a4d2f6` — Geo Map window (the matplotlib world map opened from the GEO MAP rail button) is no longer a 1440×720 image stretched across the screen: it now loads the NASA Black Marble night map that the 3D globe already caches in `~/.nm_vendor` (8192×4096), downsized to about 1.25× the screen width (2560–4096 px), instead of the embedded 1440×720 image; if that map is not cached yet it shows the old image straight away, starts the download in the background and swaps the sharp map in as soon as it lands; and when you zoom in or pan, a native-resolution crop of the 8192 map is layered over the base map (about 0.4 s after the zoom settles) so detail keeps up with the zoom instead of going blurry.
+7. `b-7c15e3d9` — Top Flow Talkers (the ribbon panel in the 3D view) redesigned: remote ends now line up with a column of host cards on the right (country chip, name, org/IP, protocol, volume, share, trend arrow, ⛔/⚠ flags) instead of tiny labels scattered over the ribbons; the loud circuit-trace wallpaper is now a quiet, rounded, much longer-repeating texture; ribbons have a gradient surface, sheen and glowing rim; the moving bits are glowing comet pulses (busiest three get a light sweep and faint binary); the layout fits the window (the bottom of the Incoming section was being clipped, because the legend row was not counted in the canvas height) with soft sqrt volume weighting and fixed-height remote ends so small flows stay readable; hovering a ribbon or card focuses it and dims the rest, with a tooltip on ribbons; the title, legend and subtitle text is larger; the end caps on incoming ribbons now sit where the ribbon actually ends (they were drawn with the other end's size); and a leftover debug GB-flag image in the corner of the 3D page was removed.
+8. `b-2d84f0a6` — follow-up to the globe work after you reported it "reverted to the old way" following a capture stop and app restart: I could not reproduce a revert in the code (installed build confirmed new, capture stop/restart simulated, real host data replayed), so this build hardens the likely weak points and makes the cause visible next time — orbs now get their correct globe size the instant they are created (previously only the per-frame animation applied it, so a page whose animation loop was paused showed full-size orbs), the 3D header now shows which build is serving the page, map download failures are written to the app log, and a cached medium-size fallback map is upgraded to 8192 on a later run instead of staying soft forever.
+9. `b-7a3e91c4` — the 3D globe's textures are now high-resolution and the orbs sit on their real coordinates: the first time World view is opened the app fetches NASA's public-domain Blue Marble (day) and Black Marble (night) maps once, downsizes them to 8192×4096 and caches them in `~/.nm_vendor` (the small embedded 2048/1440 px maps show until then, or permanently if the download can't happen); orbs are drawn at 45% size as a bead resting on the surface instead of a full-size ball floating a whole radius above it; the busiest host in a stack sits exactly on the true point with a dot and leader lines for the rest; LAN hosts now sit at this PC's real location instead of the first remote host that happened to geolocate; and host labels are now centred on their orb (they were drawn from the sprite's left edge, ~12° of arc to the left on the globe).
+10. `b-65001f47` — capture files are now cleaned up unconditionally, not just on a graceful shutdown: the app already deleted the shared `nm_wireshark.pcap` scratch file when you closed it normally (via the QUIT button or the window's X), but that step never ran if the app exited abnormally (crash, Task Manager kill, power loss) -- the file would just sit in temp forever. Startup now does the same delete for any capture file left behind by a previous run, before this launch could ever start a new one. See the section below for the full writeup.
+11. `b-63de2be2` — fixed the real findings from a pasted third-party code-review report, after independently verifying each one against the live source first (one of the eight, BUG-1, turned out to have the right diagnosis but the wrong reason — see the writeup below for what's actually going on). Covers: the licence-manager dialog's misplaced `@staticmethod`, six duplicated module-level blocks that could silently drift, three exception logs tagged with the wrong function name, unguarded numpy/matplotlib imports that used to crash with a raw traceback, a real race condition in the standalone agent script, four tests with a hardcoded CI-only path, and a fragile test double for the 3D server. One claim (BUG-7, a Playwright test needing a real browser + a cached vendor file) was confirmed accurate but isn't something to "fix" -- it's an environment requirement, not a bug. See the section below for the full writeup.
+12. `b-d35f0af4` — removed every spaceship: the raider that warped in and exploded on a real firewall block, the ambient flyby from the previous build, and the entire real ship-model GLB pipeline (parser, `/api/shipmodel` route, build-time bundling, the dormant per-node substitution plumbing) that only existed to feed them. The real block-event detonation (radar boom, kill counter, sonar ping) is untouched -- it just no longer also spawns a ship as a side effect. See the section below for the full writeup.
+13. `b-9cfc3b65` — the real ship model is no longer a per-node substitute at all (reverted the top-N-by-traffic LOD from the previous build after you reported it hid the flag/colour orb identity on your busiest nodes); it now powers an ambient "flyby" instead — a transient background pass that flies in, drifts across, and exits, the same motion the old low-poly cruiser had, triggered by newly-discovered hosts. See the section below for the full writeup.
 
-12. `b-6b7e63f5` — three fixes after you flagged the ship-model build as broken: removed the old ambient background patrol-ship spawn (kept the real-block raider kill effect), changed the real ship-model LOD from all-or-nothing to top-N-by-traffic, and made the Ollama "llama-server binary not found" diagnostic actually check the disk instead of repeating canned advice. See the section below for the full writeup.
-13. `b-def7f507` — real ship-model GLB (`glb.glb`, ~125MB) replaces
+14. `b-6b7e63f5` — three fixes after you flagged the ship-model build as broken: removed the old ambient background patrol-ship spawn (kept the real-block raider kill effect), changed the real ship-model LOD from all-or-nothing to top-N-by-traffic, and made the Ollama "llama-server binary not found" diagnostic actually check the disk instead of repeating canned advice. See the section below for the full writeup.
+15. `b-def7f507` — real ship-model GLB (`glb.glb`, ~125MB) replaces
    plain sphere node meshes in the /3d topology view when the node
    count is small enough (<=40) to afford the triangle budget; falls
    back to spheres above that, or if the model fails to load. See the
    section below for the full writeup.
-14. `b-346cdf46` — corrupt speed data purge (see note further down).
-15. `b-86b6ab2d` — honeypot tarpit.
-16. `b-dd991374` — attacker-seconds wasted, surfaced in the report + AI
+16. `b-346cdf46` — corrupt speed data purge (see note further down).
+17. `b-86b6ab2d` — honeypot tarpit.
+18. `b-dd991374` — attacker-seconds wasted, surfaced in the report + AI
    assessment.
-17. `b-78978af4` — "Stuck now: 0" investigation + live "Held total" stat.
-18. `b-48119510` — guide updated to cover all of the above.
-19. `b-6446ed81` — Classic view removed entirely; guide rewritten to match.
-20. `b-248b00b4` — firewall rules: search bar + host names, on every
+19. `b-78978af4` — "Stuck now: 0" investigation + live "Held total" stat.
+20. `b-48119510` — guide updated to cover all of the above.
+21. `b-6446ed81` — Classic view removed entirely; guide rewritten to match.
+22. `b-248b00b4` — firewall rules: search bar + host names, on every
    surface that lists them.
-21. `b-d363c5f7` — merged the two `_NM_OUI` vendor tables into one.
-22. `b-7b6beaf3` — 3D view: sparkle-flare starfield + glass walls.
-23. `b-54bce347` — 3D view: traveling light pulses on the protocol bars
+23. `b-d363c5f7` — merged the two `_NM_OUI` vendor tables into one.
+24. `b-7b6beaf3` — 3D view: sparkle-flare starfield + glass walls.
+25. `b-54bce347` — 3D view: traveling light pulses on the protocol bars
     (superseded by #11 below — you didn't like the look).
-24. `b-2a88d56c` — 3D view: protocol bars redone as scrolling neon circuit
+26. `b-2a88d56c` — 3D view: protocol bars redone as scrolling neon circuit
     traces.
-25. `b-6cefa676` — 3D view: floor animated with glowing flow-path lines
+27. `b-6cefa676` — 3D view: floor animated with glowing flow-path lines
     (superseded by #13 below — you wanted a packet-capture table instead).
-26. `b-bdecb4b1` — 3D view: floor redone as a live scrolling packet-capture
+28. `b-bdecb4b1` — 3D view: floor redone as a live scrolling packet-capture
     console (superseded by #14 below — you wanted it on the wall instead).
-27. `b-a8335452` — 3D view: packet-capture console moved off the floor onto
+29. `b-a8335452` — 3D view: packet-capture console moved off the floor onto
     the left wall (superseded by #15 below — you wanted it lower).
-28. `b-61579561` — 3D view: packet console lowered on the left wall.
-29. `b-1fb06fce` — honeypot: higher tarpit capacity/hold time, five more
+30. `b-61579561` — 3D view: packet console lowered on the left wall.
+31. `b-1fb06fce` — honeypot: higher tarpit capacity/hold time, five more
     decoy ports.
-30. `b-ca2ce494` — 3D view: GRID toggle button.
-31. `b-c954532e` — Wireshark Monitor: Clear now actually deletes the
+32. `b-ca2ce494` — 3D view: GRID toggle button.
+33. `b-c954532e` — Wireshark Monitor: Clear now actually deletes the
     capture file instead of sometimes leaving it behind.
-32. `b-d4a95b9d` — ISP Evidence Pack PDF: fixed a crash ("x and y must
+34. `b-d4a95b9d` — ISP Evidence Pack PDF: fixed a crash ("x and y must
     have same first dimension") when any download/upload/ping reading in
     the period was missing or implausible (this one, current).
-33. (no build ID — this is the installer script, not the app) —
+35. (no build ID — this is the installer script, not the app) —
     `installer.nsi`/`build_installer.bat`: Npcap download URL was pinned
     to a stale version; bumped, plus a stale build-script banner fixed
     (this one, current).
-34. (no build ID — build script only) — `build_installer.bat` now
+36. (no build ID — build script only) — `build_installer.bat` now
     downloads and installs the NSIS inetc plugin automatically instead
     of requiring a manual download/extract/copy (could not be run
     end-to-end — no Windows box here, see caveat further down).
-35. `b-4431b665` — installer now auto-installs a speed-test CLI
+37. `b-4431b665` — installer now auto-installs a speed-test CLI
     (librespeed-cli) instead of requiring you to find one yourself; the
     app's own CLI-discovery code updated to match.
-36. (no build ID — installer script only) — the auto-installed inetc
+38. (no build ID — installer script only) — the auto-installed inetc
     plugin from #21 failed on your machine ("Plugin not found, cannot
     call inetc::get"); removed the inetc dependency from `installer.nsi`
     entirely instead of patching the plugin-installer further.
-37. `b-b2a464b9` — added a Settings field for the advertised download/
+39. `b-b2a464b9` — added a Settings field for the advertised download/
     upload speed the ISP Evidence Pack compares against (previously
     config-file-only); also fixed the in-app guide's stale "five preset
     colour themes" line — it's actually twelve.
-38. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
+40. `b-b07a1ff4` — ISP Evidence Pack PDF is now dark-themed to match the
     rest of the app, using your active colour theme's download/upload/
     ping colours for the charts.
-39. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
+41. `b-8d732031` — Topology/EtherApe Sankey view: "[ BLOCKED ]" marker
     moved off the middle of the canvas onto the actual blocked external
     server it refers to.
-40. `b-8834f5f5` — EtherApe window: new "LAN SCAN" button — active subnet
+42. `b-8834f5f5` — EtherApe window: new "LAN SCAN" button — active subnet
     scan with full name resolution, MAC/vendor, and open ports, shown as
     both a table and a live network map.
-41. `b-738e198c` — LAN Scan map redone as an icon topology diagram (router
+43. `b-738e198c` — LAN Scan map redone as an icon topology diagram (router
     hub + connected device icons with name/IP/ports underneath), replacing
     the plain dot-grid from #27.
-42. `b-340c4b04` — LAN Scan is now several times faster: hosts are scanned
+44. `b-340c4b04` — LAN Scan is now several times faster: hosts are scanned
     concurrently instead of one at a time.
-43. `b-a1d0e459` — LAN Scan map icons are now real device artwork, cropped
+45. `b-a1d0e459` — LAN Scan map icons are now real device artwork, cropped
     from the Visio stencil screenshot you sent, instead of hand-drawn
     shapes.
-44. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
+46. `b-bfd27b6e` — main dashboard's "Live traffic" panel redone as a
     glowing hardware-monitor-style waveform, updating on its own faster
     timer.
-45. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
+47. `b-6e4d9e40` — top bar's duplicated Agents/Wireshark/Topology buttons
     removed; new "System" button opens a full System Monitor window built
     after watching Dave Plummer's Task Manager OG demo.
-46. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
+48. `b-9d6e28c2` — System Monitor rebuilt as a real multi-page app (Summary
     / Performance / Processes) after watching the actual video instead of
     working from a transcript alone.
-47. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
+49. `b-4d3f3e7a` — System Monitor: fixed silent GPU diagnostics + fixed the
     full-window rebuild on every page/tab click that was making it feel
     slow and clunky.
-48. `b-a1d07a24` — System Monitor: full 13-page rebuild to match the real
+50. `b-a1d07a24` — System Monitor: full 13-page rebuild to match the real
     TMOG app you screen-recorded (System Info, App history, Startup apps,
     Users, Services, Power & Freq, Connections, Installed Apps, Disk
     Space, Benchmarks — the 8 pages the video has that the 3-page rebuild
     in #33 didn't), plus `nvidia-ml-py` now bundled into the installer
     build automatically.
-49. `b-028de0ed` — CRITICAL FIX: the CPU benchmark added in #35 was
+51. `b-028de0ed` — CRITICAL FIX: the CPU benchmark added in #35 was
     launching a full new copy of the entire app (new window, new threads,
     everything) once per CPU core every time it ran, because of a
     Windows/PyInstaller multiprocessing pitfall I didn't catch in the
     Linux sandbox. Fixed — see the entry above this one.
-50. `b-5cbb9230` — "System" button now launches the real Task Manager
+52. `b-5cbb9230` — "System" button now launches the real Task Manager
     TMOG app (bundled + silently installed by the installer) instead of
     the from-scratch rebuild from #33-#35.
-51. (no build ID — installer script only) — installer now installs and
+53. (no build ID — installer script only) — installer now installs and
     configures WSL, then installs Kali Linux, as a pen-testing
     environment. Step 1 of 2 — GUI panels to drive specific tools inside
     it are a planned follow-up, not built yet.
-52. (no build ID — installer script only) — CRITICAL FIX: #38's WSL
+54. (no build ID — installer script only) — CRITICAL FIX: #38's WSL
     detection reported "not found" on a machine that genuinely had WSL
     installed and working, because of a 32-bit-installer/WOW64 path bug.
     Fixed.
-53. `b-5ecee4c5` — new "Pen Test" button next to "System" on the main
+55. `b-5ecee4c5` — new "Pen Test" button next to "System" on the main
     dashboard, runs `wsl -d kali-linux -- kex --sl -s`.
-54. `b-b6a3a1fb` + installer script — "Pen Test" now opens an Nmap scanner
+56. `b-b6a3a1fb` + installer script — "Pen Test" now opens an Nmap scanner
     GUI with an AI box that crafts scans and recommends next steps; Kali
     desktop is still one click away inside it.
-55. `b-30771036` — Nmap GUI: new "Report" button generates a self-contained
+57. `b-30771036` — Nmap GUI: new "Report" button generates a self-contained
     HTML report of the scan.
-56. `b-6e2b823c` — "Kali Desktop" button now runs `wsl -d kali-linux` then
+58. `b-6e2b823c` — "Kali Desktop" button now runs `wsl -d kali-linux` then
     plain `kex` — dropped the `--sl -s` (seamless mode + sound) flags.
-57. `b-c4249a31` — CRITICAL FIX: #43's button crashed Xfce on your real
+59. `b-c4249a31` — CRITICAL FIX: #43's button crashed Xfce on your real
     machine ("Unable to start notification daemon ... wlr-layer-shell")
     even though typing the same two steps by hand worked fine. Fixed by
     running `kex` through a login shell.
-58. `b-c6e3c79a` — CRITICAL FIX: #44's Xfce crash was gone, but the button
+60. `b-c6e3c79a` — CRITICAL FIX: #44's Xfce crash was gone, but the button
     still didn't work — console popped up and closed immediately, no
     desktop. Bare `kex` has no mode flag; switched to Kali's own
     documented `kex --win -s` recipe.
-59. `b-0618aa6b` — CORRECTION to #45: you pasted the real `kex --help`
+61. `b-0618aa6b` — CORRECTION to #45: you pasted the real `kex --help`
     output — window mode IS the default, so #45's "needs a mode flag"
     diagnosis was wrong. The real remaining gap was interactive vs
     non-interactive shell (`~/.bashrc` only loads for interactive shells);
     switched from `bash -lc` to `bash -lic`.
-60. `b-c71b6fc3` — "Kali Desktop" button simplified back to bare
+62. `b-c71b6fc3` — "Kali Desktop" button simplified back to bare
     `wsl -d kali-linux`, no `kex` at all — you asked to just get a shell
     and type `kex` yourself.
-61. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
+63. `b-929759a0` — in-app Guide: new Pen Test (Nmap) page, and the
     stale System-button description rewritten to match what it actually
     does now.
-62. `b-6790beaa` — Guide: rewrote the Kali Desktop button paragraph —
+64. `b-6790beaa` — Guide: rewrote the Kali Desktop button paragraph —
     you called the previous version "very badly written" and pasted it
     back at me.
-63. `b-52b7391c` — CRITICAL FIX: the gauge cards (Download/Upload/Ping/
+65. `b-52b7391c` — CRITICAL FIX: the gauge cards (Download/Upload/Ping/
     DNS strip at the top of the dashboard) never picked up a Colour Theme
     change — only the historical charts further down did.
-64. (no build ID — `build_installer.bat` only, not the app) — Step 1 of
+66. (no build ID — `build_installer.bat` only, not the app) — Step 1 of
     the build (`SpeedtestMonitor.exe` itself) now wipes the old exe first
     and refuses loudly if it's locked, instead of possibly rebuilding
     over it silently.
-65. `b-a3b670a8` — CRITICAL FIX (two bugs, one report): the Live traffic
+67. `b-a3b670a8` — CRITICAL FIX (two bugs, one report): the Live traffic
     panel's title was gone for good the moment it had real data, and
     Colour Theme only ever reached three of the six chart panels — DNS
     history, the DNS gauge, and the DNS row in Statistics were always a
     fixed colour no matter the theme. Also found and fixed a second,
     unrelated theme bug while in there: 7 of the app's 12 themes could
     never survive an app restart.
-66. `b-ef1e7021` — CRITICAL FIX: found the actual reason the System
+68. `b-ef1e7021` — CRITICAL FIX: found the actual reason the System
     button / Task Manager TMOG content wasn't showing up in the Guide,
     and it wasn't the Guide text — it was that the "? GUIDE" button never
     opens the Tkinter guide I'd been editing all session; it opens a web
@@ -172,7 +190,7 @@ One hundred and nine things this session. Build IDs for reference:
     un-synced list that had never heard of "Pen Test." System (Task
     Manager TMOG) now gets its own page too, and both new pages have a
     real embedded screenshot.
-67. `b-09f33cdb` — you (Trevor) added HTTPS support to the embedded web
+69. `b-09f33cdb` — you (Trevor) added HTTPS support to the embedded web
     server and the remote client yourself — `speedtest_monitor.py` now
     wraps its socket in TLS when `ssl_cert`/`ssl_key` are configured,
     and `nm_client.py` now trusts the server's cert (or falls back to
@@ -181,30 +199,30 @@ One hundred and nine things this session. Build IDs for reference:
     HTML report both still hardcoded `http://`, so they'd have silently
     broken the moment HTTPS was actually on — fixed both, plus synced
     everything.
-68. `b-464af3fd` — fixed the IDS report's hardcoded `http://localhost:8765`
+70. `b-464af3fd` — fixed the IDS report's hardcoded `http://localhost:8765`
     (flagged last build as a known, pre-existing, unrelated gap) now that
     you sent your real `netsentinel.crt`/`.key` and I could verify the
     whole HTTPS chain against your actual files instead of a throwaway
     test cert.
-69. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
+71. `b-b51f5070` — you reported the 3D view still tried `http` and failed;
     found (and fixed) the same hardcoded-`http://` bug in three more
     places my previous "check all the others" pass missed entirely.
-70. `b-fe30eb24` — colour themes now apply to all 11 web-served pages
+72. `b-fe30eb24` — colour themes now apply to all 11 web-served pages
     (Guide, Monitor, Threat Radar, Honeypot, Remote Agents, Top Talkers,
     Topology, VDI, Analytics, the mobile dashboard, and the 3D view's 2D
     HUD) — previously the 12 themes only touched the main dashboard's
     gauges, the Remote Agents chart, and the Evidence Pack PDF.
-71. `b-d3604f66` — captured-traffic pcap file is now actually deleted when
+73. `b-d3604f66` — captured-traffic pcap file is now actually deleted when
     the app closes, instead of only being wiped at the *next* launch.
-72. `b-1fbadf59` — the Wireshark Monitor window itself now stops capture
+74. `b-1fbadf59` — the Wireshark Monitor window itself now stops capture
     and deletes the pcap when just that window is closed (X button), not
     only when the whole app quits — closes the gap flagged in the last
     entry.
-73. `b-e787ec87` — you reported "reporting is broken"; found and
+75. `b-e787ec87` — you reported "reporting is broken"; found and
     fixed the actual crash — `_fmt_ms()` had no `None` guard, so any HTML
     report over a period with no ping or DNS readings threw
     `TypeError: unsupported format string passed to NoneType.__format__`.
-74. `b-ed99f4cc` — EtherApe toolbar redesign: the old two-row,
+76. `b-ed99f4cc` — EtherApe toolbar redesign: the old two-row,
     ~55-control toolbar (the "mess" you flagged, that needed full-screen to
     see half of it) is replaced with a left icon rail + collapsible bottom
     filters drawer (the "Option B" mockup you picked). Plus two real,
@@ -213,11 +231,11 @@ One hundred and nine things this session. Build IDs for reference:
     button permanently stuck disabled, and a window-packing order bug that
     could make the bottom status bar and the LIVE/REPLAY scrubber bar
     invisible whenever the window's content needed more height than it had.
-75. `b-c368fa76` — rail button text was too small to read (your report);
+77. `b-c368fa76` — rail button text was too small to read (your report);
     bumped the rail icon buttons from 6pt to 8pt and re-verified nothing
     gets squeezed. Also traced your "DNS is broken" report — turned out to
     be two different panels, one working as designed (see entry 63).
-76. `b-e0c512dc` — found and fixed the real bug behind "Visited
+78. `b-e0c512dc` — found and fixed the real bug behind "Visited
     Hosts" staying empty: it was reading the *shortened* display name
     ("Google", "Amazon" — no dot) instead of the actual resolved domain,
     so real hostnames for every well-known provider — which is most real
@@ -225,26 +243,26 @@ One hundred and nine things this session. Build IDs for reference:
     (`'ip'` vs `'id'`) that meant the panel's own backup DNS-resolution
     kick-off never actually ran. Turned out not to be the whole story —
     see entry 64.
-77. `b-7118b630` — the actual root cause of "Visited Hosts" is empty,
+79. `b-7118b630` — the actual root cause of "Visited Hosts" is empty,
     confirmed against your real machine: nothing was resolving *at all*
     for external hosts, DNS or PTR, VPN on or off. Added TLS SNI sniffing
     as a second, independent hostname source that doesn't depend on DNS
     working at all — see the section below for why plain DNS sniffing was
     never going to be enough in 2026. It worked — `api.telegram.org`
     showed up in your very next screenshot.
-78. `b-25adc03e` — found and fixed the real bug behind the Sankey legend
+80. `b-25adc03e` — found and fixed the real bug behind the Sankey legend
     not listing every colour actually on screen (your "green ribbons, no
     legend entry" report): the legend and the ribbons were reading two
     different fields — a node's single, last-packet-wins protocol tag vs.
     each flow's own, more specific protocol — so a protocol like TLS
     could colour a ribbon without ever being any node's tag, and the
     legend simply never knew it existed.
-79. `b-7ee49e69` — moved the MIN TRAFFIC (flow-size) slider out
+81. `b-7ee49e69` — moved the MIN TRAFFIC (flow-size) slider out
     of the collapsed FILTERS & BLOCKING drawer and onto the always-visible
     top toolbar, and fixed a real bug in the slider itself: its handle was
     drawn in the exact same colour as the toolbar background, so even
     with the drawer open the handle was effectively invisible.
-80. `b-85909778` — 3D view: the VPN status pill (shows
+82. `b-85909778` — 3D view: the VPN status pill (shows
     "○ VPN" when idle, "🔒 TAILSCALE"/"🔒 NORDVPN"/etc. when a tunnel is
     actually carrying traffic) was independently centred over the top
     header, with no awareness of the nodes/flows/pkts stats and toolbar
@@ -252,14 +270,14 @@ One hundred and nine things this session. Build IDs for reference:
     at your screen's approximate width and confirmed it collides.
     Repositioned it to sit below both header rows instead, verified with
     the same real-browser test at three window widths.
-81. `b-0517e611` — Top Flow Talkers: gave the ribbons the same
+83. `b-0517e611` — Top Flow Talkers: gave the ribbons the same
     scrolling neon circuit-trace overlay the 3D view's protocol bars use,
     and fixed the real reason incoming flows looked like an unreadable
     blur — a particle speed/count calculation that only ever measured
     against the biggest OUTGOING flow, so any incoming flow bigger than
     that (a big download vs. a tiny request — normal, everyday asymmetric
     traffic) blew way past its intended bounds.
-82. `b-58cf88ca` — the new Top Flow Talkers trace overlay from
+84. `b-58cf88ca` — the new Top Flow Talkers trace overlay from
     #68 was gated at 20px of band thickness (copied from an unrelated
     effect that needed that floor to avoid strobing), which silently
     excluded most flows in any capture with one dominant host and a long
@@ -270,7 +288,7 @@ One hundred and nine things this session. Build IDs for reference:
     straight from the WebGL 3D bars, which look right there because
     WebGL adds its own bloom on top; a flat 2D canvas has no bloom, so
     the same numbers just looked dim.
-83. `b-4edd6c7a` — switched the default local AI model from llama3.2 to
+85. `b-4edd6c7a` — switched the default local AI model from llama3.2 to
     deepseek-r1:7b everywhere it's referenced in the app (Flow Detail AI
     box, Settings, the Guide, and the actual Ollama call itself), and
     added the handling a reasoning model like deepseek-r1 actually needs
@@ -279,62 +297,62 @@ One hundred and nine things this session. Build IDs for reference:
     before the text reaches any panel or JSON parser, and the reply token
     budget was raised so that reasoning doesn't eat the whole allowance
     and leave nothing for the actual answer.
-84. `b-abb8c4b4` — added a floating "AI QUERY" button to every one of the
+86. `b-abb8c4b4` — added a floating "AI QUERY" button to every one of the
     11 web-served pages (previously the only free-form "ask the AI" boxes
     lived in the desktop app; the web pages only had a couple of
     single-purpose canned-prompt buttons).
-85. `b-2433c0ac` — clicking RUN TEST on the main dashboard now pops up a
+87. `b-2433c0ac` — clicking RUN TEST on the main dashboard now pops up a
     live speed-test gauge, needle and all, like Ookla's own app. See the
     section below for how it actually gets "live" numbers, since the real
     speed-test CLI turned out not to offer any.
-86. `b-36cc030b` — investigated the "dashboard still shows 5.0 Mbps while
+88. `b-36cc030b` — investigated the "dashboard still shows 5.0 Mbps while
     the log says 27.57" report; hardened the dashboard's DB read against
     the most plausible cause found at the time (see the section below —
     this turned out not to be the actual cause, but the hardening is
     harmless and stays in).
-87. `b-8854f5c0` — found and fixed the REAL cause of the above: the
+89. `b-8854f5c0` — found and fixed the REAL cause of the above: the
     automatic scheduled speed test and a manually-triggered one could run
     at the same time, each corrupting the other's reading. Confirmed fixed
     on your machine.
-88. `b-8cef6209` — the "web" and "SQLite" status-bar dots at the bottom of
+90. `b-8cef6209` — the "web" and "SQLite" status-bar dots at the bottom of
     the dashboard were stuck on the same dim grey they're created with,
     forever, regardless of whether the web server or database were actually
     up. See the section below.
-89. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
+91. `b-5aeafa1d` — added a BLOOM button next to Pen Test that
     turns a glow/bloom effect on and off for every chart on the main
     dashboard. See the section below.
-90. `b-c5d3c0c0` — embedded guide (desktop "? GUIDE" window and
+92. `b-c5d3c0c0` — embedded guide (desktop "? GUIDE" window and
     the web `/guide` page) updated to document everything new this
     session: the BLOOM button, the status bar's now-real dots, the
     live speed-test gauge popup, and the web AI Query button. See the
     section below.
-91. `b-bf352903` — new "⇪ PUSH" button on the main dashboard:
+93. `b-bf352903` — new "⇪ PUSH" button on the main dashboard:
     deploys the agent to a remote Windows (WinRM) or Linux (SSH) box
     given login credentials, starts it immediately, and installs it to
     auto-run on every reboot. Guide updated with a dedicated "Push
     Agent" section; the Push Agent window itself also explains what it
     does before you use it. See the section below.
-92. (no build ID — build scripts only) — real-world Push Agent deploy hit
+94. (no build ID — build scripts only) — real-world Push Agent deploy hit
     "paramiko isn't installed in this build" even after the #78 fix; root
     cause was two layers deeper than the first patch (see the follow-up
     under the Push Agent section below) — `build.bat`/`build_installer.bat`
     now resolve one Python consistently and self-heal a missing `pip` via
     `ensurepip`. Confirmed working by you on the Linux deploy path.
-93. `b-5385a8bb` (current) — client (`nm_client.py`) rework: dashboard,
+95. `b-5385a8bb` (current) — client (`nm_client.py`) rework: dashboard,
     Latency and Quality tabs now actually draw graphs (a matplotlib
     packaging bug was silently killing every chart in the built .exe);
     Agents tab rebuilt to match the desktop app's own agent detail;
     firewall "not elevated" message rewritten to explain the real UAC
     cause; look-and-feel restyled (Command Deck discipline + single
     accent colour). See the section below.
-94. `b-7a2f19cc` — proof the elevation disagreement is a real
+96. `b-7a2f19cc` — proof the elevation disagreement is a real
     bug, not you: the status bar's own "⚡ ELEVATED" tag now also shows
     its PID, and `/api/firewall` now returns the PID of whichever process
     actually answered the request, shown right in the firewall tab's
     warning — so a mismatched PID (a stale second instance still bound
     to the port) is directly visible instead of argued about. See the
     section below.
-95. `b-9c41e7d0` — the actual root cause, found from the PID/
+97. `b-9c41e7d0` — the actual root cause, found from the PID/
     error-message data you sent back: the "improved" `TokenElevation`
     check was failing on your real machine every single time with
     `OSError: [WinError 6] The handle is invalid`, silently falling back
@@ -342,28 +360,28 @@ One hundred and nine things this session. Build IDs for reference:
     just happened to fall back to the right answer. Cause was a bug on my
     end (missing ctypes type declarations, not a UAC/account issue), now
     fixed. See the section below.
-96. `b-2f8e6a51` — after that fix, the client showed the exact
+98. `b-2f8e6a51` — after that fix, the client showed the exact
     same warning again post-rebuild. Added a `build` field to
     `/api/firewall` and to the firewall tab's warning so this stops being
     guesswork: the raw response now proves whether the machine actually
     answering that request is running current code at all, instead of
     theorizing about it. See the section below.
-97. `b-71c4a08e` — "the real cause" above came back: dashboard
+99. `b-71c4a08e` — "the real cause" above came back: dashboard
     vs. console mismatch again, mostly after the app's been running a
     while. The `_running_manual`/`_running_auto` guard from `b-8854f5c0`
     was real and did help, but it was a plain check-then-set with a gap
     two of the four start points could still both slip through in the
     same instant — closed that gap with an actual lock. See the section
     below.
-98. `b-f4e5ec66` (current) — Time-of-Day Heatmap now uses your actual
+100. `b-f4e5ec66` (current) — Time-of-Day Heatmap now uses your actual
     selected theme's colours instead of a fixed viridis/magma_r palette,
     and re-colours live if you change theme while it's open. See the
     section below.
-99. `b-f4e5ec66` (current) — AI briefing's "Ollama has no model" error was
+101. `b-f4e5ec66` (current) — AI briefing's "Ollama has no model" error was
     genuinely undiagnosable when you'd already pulled the model — it never
     said which Ollama it actually asked or what that Ollama has installed.
     Now it names both. See the section below.
-100. (no separate build — bundled into `b-f4e5ec66`) — found and removed a
+102. (no separate build — bundled into `b-f4e5ec66`) — found and removed a
     dead, unreachable `return rows` line in `_windowed_pids()` while
     running the full test suite for #85/#86 (a stray leftover statement
     after the function's real `return pids`, referencing a variable that
@@ -372,49 +390,49 @@ One hundred and nine things this session. Build IDs for reference:
     actually available to run it). Unrelated to anything you asked for
     this session; fixed because it was sitting right there failing a test
     I was running anyway.
-101. `b-51d3ca67` — you pasted the #86 fix's own error message
+103. `b-51d3ca67` — you pasted the #86 fix's own error message
     back at me showing "no model" for a model that its own "Installed
     there" list said WAS installed at the right endpoint — meaning #86
     correctly diagnosed the situation but hadn't actually closed it. See
     the section below.
-102. `b-46815a9c` — "same message your getting on my tits fix
+104. `b-46815a9c` — "same message your getting on my tits fix
     it" — #88's fix didn't stop it recurring either. Rather than guess a
     fourth cause blind, made the error itself carry enough forensic detail
     (build id, Ollama's raw response, proof of whether the retry used a
     byte-identical name) that whatever happens next is diagnosable from
     the error text alone, without another round trip. See the section
     below.
-103. `b-ee1cd001` — #89's diagnostic did its job on the very next
+105. `b-ee1cd001` — #89's diagnostic did its job on the very next
     try: your pasted error revealed the real cause was never a model
     problem at all — Ollama's own `llama-server.exe` engine binary is
     missing on your machine. Fixed the app's own bug that misdiagnosed
     this as "has no model" and pointed you at a useless `ollama pull`, and
     replaced it with the actual cause and fix. See the section below.
-104. `b-5239b070` — "update the guide please": the embedded
+106. `b-5239b070` — "update the guide please": the embedded
     in-app guide's Troubleshooting → "AI Query returns an error" section
     now covers the enriched "has no model" diagnostics and the
     "llama-server.exe missing" / antivirus-quarantine case from #89-#90,
     and the Time-of-Day Heatmap section now mentions that its colours
     follow your theme (#85). No behaviour change — text only.
-105. `b-00aa1a4b` — "under what section is the wsl setup" / "yes
+107. `b-00aa1a4b` — "under what section is the wsl setup" / "yes
     i do" — the guide had no real Pi-hole/WSL section at all (just one
     sidebar-button bullet) and the Kali Desktop entry was one line. Added
     a full Pi-hole (WSL/Docker) section and expanded Kali Desktop with
     what it actually does and its real first-run-setup requirement. See
     the section below.
-106. `b-105b6e8a` — "in the 3d view get rid of the floor and make
+108. `b-105b6e8a` — "in the 3d view get rid of the floor and make
     the space background a deep black so the stars stand out more" — floor
     grid + its solid fill mesh are gone entirely (not just hidden), the sky
     gradient/fog/clear-colour are now all near-black, and the GRID button
     now only controls the (untouched) wall grids. See the section below.
-107. `b-b0d1c6df` — you sent a video: "floor is a different black
+109. `b-b0d1c6df` — you sent a video: "floor is a different black
     to the sides and there is a weird moire effect going on. make the sides
     the same colour as the floor" — the walls (#93 left them untouched) were
     still pinned to the old, now-removed floor's colour, which is why they
     stood out against the new deep-black backdrop. Walls now pull their
     colour from the exact same constant the backdrop's fog uses, and the
     wall grid lines were darkened to match. See the section below.
-108. `b-c385dd98` — "moire still there" (with screenshots) — #94's
+110. `b-c385dd98` — "moire still there" (with screenshots) — #94's
     diagnosis was wrong: the moire wasn't the walls at all, it was the deep-
     black SKY GRADIENT itself banding (values so close to 0 that most of its
     512 rows round to identical 8-bit colour and step in hard rings once
@@ -422,7 +440,7 @@ One hundred and nine things this session. Build IDs for reference:
     Fixed by dithering the gradient before it's quantized. Confirmed the bug
     and the fix in a real headless-Chromium canvas, not just reasoning about
     it. See the section below.
-109. `b-a4056eca` (current) — "you've made it worse, stop guessing and fix it
+111. `b-a4056eca` (current) — "you've made it worse, stop guessing and fix it
     once and for all" (with a much more visible ripple pattern in the
     screenshot) — #95's dithering fix was real and measured, but dithering
     an 8x512 texture with no mipmaps that then gets minified onto a
@@ -7571,3 +7589,72 @@ The Geo Map window loaded `~/.nm_world_map.jpg` (the embedded 1440×720 night-ea
 **What it is and is not:** WiFi-3D-Fusion reads CSI (per-subcarrier channel data) from an ESP32, a Nexmon-patched Broadcom chip or a monitor-mode adapter, on Linux. An ordinary Windows Wi-Fi card does not expose CSI, so this window uses what Windows does expose: the connected link's signal about once a second and every access point's signal from a cached scan. That supports 'something moved between you and the router', a network inventory with a new-network alarm, and a walk-around signal survey; it does not support pose, person identification or through-wall imaging. Code: `_nm_wifi_scan`, `_nm_wifi_parse_interfaces`, `_nm_wifi_parse_networks`, `_NMWifiMotion`, `_nm_wifi_field`, `_nm_open_wifi`; rail button `_open_wifi`; guide bullet added.
 
 **Not verified on a real PC:** the parser was built and tested against the documented `netsh wlan` output format (and a translated-label fallback); the remote shell blocks `netsh`, so real output from your adapter has not been seen. The window's Copy raw netsh output button is there for that.
+
+
+## Wi-Fi Signal upgrade: Windows API, background watcher, history, better map, 3D layer, rogue detection (build b-5c2e8a17)
+
+**Reading Wi-Fi properly.** The window used to call `netsh wlan` once a second, which only reports whole-percent quality. A small PowerShell helper now calls Windows' own Wi-Fi API (`wlanapi.dll`): the connected link's real dBm about ten times a second, plus on-demand scans of every access point with their exact signal and frequency. It runs as a separate child process, so if the native structure layout were ever wrong on some machine the helper dies and the app falls back to `netsh` on its own (the header says which mode is active); it cannot take the app down. Default scan interval is 12 s (Gentle 30 / Normal 12 / Fast 6 in the window).
+
+**Watching everything, in the background.** A watcher object now owns the data and can keep running with the window closed ("keep watching" switch). It tracks each access point's own signal path: a person crossing one path swings that AP while the others stay put, which the Live tab shows as per-AP swing bars.
+
+**History and away mode.** Every minute of link movement is stored in the app database (`wifi_activity`, `wifi_events`). The Activity tab shows a weekday-by-hour movement heatmap, the last 24 hours as bars, and the event history. Away mode (manual, or automatic after N minutes without keyboard/mouse input) turns movement and new-network events into real alerts through the app's toast, push and webhook channels, with 5-minute debouncing.
+
+**Signal map.** Optional floor-plan image under the map, a router marker, dead spots (areas below -75 dBm that real samples support) with a suggested place for an extra node, a 2.4 vs 5 GHz comparison view, and PNG export.
+
+**3D view.** A new WI-FI button in the 3D page opens its own panel (separate renderer, so it cannot disturb the network scene). AIR: you at the centre, each access point an orb, distance = signal strength, height = band, colour = dBm, rings for -50…-80 dBm, pulsing rings for disturbed or suspicious ones. SURVEY: your walk-around samples as coloured cubes per floor. Data comes from the new `/api/wifi` route.
+
+**Rogue detection, health, advice.** Open or weak copies of your network name are flagged high severity; a same-name network from a different maker than your router (looked up from its address, ignoring the "locally administered" bit multi-SSID routers set) is a warning unless it was learned as normal; weaker-security copies are info only. A 0-100 health score is built from signal, band, congestion, security, stability and link rate with the factors listed, minus a penalty for suspicious networks; channel advice says which of 1/6/11 or which 5 GHz channel is quieter.
+
+**Verification.** `test_wifi_signal.py` (74 checks: parsers, fake helper process, tracker, findings, health, history database, watcher learning/alerts/away/API-mode/fallback, dead spots, and the real window under xvfb) and `verify_wifi3d.py` (headless Chromium against a synthetic `/api/wifi`). Not tested: the PowerShell helper on real Windows hardware.
+
+
+## CSI (ESP32) tab, firmware source and guide update (build b-c51d7e93)
+
+**The tab.** Fifth tab in the Wi-Fi window. Source classes: `_NMSerial` (ctypes on Windows, termios elsewhere), `_NMCsiSource` (reader thread; keeps CSI lines and the board's own messages separately; counts damaged lines), `_NMCsiAnalyzer` (gain-normalised amplitudes, turbulence of the last second, learned or calibrated baseline, profile deviation from the empty reference, breathing), `_NMCsiSim` (simulated feed in the same text format, so even the demo goes through the real parser). Line format is the esp-csi `CSI_DATA,...,"[imag,real,...]"` layout; lines whose `len` field disagrees with the data are dropped.
+
+**Breathing, honestly.** The first version reported breathing in an empty room whenever there was slow drift, found by stress-testing with random-walk drift. It now needs a sharp interior spectral peak in 9-30 breaths/min, at least 25x the band median, the same rate in two overlapping windows, and a still room. In the simulator: no false rate at 0-1% drift per 30 s, one in ten at 3%, about half at 6-10% (very turbulent rooms); real rooms with fans or pets could still fool it. The guide says so.
+
+**Firmware.** `esp32_csi/csi_send` and `csi_recv` follow the esp-csi pattern (ESP-NOW broadcast at 100 Hz from fixed MAC 1a:00:00:00:00:01, receiver filters on that MAC, copies frames to a queue and prints from a task). Syntax-checked against stand-in headers; the printed line format was verified against the app's parser with a compiled C harness. NOT built against the real ESP-IDF and never run on a board (the build sandbox cannot reach Espressif's toolchain).
+
+**Guide.** Two new sections ('Wi-Fi Signal & CSI', 'What's New'); the heatmap and Geo Map entries rewritten for what they now are. The same content feeds the web /guide page.
+
+
+## CSI tab: the waterfall replaced by something readable (build b-e2a94c06)
+
+**What was wrong.** A per-subcarrier z-score heat map is an engineer's view: the x axis is a radio detail, the colours are rainbow, and a quiet room looks just as busy as a noisy one. **What replaced it.** A strip of eight channel slices over time, drawn on the same clock as the movement line below it, using the same measure (std/mean over the trailing second) per slice. Colour is each slice's excess over its own 20th-percentile level, scaled from the movement threshold with a factor of 2.5 because one slice averages fewer subcarriers than the whole. Breathing is greyed and labelled when nothing steady is found. **Not verified:** only against the built-in simulator; real boards may have different noise per slice, which is what the per-slice floor is for.
+
+
+## CSI history and scrubbing (build b-7d3f51a8)
+
+**Design.** Summaries, not packets: one row per second in `csi_hist`, a 5-second shape snapshot in `csi_shape`, a per-minute maximum in `csi_min` (so a 7-day timeline is a 10,080-row query instead of 600,000), and movement events in `csi_event` (started when the movement flag turns on, closed after 3 s of calm). A separate SQLite file keeps this away from the app's main database. Reads flush pending rows first so a query never misses the last few seconds. **Replay** re-uses the live drawing code by swapping in the recorded window (a 60 s slice resampled to the strip's 240 columns; a row more than 1.2 s old leaves a blank column, so gaps show as gaps). The breathing spectrum is not recorded, only the estimate, so a recorded moment shows the rate or 'no breathing detected', not the curve. **Not verified:** real hardware over a long period; the timeline at the 7-day extreme with real data.
+
+
+## Floor plan display (build b-a91c4e72)
+
+**Cause.** `_paint_plan` drew the image with `aspect='auto'` into the plan-size rectangle at alpha 0.55 and then the signal field at alpha 0.9 on top. **Fix.** `_plan_layers()` caches the picture, a line-art version (ink = darkness for light paper, brightness for dark paper, thresholded, with a 5 px max-filter halo from the same ink) and the width/height ratio; `_match_picture()` sets the height from the ratio; the field alpha is the slider value in 'over plan' mode and 0.55-1.0 in the other mode.
+
+
+## Named floors in the Signal map (build b-3e68d05b)
+
+**Storage.** Floors stay integer indices on each sample (`z`), so the 3D layers and old files keep working; names live in `plan['floors']`, per-floor sizes in `plan['sizes']`, the selected floor in `plan['floor']`. A floor name is created on the fly for any index found in samples, pictures or routers, so a survey from before this change opens with 'Downstairs' (index 0) plus an empty 'Upstairs'. Switching floors saves the old floor's size before loading the new one (guarded so loading does not trigger the autosave).
+
+
+## Why the floor plan was still stretched (build b-c07a62d4)
+
+Matplotlib's `imshow(aspect='auto')` calls `ax.set_aspect('auto')`, which overrides an earlier `set_aspect('equal')`. `_paint_plan` set equal first and then drew three images with 'auto'. Colour bar `fig.colorbar(sm, ax=ax)` additionally anchors the map to the right (`panchor`), which is why the map hugged the colour bar with empty space on the left; the map and colour bar are now positioned by hand and centred.
+
+
+## ESP32 firmware now compiles (no app change; build id stays b-c07a62d4)
+
+Both `esp32_csi/csi_recv` and `csi_send` compile with PlatformIO on Trevor's PC (espressif32 7.1.3, ESP-IDF 6.1.0, ~280 s each). Fixes: `src_dir` moved under `[platformio]`; `WIFI_BW_HT20` replaced by its value (renamed in IDF 6); csi_send's removed `esp_wifi_config_espnow_rate` replaced by `esp_now_set_peer_rate_config` behind an IDF-version guard. PlatformIO refuses project paths with spaces, so builds ran in `C:\Users\colli\csi_build`. NOT run on a board; the CSI tab has still never seen real ESP32 data.
+
+
+## CSI receiver over Wi-Fi (build b-5f2c8e19)
+
+Why: Trevor wants to see people in the living and dining room (downstairs) with the PC in the office upstairs; USB can't span that. Design choice: unicast subscription instead of broadcast (see entry 117). Known limits: the receiver is forced onto the channel of the router/extender it joins, so csi_send must be set to that same channel (the receiver warns if CSI_CHANNEL differs); extenders that create a separate network block the announcement (CSI_UDP_TARGET is the fallback); Windows Firewall will ask on first use. Not proven on hardware.
+
+131. **Wi-Fi & Boards web page (/wifi) brought up to the desktop app.** New phone/browser page, linked from the dashboard menu (MONITOR → Wi-Fi & Boards): the boards' movement graph with the same dotted walking man as the app (same body model, checked point-for-point), Wi-Fi link + disturbance graphs, the 30-day Activity heatmap, last-24-hours strip and event list, the floor-plan Signal map (smoothed field, router, floors), and Networks (health score, findings, access points). Refreshes every 2 s. Switches for Away mode, Away when idle, Keep watching in the background and Keep watching with the boards: other devices may switch things ON; switching OFF from another device needs the new PC-only tick "Let other devices (phone / browser page) switch alerts off too" (off by default), and requests from other web pages are refused. Tests: test_wifi_web.py (19 checks); selftest now hashes /wifi.
+
+132. **Left rail fits the window.** With the Wi-Fi button added, the 19 rail buttons (42 px each) were taller than a laptop-height window, so PREFS and QUIT were cut off the bottom. The buttons now shrink together to fit (42 px when there is room, down to 26 px). Test: test_rail_fit.py (window heights 1100/780/700/640).
+
+133. **Installer closes NetSentinel first.** The installer could not replace SpeedtestMonitor.exe while the app was running, so installs since 14 September left the old program in place (the bottom bar showed the old build id). It now closes the app, the client and the agent before copying files.

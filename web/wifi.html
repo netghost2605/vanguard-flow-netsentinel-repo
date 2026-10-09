@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Wi-Fi &amp; Boards</title>
+<meta name="theme-color" content="@@BG@@">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;--acc:#38b8f0;--red:#ff5c4d;--grn:#2fe07a;--amb:#ff9f43;}
+ *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+   padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 28px);min-height:100vh;max-width:820px;margin:0 auto;-webkit-font-smoothing:antialiased;}
+ header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
+ header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
+ header h1{font-size:16px;font-weight:650;flex:1;}
+ .chip{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:7px;letter-spacing:.5px;white-space:nowrap;background:#1c2b52;color:var(--tick);}
+ .chip.moving{background:#7a1d12;color:#ffd5cf;}
+ .chip.quiet{background:#12482b;color:#c8ffe0;}
+ .dot{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
+ .dot.live{background:#39ff14;box-shadow:0 0 8px #39ff14;}
+ .sub{font-size:11.5px;color:var(--tick);padding:0 2px 10px;line-height:1.5;}
+ nav.jump{display:flex;gap:6px;overflow-x:auto;padding:2px 0 12px;position:sticky;top:0;background:var(--bg);z-index:3;}
+ nav.jump a{flex:0 0 auto;font-size:12px;color:var(--tick);text-decoration:none;border:1px solid var(--line);border-radius:16px;padding:5px 12px;}
+ nav.jump a:active{background:var(--panel);color:var(--text);}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:14px;margin-bottom:12px;scroll-margin-top:44px;}
+ .card h2{font-size:13px;font-weight:650;letter-spacing:.3px;margin-bottom:2px;}
+ .card .note{font-size:11px;color:var(--tick);line-height:1.5;margin:2px 0 8px;}
+ canvas{display:block;width:100%;}
+ .row{display:flex;gap:12px;align-items:stretch;}
+ .grow{flex:1;min-width:0;}
+ .man{flex:0 0 auto;width:84px;display:none;}
+ .man.on{display:block;}
+ .man canvas{width:84px;height:128px;border:1px solid #24507f;border-radius:4px;background:#0c1d33;}
+ .stats{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--tick);margin-top:6px;font-variant-numeric:tabular-nums;}
+ .stats b{color:var(--text);font-weight:650;}
+ .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px;}
+ .tabs button{font:inherit;font-size:12px;border:1px solid var(--line);background:transparent;color:var(--tick);border-radius:14px;padding:5px 12px;}
+ .tabs button.on{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:650;}
+ .ev{font-family:'SF Mono',ui-monospace,Consolas,monospace;font-size:11px;line-height:1.55;max-height:230px;overflow:auto;}
+ .ev div{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid var(--line);}
+ .ev .t{color:var(--tick);flex:0 0 auto;}
+ .ev .k{flex:0 0 auto;font-weight:700;}
+ .k.MOVEMENT{color:var(--red);} .k.NEWAP,.k.NEW{color:var(--amb);} .k.ROGUE{color:#ff5c8a;} .k.ROAM{color:var(--acc);} .k.ESP32{color:var(--acc);}
+ .ap{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12px;}
+ .ap:last-child{border-bottom:0;}
+ .ap .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+ .ap .nm small{display:block;color:var(--tick);font-size:10.5px;}
+ .ap .bar{flex:0 0 54px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;}
+ .ap .bar i{display:block;height:100%;}
+ .ap .db{flex:0 0 46px;text-align:right;font-variant-numeric:tabular-nums;}
+ .tag{font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:6px;margin-left:5px;}
+ .tag.d{background:#4a2a08;color:var(--amb);} .tag.n{background:#4a1230;color:#ff8fbf;}
+ .health{display:flex;align-items:center;gap:14px;margin:6px 0 8px;}
+ .health .g{font-size:34px;font-weight:700;line-height:1;}
+ .find{font-size:12px;line-height:1.5;padding:6px 10px;border-left:3px solid var(--acc);background:rgba(56,184,240,.07);margin:6px 0;border-radius:0 6px 6px 0;}
+ .find.high{border-color:var(--red);} .find.warn{border-color:var(--amb);}
+ .sw{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);}
+ .sw:last-of-type{border-bottom:0;}
+ .sw .tx{flex:1;font-size:13px;line-height:1.4;} .sw .tx small{display:block;color:var(--tick);font-size:11px;}
+ .sw button{flex:0 0 auto;width:50px;height:28px;border-radius:14px;border:0;background:#2a3550;position:relative;transition:.2s;}
+ .sw button::after{content:'';position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#c9d4ea;transition:.2s;}
+ .sw button.on{background:var(--grn);} .sw button.on::after{left:25px;background:#fff;}
+ .sw button:disabled{opacity:.4;}
+ .msg{font-size:12px;margin-top:8px;min-height:16px;color:var(--amb);}
+ .empty{color:var(--tick);text-align:center;padding:26px 14px;font-size:13px;line-height:1.7;}
+ .legend{display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--tick);margin-top:6px;}
+ .legend i{flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#2a3fb0,#29b6f6,#43d17a,#ffd23f,#ff8a3d,#ff3d2e);}
+ footer{text-align:center;color:var(--tick);font-size:11px;margin-top:16px;opacity:.65;line-height:1.6;}
+</style>
+</head>
+<body>
+<header><a class="back" href="/">&#8592;</a><h1>Wi-Fi &amp; Boards</h1><span class="chip" id="chip">&hellip;</span><div class="dot" id="dot"></div></header>
+<div class="sub" id="sub">Loading&hellip;</div>
+<nav class="jump"><a href="#boards">Boards</a><a href="#link">Wi-Fi link</a><a href="#activity">Activity</a><a href="#map">Signal map</a><a href="#nets">Networks</a><a href="#ctl">Controls</a></nav>
+
+<div class="card" id="boards">
+ <h2>Boards (ESP32): movement level</h2>
+ <div class="note">The last five minutes. The dashed line is the movement threshold; red shading is movement.</div>
+ <div class="row"><div class="grow"><canvas id="cBoards" height="150"></canvas>
+  <div class="stats" id="bStats"></div></div>
+  <div class="man" id="man"><canvas id="cMan" width="84" height="128"></canvas></div></div>
+</div>
+
+<div class="card" id="link">
+ <h2>Your Wi-Fi link</h2>
+ <div class="note" id="linkNote"></div>
+ <canvas id="cLink" height="120"></canvas>
+ <div class="note" style="margin-top:10px">Disturbance (rolling spread of the signal, dB)</div>
+ <canvas id="cDist" height="80"></canvas>
+</div>
+
+<div class="card" id="activity">
+ <h2>Activity</h2>
+ <div class="note">How often movement was seen, by weekday and hour, over the last 30 days (PC Wi-Fi card and ESP32 boards together).</div>
+ <canvas id="cHeat" height="190"></canvas>
+ <div class="stats" id="heatTip">Tap a cell for its value.</div>
+ <div class="note hh" style="margin-top:12px">Minutes of movement per hour, last 24 hours</div>
+ <canvas id="cBars" height="110"></canvas>
+ <div class="note" style="margin-top:12px">Events</div>
+ <div class="ev" id="events"></div>
+</div>
+
+<div class="card" id="map">
+ <h2>Signal map</h2>
+ <div class="note" id="mapNote">From your walk-around survey on the PC.</div>
+ <div class="tabs" id="floors"></div>
+ <canvas id="cMap" height="320"></canvas>
+ <div class="legend"><span>&minus;90 dBm</span><i></i><span>&minus;35 dBm</span></div>
+ <div class="stats" id="mapStats"></div>
+</div>
+
+<div class="card" id="nets">
+ <h2>Networks</h2>
+ <div id="health"></div>
+ <div id="finds"></div>
+ <div id="aps"></div>
+</div>
+
+<div class="card" id="ctl">
+ <h2>Controls</h2>
+ <div class="note" id="ctlNote"></div>
+ <div id="sws"></div>
+ <div class="msg" id="ctlMsg"></div>
+</div>
+<footer>Everything here is read from the app on your PC. Signal strength is coarse: it sees that something moved, not who.<br>Use it in your own home, with the people there aware.</footer>
+
+<script>
+var $=function(i){return document.getElementById(i);};
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+var DPR=Math.min(3,window.devicePixelRatio||1);
+var st={live:null,man:false,phase:0,first:true};
+
+/* ---------- the walking man: the same body model as the app's desktop version ---------- */
+function cloud(phase,w,h){
+  var PI=Math.PI,sin=Math.sin,cos=Math.cos;
+  var sp=Math.max(0.012,Math.min(0.030,2.3/(h*0.93))),dens=0.030/sp,pts=[];
+  function lerp(a,b,t){return a+(b-a)*t;}
+  function ring(cx,cy,cz,n1x,n1y,r1,r2,near,off){
+    var circ=2*PI*Math.max(r1,r2)*0.8+1e-6,n=Math.max(5,Math.floor(circ/sp));
+    for(var k=0;k<n;k++){var th=2*PI*(k+off)/n,c=cos(th),s=sin(th);
+      pts.push([cx+r1*c*n1x,cy+r1*c*n1y,cz+r2*s,Math.abs(c),near]);}
+  }
+  function tube(p0,p1,ra,rb,rzk,z,near){
+    var dx=p1[0]-p0[0],dy=p1[1]-p0[1],L=Math.sqrt(dx*dx+dy*dy);if(L<1e-6)return;
+    var n1x=dy/L,n1y=-dx/L,m=Math.max(2,Math.floor(L/sp)+1);
+    for(var i=0;i<=m;i++){var t=i/m,r=lerp(ra,rb,t);
+      ring(lerp(p0[0],p1[0],t),lerp(p0[1],p1[1],t),z,n1x,n1y,r,r*rzk,near,(i%2)*0.5);}
+  }
+  var hipx=0.0,hipy=0.50;
+  function leg(p){
+    var a=0.46*sin(p),kf=0.15+0.95*Math.max(0,-sin(p-0.9))*(0.6+0.4*cos(p));
+    var k=[hipx+0.245*sin(a),hipy+0.245*cos(a)],b=a-kf;
+    var an=[k[0]+0.235*sin(b),k[1]+0.235*cos(b)],tilt=-(0.35*sin(p+0.5));
+    var heel=[an[0]-0.02,an[1]+0.01],toe=[an[0]+0.095*cos(tilt),an[1]+0.012-0.095*sin(tilt)];
+    return [[hipx,hipy],k,an,heel,toe];
+  }
+  var parts=[[leg(phase),0.045,1.0],[leg(phase+PI),-0.045,0.0]];
+  var low=-1e9;parts.forEach(function(q){low=Math.max(low,q[0][3][1],q[0][4][1]);});
+  var lift=0.985-low,torTop=[0.012,0.185+lift],hip=[hipx,hipy+lift];
+  var nt=Math.floor(14*dens),i,t;
+  for(i=0;i<=nt;i++){t=i/nt;var cy=lerp(torTop[1],hip[1],t),cx=lerp(torTop[0],hip[0],t)+0.012*sin(t*PI);
+    var rx=0.050+0.020*Math.exp(-Math.pow((t-0.18)/0.22,2))+0.016*Math.exp(-Math.pow((t-0.95)/0.20,2));
+    var rz=0.108-0.030*t+0.010*Math.exp(-Math.pow((t-0.97)/0.15,2));
+    ring(cx,cy,0.0,1.0,0.0,rx,rz,0.5,(i%2)*0.5);}
+  tube([0.014,torTop[1]+0.005],[0.022,torTop[1]-0.045],0.026,0.024,1.0,0.0,0.5);
+  var hc=[0.034,torTop[1]-0.115],nh=Math.floor(10*dens);
+  for(i=0;i<=nh;i++){t=-1+2*i/nh;var cy2=hc[1]+t*0.060,rr=0.047*Math.sqrt(Math.max(0,1-t*t))+0.004;
+    ring(hc[0]+0.004*t,cy2,0.0,1.0,0.0,rr*1.02,rr*0.95,0.5,(i%2)*0.5);}
+  parts.forEach(function(q){var L=q[0],z=q[1],near=q[2];
+    var h0=[L[0][0],L[0][1]+lift],k=[L[1][0],L[1][1]+lift],an=[L[2][0],L[2][1]+lift],
+        heel=[L[3][0],L[3][1]+lift],toe=[L[4][0],L[4][1]+lift];
+    tube(h0,k,0.060,0.042,1.0,z,near);tube(k,an,0.040,0.028,1.0,z,near);tube(heel,toe,0.022,0.018,1.2,z,near);});
+  var shd=[0.006,torTop[1]+0.030];
+  [[phase+PI,0.125,1.0],[phase,-0.125,0.0]].forEach(function(q){var p=q[0],z=q[1],near=q[2];
+    var a=0.58*sin(p),el=[shd[0]+0.165*sin(a),shd[1]+0.165*cos(a)],b=a+0.35+0.35*Math.max(0,sin(p)),
+        hd=[el[0]+0.150*sin(b),el[1]+0.150*cos(b)];
+    tube(shd,el,0.034,0.026,1.0,z,near);tube(el,hd,0.026,0.018,1.0,z,near);
+    ring(hd[0]+0.018*sin(b),hd[1]+0.018*cos(b),z,1.0,0.0,0.020,0.016,near,0);});
+  var scale=h*0.93,ox=w*0.57,oy=h*0.03,out=[];
+  pts.forEach(function(q){var sd=q[2]>0.02?0.10:(q[2]<-0.02?-0.08:0.0);
+    var br=Math.max(0.10,Math.min(1.0,0.20+0.78*Math.pow(q[3],2.4)+sd+(q[4]>=1.0?0.08:(q[4]<=0.0?-0.05:0.0))));
+    out.push([ox+q[0]*scale,oy+q[1]*scale,br]);});
+  return out;
+}
+var RAMP=[[0,[12,29,51]],[0.18,[20,52,96]],[0.45,[40,112,190]],[0.72,[120,190,240]],[1,[255,255,255]]];
+function ramp(v){v=Math.max(0,Math.min(1,v));for(var i=1;i<RAMP.length;i++){if(v<=RAMP[i][0]){var a=RAMP[i-1],b=RAMP[i],t=(v-a[0])/(b[0]-a[0]);
+  return 'rgb('+Math.round(a[1][0]+(b[1][0]-a[1][0])*t)+','+Math.round(a[1][1]+(b[1][1]-a[1][1])*t)+','+Math.round(a[1][2]+(b[1][2]-a[1][2])*t)+')';}}return 'rgb(255,255,255)';}
+var manCv=null,manCtx=null,glow=null;
+function drawMan(){
+  var W=84,H=128;
+  if(!manCv){manCv=$('cMan');manCv.width=W*DPR;manCv.height=H*DPR;manCtx=manCv.getContext('2d');
+    glow=document.createElement('canvas');glow.width=Math.ceil(W*DPR/3);glow.height=Math.ceil(H*DPR/3);}
+  var c=manCtx,pts=cloud(st.phase,W,H);
+  c.setTransform(1,0,0,1,0,0);c.globalCompositeOperation='source-over';c.fillStyle='rgb(12,29,51)';c.fillRect(0,0,manCv.width,manCv.height);
+  var d=Math.max(1.5,1.35*DPR);
+  for(var i=0;i<pts.length;i++){var p=pts[i];c.fillStyle=ramp(p[2]*1.05);c.fillRect(p[0]*DPR-d/2,p[1]*DPR-d/2,d,d);}
+  var g=glow.getContext('2d');g.setTransform(1,0,0,1,0,0);g.clearRect(0,0,glow.width,glow.height);g.drawImage(manCv,0,0,glow.width,glow.height);
+  c.globalCompositeOperation='lighter';c.globalAlpha=0.55;c.imageSmoothingEnabled=true;c.drawImage(glow,0,0,manCv.width,manCv.height);c.globalAlpha=1;c.globalCompositeOperation='source-over';
+}
+var lastT=0;
+function loop(ts){
+  if(st.man){if(ts-lastT>=70){lastT=ts;st.phase=(st.phase+0.42)%(2*Math.PI);drawMan();}}
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* ---------- charts ---------- */
+function prep(cv){var w=cv.clientWidth||300,h=parseInt(cv.getAttribute('data-h')||cv.getAttribute('height'),10)||120;cv.setAttribute('data-h',h);cv.style.height=h+'px';cv.width=Math.round(w*DPR);cv.height=Math.round(h*DPR);
+  var c=cv.getContext('2d');c.setTransform(DPR,0,0,DPR,0,0);return {c:c,w:w,h:h};}
+function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function lineChart(cv,o){
+  var P=prep(cv),c=P.c,w=P.w,h=P.h,L=34,R=6,T=6,B=18,pw=w-L-R,ph=h-T-B;
+  var xmin=o.xmin,xmax=o.xmax,ymin=o.ymin,ymax=o.ymax;
+  function X(x){return L+(x-xmin)/(xmax-xmin)*pw;} function Y(y){return T+(1-(y-ymin)/(ymax-ymin))*ph;}
+  c.fillStyle='rgba(255,255,255,0.025)';c.fillRect(L,T,pw,ph);
+  c.strokeStyle='rgba(255,255,255,0.07)';c.lineWidth=1;c.fillStyle=css('--tick');c.font='10px system-ui,sans-serif';c.textAlign='right';
+  for(var k=0;k<=3;k++){var yy=ymin+(ymax-ymin)*k/3,py=Y(yy);c.beginPath();c.moveTo(L,py);c.lineTo(L+pw,py);c.stroke();c.fillText(o.yfmt?o.yfmt(yy):yy.toFixed(0),L-4,py+3);}
+  c.textAlign='center';
+  for(var m=0;m<=4;m++){var xx=xmin+(xmax-xmin)*m/4;c.fillText(xx===0?'now':(Math.round(xx)+'s'),X(xx),h-5);}
+  (o.spans||[]).forEach(function(s){var a=Math.max(xmin,s[0]),b=Math.min(xmax,s[1]);if(b>a){c.fillStyle='rgba(255,61,46,0.20)';c.fillRect(X(a),T,Math.max(1,X(b)-X(a)),ph);}});
+  (o.series||[]).forEach(function(se){
+    if(!se.pts||se.pts.length<2)return;
+    c.beginPath();se.pts.forEach(function(p,i){var px=X(p[0]),py=Y(Math.max(ymin,Math.min(ymax,p[1])));if(i)c.lineTo(px,py);else c.moveTo(px,py);});
+    if(se.fill){var l=se.pts[se.pts.length-1],f=se.pts[0];c.lineTo(X(l[0]),T+ph);c.lineTo(X(f[0]),T+ph);c.closePath();c.fillStyle=se.fill;c.fill();
+      c.beginPath();se.pts.forEach(function(p,i){var px=X(p[0]),py=Y(Math.max(ymin,Math.min(ymax,p[1])));if(i)c.lineTo(px,py);else c.moveTo(px,py);});}
+    c.strokeStyle=se.color;c.lineWidth=se.width||1.4;c.lineJoin='round';c.stroke();});
+  if(o.hline!=null&&o.hline>=ymin&&o.hline<=ymax){c.setLineDash([5,4]);c.strokeStyle='rgba(255,92,77,0.85)';c.lineWidth=1;c.beginPath();c.moveTo(L,Y(o.hline));c.lineTo(L+pw,Y(o.hline));c.stroke();c.setLineDash([]);
+    c.fillStyle='#ff6b5a';c.textAlign='left';c.fillText('movement threshold',L+4,Y(o.hline)-3);}
+  if(o.empty){c.fillStyle=css('--tick');c.textAlign='center';c.font='12px system-ui,sans-serif';c.fillText(o.empty,L+pw/2,T+ph/2);}
+}
+
+/* ---------- live ---------- */
+function renderLive(d){
+  var chip=$('chip');chip.textContent=d.chip||'';chip.className='chip '+(d.tone||'');
+  var lk=d.link;
+  if(lk)$('sub').textContent=(lk.ssid||'(hidden)')+'  ·  '+Number(lk.dbm).toFixed(1)+' dBm ('+lk.pct+'%)  ·  ch '+(lk.channel||'?')+' '+(lk.band||'');
+  else if(d.csi&&d.csi.live)$('sub').textContent='This PC has no Wi-Fi link, but the ESP32 boards are being watched.';
+  else $('sub').textContent=(d.errors&&d.errors.length)?d.errors.join(' | ').slice(0,300):(d.running?'No Wi-Fi link on this PC.':'The Wi-Fi watcher is not running on the PC.');
+  var ch=d.csi_hist||[],ths=ch.filter(function(p){return p[2]!=null;}),th=ths.length?ths[ths.length-1][2]:null,mx=0;
+  ch.forEach(function(p){mx=Math.max(mx,p[1]);});
+  var top=Math.max(mx*1.2,th!=null?th*1.3:0,0.001);
+  var spans=[];var s0=null;ch.forEach(function(p){if(p[3]&&s0===null)s0=p[0];else if(!p[3]&&s0!==null){spans.push([s0,p[0]]);s0=null;}});if(s0!==null)spans.push([s0,0]);
+  lineChart($('cBoards'),{xmin:-300,xmax:0,ymin:0,ymax:top,spans:spans,hline:th,yfmt:function(v){return v.toFixed(2);},
+    series:[{pts:ch.map(function(p){return [p[0],p[1]];}),color:'#7fd4ff',fill:'rgba(56,184,240,0.18)'}],
+    empty:ch.length<2?(d.csi&&d.csi.wanted?'waiting for the boards…':'no boards connected — pick one in the CSI tab on the PC'):''});
+  var cs=d.csi||{};
+  $('bStats').innerHTML='<span><b>'+(cs.live?Math.round(cs.rate||0):0)+'</b> packets/s</span>'+(cs.rssi!=null?'<span>RSSI <b>'+Math.round(cs.rssi)+'</b> dBm</span>':'')
+    +'<span>'+esc(cs.status||'')+'</span>';
+  st.man=!!(cs.moving);$('man').classList.toggle('on',st.man);
+  $('linkNote').textContent=lk?'Real signal in dBm, last five minutes.':'No Wi-Fi link on this PC right now.';
+  var lh=d.link_hist||[],lo=-90,hi=-30;lh.forEach(function(p){lo=Math.min(lo,p[1]-4);hi=Math.max(hi,p[1]+4);});
+  lineChart($('cLink'),{xmin:-300,xmax:0,ymin:lo,ymax:hi,spans:d.moves,series:[{pts:lh,color:'#e8f6ff',fill:'rgba(56,184,240,0.12)'}],
+    empty:lh.length<2?'no signal samples':''});
+  var sd=d.stds||[],sm=2;sd.forEach(function(p){sm=Math.max(sm,p[1]*1.2);});if(d.thr)sm=Math.max(sm,d.thr*1.3);
+  lineChart($('cDist'),{xmin:-300,xmax:0,ymin:0,ymax:sm,spans:d.moves,hline:d.thr,yfmt:function(v){return v.toFixed(1);},
+    series:[{pts:sd,color:'#ffb84d',fill:'rgba(255,154,30,0.22)'}],empty:sd.length<2?'learning the quiet level…':''});
+  renderNets(d);renderCtl(d);
+}
+
+/* ---------- networks ---------- */
+function renderNets(d){
+  var hh='';
+  if(d.health){var g=d.health.grade||'';var col=d.health.score>=80?'#2fe07a':d.health.score>=60?'#ffd23f':'#ff5c4d';
+    hh='<div class="health"><div class="g" style="color:'+col+'">'+esc(g)+'</div><div><b>'+Math.round(d.health.score)+'</b> / 100 Wi-Fi health<div class="note">'
+      +(d.health.factors||[]).map(function(f){return esc(f[0])+' '+Math.round(f[1])+'/'+Math.round(f[2]);}).join(' · ')+'</div></div></div>';}
+  $('health').innerHTML=hh;
+  var fh='';(d.findings||[]).forEach(function(f){fh+='<div class="find '+esc(f.sev)+'">'+esc(f.text)+'</div>';});
+  (d.advice||[]).forEach(function(a){fh+='<div class="find">'+esc(typeof a==='string'?a:(a.text||JSON.stringify(a)))+'</div>';});
+  $('finds').innerHTML=fh;
+  var ah='';(d.aps||[]).forEach(function(a){
+    var pct=Math.max(0,Math.min(100,(a.dbm+100)*2)),col=a.dbm>=-60?'#2fe07a':a.dbm>=-72?'#ffd23f':'#ff8a3d';
+    ah+='<div class="ap"><div class="nm">'+esc(a.ssid)+(a.disturbed?'<span class="tag d">DISTURBED</span>':'')+(a.new?'<span class="tag n">NEW</span>':'')
+      +'<small>ch '+esc(a.channel==null?'?':a.channel)+' · '+esc(a.band)+(a.maker?' · '+esc(a.maker):'')+(a.auth?' · '+esc(a.auth):'')+'</small></div>'
+      +'<div class="bar"><i style="width:'+pct+'%;background:'+col+'"></i></div><div class="db">'+Math.round(a.dbm)+'</div></div>';});
+  $('aps').innerHTML=ah||'<div class="empty">No access points listed yet.</div>';
+}
+
+/* ---------- controls ---------- */
+var SW=[['away','Away mode','Alert me when the boards or the Wi-Fi see movement while I am not at the PC.'],
+        ['auto_away_min','Away when the PC is idle 10 minutes','Switches away mode on by itself.'],
+        ['background','Keep watching when the Wi-Fi window is closed','The watcher runs in the app in the background.'],
+        ['csi_bg','Keep watching with the ESP32 boards','Movement near the boards counts for alerts and the history. Needs a receiver chosen in the CSI tab on the PC.']];
+var lastCtl='';
+function renderCtl(d){
+  var p=d.prefs||{};
+  var key=JSON.stringify([p,d.can_disarm,d.local,d.away,d.at_pc]);if(key===lastCtl)return;lastCtl=key;
+  $('ctlNote').textContent=(d.away?'Away mode is counting right now. ':(p.away?'Away mode is on, but you are at the PC, so it is not counting. ':''))
+    +(d.can_disarm?'':'From this device you can switch things on, but not off (the dashboard has no login, so only the PC can).');
+  var h='';SW.forEach(function(s){var on=!!(s[0]==='auto_away_min'?(p[s[0]]>0):p[s[0]]);
+    var dis=(!d.can_disarm&&on);
+    h+='<div class="sw"><div class="tx">'+esc(s[1])+'<small>'+esc(s[2])+'</small></div><button class="'+(on?'on':'')+'" data-k="'+s[0]+'" '+(dis?'disabled':'')+' aria-label="'+esc(s[1])+'"></button></div>';});
+  if(d.local){var wc=!!p.web_control;h+='<div class="sw"><div class="tx">Allow switching off from other devices<small>Off by default. Anyone on your Wi-Fi who opens this page could then silence the alarm. Only the PC can change this.</small></div><button class="'+(wc?'on':'')+'" data-k="web_control" aria-label="Allow switching off from other devices"></button></div>';}
+  $('sws').innerHTML=h;
+}
+$('sws').addEventListener('click',function(e){
+  var b=e.target.closest('button');if(!b||b.disabled)return;var k=b.getAttribute('data-k'),v=!b.classList.contains('on');
+  b.disabled=true;$('ctlMsg').textContent='';
+  fetch('/api/wifi/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,value:v})})
+   .then(function(r){return r.json();}).then(function(j){$('ctlMsg').textContent=j.ok?'':(j.error||'Could not change that.');lastCtl='';refresh();})
+   .catch(function(){$('ctlMsg').textContent='Desktop app unreachable.';b.disabled=false;});
+});
+
+/* ---------- activity ---------- */
+var heatData=null;
+function heatCol(v){if(v==null)return 'rgba(255,255,255,0.04)';var t=Math.max(0,Math.min(1,v/Math.max(20,heatData.max)));
+  var S=[[0,[20,40,90]],[0.35,[40,120,200]],[0.65,[255,210,63]],[1,[255,61,46]]];
+  for(var i=1;i<S.length;i++){if(t<=S[i][0]){var a=S[i-1],b=S[i],u=(t-a[0])/(b[0]-a[0]);return 'rgb('+Math.round(a[1][0]+(b[1][0]-a[1][0])*u)+','+Math.round(a[1][1]+(b[1][1]-a[1][1])*u)+','+Math.round(a[1][2]+(b[1][2]-a[1][2])*u)+')';}}return 'rgb(255,61,46)';}
+function renderActivity(a){
+  var hide=!a.ok;['cHeat','cBars','heatTip'].forEach(function(i){$(i).style.display=hide?'none':'';});
+  document.querySelectorAll('#activity .hh').forEach(function(e){e.style.display=hide?'none':'';});
+  if(!a.ok){$('events').innerHTML='<div class="empty">'+esc(a.error||'No history')+'</div>';return;}
+  var mx=0;a.grid.forEach(function(r){r.forEach(function(v){if(v!=null)mx=Math.max(mx,v);});});heatData={a:a,max:mx};
+  var P=prep($('cHeat')),c=P.c,w=P.w,h=P.h,L=30,T=4,B=16,cw=(w-L-4)/24,ch=(h-T-B)/7;
+  heatData.geo={L:L,T:T,cw:cw,ch:ch};
+  var any=false;
+  for(var d=0;d<7;d++){c.fillStyle=css('--tick');c.font='10px system-ui,sans-serif';c.textAlign='right';c.fillText(a.days[d],L-4,T+d*ch+ch/2+3);
+    for(var hr=0;hr<24;hr++){var v=a.grid[d][hr];if(v!=null)any=true;c.fillStyle=heatCol(v);c.fillRect(L+hr*cw+0.5,T+d*ch+0.5,cw-1,ch-1);}}
+  c.fillStyle=css('--tick');c.textAlign='center';for(var q=0;q<24;q+=3)c.fillText(('0'+q).slice(-2),L+q*cw+cw/2,h-3);
+  if(!any){c.fillStyle=css('--text');c.font='12px system-ui,sans-serif';c.fillText('No history yet — it fills in while the app runs',L+(w-L)/2,T+(h-T-B)/2);}
+  var P2=prep($('cBars')),c2=P2.c,w2=P2.w,h2=P2.h,bw=(w2-30)/24,mm=2;a.last24.forEach(function(x){mm=Math.max(mm,x.minutes*1.2);});
+  a.last24.forEach(function(x,i){var bh=x.n?Math.max(1,x.minutes/mm*(h2-22)):2;c2.fillStyle=x.n?heatCol(x.minutes/mm*Math.max(20,mx)):'rgba(255,255,255,0.10)';
+    c2.fillRect(28+i*bw+1,h2-16-bh,bw-2,bh);});
+  c2.fillStyle=css('--tick');c2.font='10px system-ui,sans-serif';c2.textAlign='center';a.last24.forEach(function(x,i){if(i%4===0)c2.fillText(x.hour,28+i*bw+bw/2,h2-3);});
+  c2.textAlign='right';c2.fillText(Math.round(mm)+'m',24,10);
+  $('events').innerHTML=(a.events||[]).map(function(e){return '<div><span class="t">'+esc(e.when.slice(5))+'</span><span class="k '+esc(e.kind.replace(' ',''))+'">'+esc(e.kind)+'</span><span>'+esc(e.detail)+'</span></div>';}).join('')||'<div class="empty">No events yet.</div>';
+}
+$('cHeat').addEventListener('click',function(e){if(!heatData)return;var r=this.getBoundingClientRect(),g=heatData.geo,x=e.clientX-r.left,y=e.clientY-r.top;
+  var hr=Math.floor((x-g.L)/g.cw),d=Math.floor((y-g.T)/g.ch);if(hr<0||hr>23||d<0||d>6)return;var v=heatData.a.grid[d][hr];
+  $('heatTip').innerHTML='<span><b>'+heatData.a.days[d]+' '+('0'+hr).slice(-2)+':00</b></span><span>'+(v==null?'nothing recorded':'movement <b>'+v.toFixed(1)+'%</b> of the time')+'</span><span>'+(heatData.a.counts[d][hr]||0)+' min recorded</span>';});
+
+/* ---------- signal map ---------- */
+var MAPST={floor:null,data:null,img:null,imgFloor:null};
+var MSTOPS=[[-90,[42,63,176]],[-75,[41,182,246]],[-62,[67,209,122]],[-52,[255,210,63]],[-44,[255,138,61]],[-35,[255,61,46]]];
+function mcol(v){v=Math.max(-90,Math.min(-35,v));for(var i=1;i<MSTOPS.length;i++){if(v<=MSTOPS[i][0]){var a=MSTOPS[i-1],b=MSTOPS[i],t=(v-a[0])/(b[0]-a[0]);
+  return [Math.round(a[1][0]+(b[1][0]-a[1][0])*t),Math.round(a[1][1]+(b[1][1]-a[1][1])*t),Math.round(a[1][2]+(b[1][2]-a[1][2])*t)];}}return [255,61,46];}
+function loadMap(floor){
+  fetch('/api/wifi/map'+(floor!=null?'?floor='+floor:''),{cache:'no-store'}).then(function(r){return r.json();}).then(function(m){
+    MAPST.data=m;MAPST.floor=m.floor;
+    if(m.ok&&m.image&&MAPST.imgFloor!==m.floor){MAPST.img=null;var im=new Image();im.onload=function(){MAPST.img=im;MAPST.imgFloor=m.floor;drawMap();};im.src='/api/wifi/plan?floor='+m.floor+'&t='+Date.now();}
+    else drawMap();
+  }).catch(function(){$('mapNote').textContent='Desktop app unreachable.';});
+}
+function drawMap(){
+  var m=MAPST.data;if(!m)return;
+  if(!m.ok){$('mapNote').textContent=m.error||'No survey yet.';return;}
+  $('floors').innerHTML=m.floors.map(function(f){return '<button data-f="'+f.id+'" class="'+(f.id===m.floor?'on':'')+'">'+esc(f.name)+' ('+f.n+')</button>';}).join('');
+  var cv=$('cMap'),w=cv.clientWidth||300,h=Math.round(w*m.h/m.w);h=Math.max(120,Math.min(h,900));cv.setAttribute('height',h);
+  var P=prep(cv),c=P.c,sx=w/m.w,sy=h/m.h,paper=!!(m.image&&MAPST.img);
+  c.fillStyle=paper?'#ffffff':'rgba(255,255,255,0.03)';c.fillRect(0,0,w,h);
+  if(m.field){var f=m.field,oc=document.createElement('canvas');oc.width=f.nx;oc.height=f.ny;var ox=oc.getContext('2d'),id=ox.createImageData(f.nx,f.ny);
+    for(var r=0;r<f.ny;r++){for(var q=0;q<f.nx;q++){var col=mcol(f.v[r][q]),cov=f.c[r][q],al=paper?cov*0.62:Math.pow(Math.min(1,cov*1.6),0.8),o=((f.ny-1-r)*f.nx+q)*4;
+      id.data[o]=col[0];id.data[o+1]=col[1];id.data[o+2]=col[2];id.data[o+3]=Math.round(al*255);}}
+    ox.putImageData(id,0,0);c.imageSmoothingEnabled=true;c.drawImage(oc,0,0,w,h);
+    if(m.dead&&m.dead.mask){var dm=m.dead.mask,cw=w/f.nx,chh=h/f.ny;c.fillStyle='rgba(255,92,138,0.30)';
+      for(var rr=0;rr<f.ny;rr++)for(var qq=0;qq<f.nx;qq++)if(dm[rr][qq])c.fillRect(qq*cw,(f.ny-1-rr)*chh,cw+0.5,chh+0.5);}}
+  if(paper){c.globalCompositeOperation='multiply';c.drawImage(MAPST.img,0,0,w,h);c.globalCompositeOperation='source-over';}
+  (m.samples||[]).forEach(function(s){var col=mcol(s.v);c.beginPath();c.arc(s.x*sx,h-s.y*sy,4,0,6.3);c.fillStyle='rgb('+col+')';c.fill();c.lineWidth=1.3;c.strokeStyle=paper?'#111':'#fff';c.stroke();});
+  if(m.router){var rx=m.router[0]*sx,ry=h-m.router[1]*sy;c.beginPath();c.moveTo(rx,ry-8);c.lineTo(rx+7,ry+6);c.lineTo(rx-7,ry+6);c.closePath();c.fillStyle='#38b8f0';c.fill();c.strokeStyle='#fff';c.lineWidth=1.2;c.stroke();}
+  if(m.dead&&m.dead.suggest){var gx=m.dead.suggest[0]*sx,gy=h-m.dead.suggest[1]*sy;c.fillStyle='#ffd23f';c.strokeStyle='#000';c.lineWidth=1;c.font='bold 16px system-ui';c.textAlign='center';c.strokeText('★',gx,gy+5);c.fillText('★',gx,gy+5);}
+  $('mapNote').textContent=(m.samples.length?m.samples.length+' samples on this floor. ':'No samples on this floor yet — walk around with the PC and press "Sample here" in the Signal map tab. ')+(m.field?'':'(Needs three samples to draw the map.)');
+  $('mapStats').innerHTML=(m.router?'<span>▲ router</span>':'')+(m.dead&&m.dead.regions.length?'<span>pink = weaker than −75 dBm ('+m.dead.regions.length+' area'+(m.dead.regions.length>1?'s':'')+')</span>':'')+(m.dead&&m.dead.suggest?'<span>★ a spot for an extra node</span>':'');
+}
+$('floors').addEventListener('click',function(e){var b=e.target.closest('button');if(b)loadMap(parseInt(b.getAttribute('data-f'),10));});
+
+/* ---------- polling ---------- */
+var busy=false;
+function refresh(){
+  if(busy)return;busy=true;
+  fetch('/api/wifi/web'+(st.first?'?start=1':''),{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    st.first=false;$('dot').classList.add('live');
+    if(!d.ok){$('sub').textContent=d.error||'Unavailable';$('chip').textContent='UNAVAILABLE';return;}
+    st.live=d;renderLive(d);
+  }).catch(function(){$('sub').textContent='Desktop app unreachable — same Wi‑Fi?';$('dot').classList.remove('live');}).finally(function(){busy=false;});
+}
+function slow(){fetch('/api/wifi/activity',{cache:'no-store'}).then(function(r){return r.json();}).then(renderActivity).catch(function(){});loadMap(MAPST.floor);}
+refresh();slow();setInterval(refresh,2000);setInterval(slow,60000);
+window.addEventListener('resize',function(){if(st.live)renderLive(st.live);if(heatData)renderActivity(heatData.a);drawMap();});
+document.addEventListener('visibilitychange',function(){if(!document.hidden){refresh();slow();}});
+</script>
+</body>
+</html>

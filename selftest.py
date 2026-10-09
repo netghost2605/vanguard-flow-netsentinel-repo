@@ -49,7 +49,7 @@ GOLDEN = os.path.join(HERE, "selftest_golden.json")
 
 # Pages and binary assets: built from literals, hashed byte-for-byte.
 STATIC_ROUTES = [
-    "/", "/3d", "/sankey", "/talkers", "/agents", "/guide", "/monitor", "/vdi",
+    "/", "/3d", "/sankey", "/talkers", "/agents", "/guide", "/monitor", "/vdi", "/wifi",
     "/analytics", "/honeypot", "/threats",
     "/sw.js", "/manifest.webmanifest",
     "/day-map.jpg", "/world-map.jpg", "/radar-map.png", "/sonar.mp3",
