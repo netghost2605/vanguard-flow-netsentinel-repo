@@ -2716,7 +2716,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-a7f2d915'
+_NM_BUILD_ID = 'b-0c94e7a3'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -5962,7 +5962,123 @@ def _nm_open_heatmap(monitor):
 
 _NM_WIFI_DASH = {'bg': '#060a1c', 'panel': '#0d1630', 'text': '#e8f1ff',
                  'text2': '#8fa8cc', 'accent': '#38b8f0', 'good': '#2fe07a',
-                 'warn': '#ff9a1e', 'bad': '#ff3d2e'}
+                 'warn': '#ff9a1e', 'bad': '#ff3d2e',
+                 'border': '#26365f', 'chip': '#1c2b52', 'well': '#0c1d33', 'frame': '#24507f'}
+
+
+def _nm_hex_mix(a, b, t):
+    """Colour a moved fraction t of the way towards colour b (both '#rrggbb')."""
+    try:
+        a, b = a.lstrip('#'), b.lstrip('#')
+        ca = [int(a[i:i + 2], 16) for i in (0, 2, 4)]
+        cb = [int(b[i:i + 2], 16) for i in (0, 2, 4)]
+        return '#%02x%02x%02x' % tuple(int(round(x + (y - x) * t)) for x, y in zip(ca, cb))
+    except Exception:
+        return '#' + a if not str(a).startswith('#') else a
+
+
+def _nm_wifi_palette(monitor):
+    """The Wi-Fi window's colours from the app's active theme (background, panels, text, borders, accent).
+    Semantic colours (movement red, quiet green, warning orange) stay as they are, so they mean the same in
+    every theme."""
+    ui = _nm_theme_ui(monitor)
+    D = dict(_NM_WIFI_DASH)
+    D.update(bg=ui['bg'], panel=ui['panel'], text=ui['text'], text2=ui['text2'], border=ui['border'],
+             accent=ui['accent'])
+    D['chip'] = _nm_hex_mix(ui['panel'], ui['border'], 0.75)          # neutral status chips
+    D['well'] = _nm_hex_mix(ui['bg'], ui['panel'], 0.55)              # the walking man's tile
+    D['frame'] = _nm_hex_mix(ui['border'], ui['accent'], 0.35)        # his tile's edge
+    return D
+
+
+def _nm_wifi_ttk(win, D):
+    """Themed ttk styles ('NMW.*') for the Wi-Fi window, applied to every ttk widget inside it. Separate style
+    names, so the rest of the app keeps its own look."""
+    try:
+        from tkinter import ttk as _ttk
+        s = _ttk.Style(win)
+        bg, pn, fg, dim, edge, acc = D['bg'], D['panel'], D['text'], D['text2'], D['border'], D['accent']
+        hi = _nm_hex_mix(pn, acc, 0.18)
+        s.configure('NMW.TFrame', background=bg)
+        s.configure('NMW.TLabel', background=bg, foreground=fg)
+        s.configure('NMW.TButton', background=pn, foreground=fg, bordercolor=edge, lightcolor=edge, darkcolor=edge,
+                    relief='flat', padding=(12, 6), focuscolor=acc)
+        s.map('NMW.TButton', background=[('active', hi), ('pressed', bg)], foreground=[('active', acc)],
+              bordercolor=[('active', acc)])
+        s.configure('NMW.Accent.TButton', background=_nm_hex_mix(pn, acc, 0.22), foreground=acc, bordercolor=acc,
+                    lightcolor=acc, darkcolor=acc, relief='flat', padding=(12, 6))
+        s.map('NMW.Accent.TButton', background=[('active', _nm_hex_mix(pn, acc, 0.35))],
+              foreground=[('active', '#ffffff')])
+        s.configure('NMW.TEntry', fieldbackground=pn, foreground=fg, bordercolor=edge, lightcolor=edge,
+                    darkcolor=edge, insertcolor=acc, padding=4)
+        s.map('NMW.TEntry', bordercolor=[('focus', acc)])
+        s.configure('NMW.TCombobox', fieldbackground=pn, background=pn, foreground=fg, arrowcolor=acc,
+                    bordercolor=edge, lightcolor=edge, darkcolor=edge, padding=4)
+        s.map('NMW.TCombobox', fieldbackground=[('readonly', pn)], foreground=[('readonly', fg)],
+              bordercolor=[('focus', acc)])
+        s.configure('NMW.TCheckbutton', background=bg, foreground=fg, indicatorcolor=pn, focuscolor=acc)
+        s.map('NMW.TCheckbutton', indicatorcolor=[('selected', acc)], background=[('active', bg)],
+              foreground=[('active', acc)])
+        s.configure('NMW.Horizontal.TScale', background=bg, troughcolor=pn, bordercolor=edge)
+        s.configure('NMW.Treeview', background=pn, fieldbackground=pn, foreground=fg, bordercolor=edge, rowheight=22)
+        s.configure('NMW.Treeview.Heading', background=_nm_hex_mix(bg, pn, 0.5), foreground=dim, relief='flat',
+                    font=(_NM_MONO, 9, 'bold'))
+        s.map('NMW.Treeview', background=[('selected', hi)], foreground=[('selected', acc)])
+        s.map('NMW.Treeview.Heading', background=[('active', hi)])
+        s.configure('NMW.TNotebook', background=bg, bordercolor=edge, lightcolor=edge, darkcolor=edge, tabmargins=0)
+        s.configure('NMW.TNotebook.Tab', background=bg, foreground=dim, padding=(16, 8), bordercolor=edge,
+                    lightcolor=edge, darkcolor=edge)
+        s.map('NMW.TNotebook.Tab', background=[('selected', pn)], foreground=[('selected', acc)])
+
+        def walk(w):
+            try:
+                cls = w.winfo_class()
+                if cls in ('TButton', 'TEntry', 'TCombobox', 'TCheckbutton', 'TLabel', 'TFrame', 'Treeview',
+                           'TNotebook', 'TScale'):
+                    cur = str(w.cget('style') or '')
+                    if not cur.startswith('NMW.'):
+                        if cls == 'TScale':
+                            new = 'NMW.Horizontal.TScale'
+                        elif cur == 'Accent.TButton':
+                            new = 'NMW.Accent.TButton'
+                        elif cur:
+                            new = None                      # some other custom style: leave it
+                        else:
+                            new = 'NMW.' + cls
+                        if new:
+                            w.configure(style=new)
+            except Exception:
+                pass
+            for c in w.winfo_children():
+                walk(c)
+        walk(win)
+    except Exception:
+        _exc_debug('_nm_wifi_ttk')
+
+
+_NM_TK_COLOR_OPTS = ('background', 'foreground', 'activebackground', 'activeforeground', 'selectcolor',
+                     'highlightbackground', 'highlightcolor', 'insertbackground', 'selectbackground',
+                     'selectforeground', 'disabledforeground', 'troughcolor')
+
+
+def _nm_recolor_tk(w, mapping):
+    """Swap colours on plain Tk widgets (labels, frames, canvases, text boxes...) from the old theme to the new."""
+    try:
+        if not w.winfo_class().startswith('T') or w.winfo_class() in ('Text', 'Toplevel'):
+            for opt in _NM_TK_COLOR_OPTS:
+                try:
+                    v = str(w.cget(opt)).lower()
+                except Exception:
+                    continue
+                if v in mapping:
+                    try:
+                        w.configure(**{opt: mapping[v]})
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    for c in w.winfo_children():
+        _nm_recolor_tk(c, mapping)
 
 
 def _nm_wifi_dbm(pct):
@@ -6749,14 +6865,15 @@ def _nm_idle_seconds():
         return 0.0
 
 
-def _nm_wifi_alert(monitor, title, msg, sev='warn'):
-    """Desktop toast + the app's push/webhook channels. Never raises."""
+def _nm_wifi_alert(monitor, title, msg, sev='warn', image=None, tags='wifi'):
+    """Desktop toast + the app's push/webhook channels (with a picture of the graph for movement, if given).
+    Never raises."""
     try:
         _nm_toast(title, msg)
     except Exception:
         _exc_debug('_nm_wifi_alert toast')
     try:
-        _nm_notify_async(title, msg, sev=sev, tags='wifi')
+        _nm_notify_async(title, msg, sev=sev, tags=tags, attach=image)
     except Exception:
         _exc_debug('_nm_wifi_alert notify')
     try:
@@ -6766,6 +6883,133 @@ def _nm_wifi_alert(monitor, title, msg, sev='warn'):
     except Exception:
         _exc_debug('_nm_wifi_alert webhook')
 
+
+
+# ── Is your phone at home? (automatic Away) ──────────────────────────────────
+# A phone on the home Wi-Fi answers ARP ("who has 192.168.1.23?") even while its screen is off -- its Wi-Fi chip
+# replies for it -- which is far more reliable than ping. Windows' SendARP asks exactly that question. The phone is
+# known by its Wi-Fi (MAC) address; its IP can change, so the ARP table and, when needed, a sweep of the local
+# network find it again.
+
+def _nm_mac_norm(mac):
+    h = re.sub(r'[^0-9a-fA-F]', '', str(mac or '')).lower()
+    return ':'.join(h[i:i + 2] for i in range(0, 12, 2)) if len(h) == 12 else ''
+
+
+def _nm_arp_probe(ip):
+    """Ask the LAN who has `ip`. Returns its MAC ('aa:bb:cc:dd:ee:ff') or None. Windows only (None elsewhere)."""
+    if not _NM_IS_WIN:
+        return None
+    try:
+        import ctypes, socket, struct
+        dest = struct.unpack('I', socket.inet_aton(ip))[0]
+        buf = (ctypes.c_ulong * 2)()
+        ln = ctypes.c_ulong(6)
+        if ctypes.windll.iphlpapi.SendARP(dest, 0, ctypes.byref(buf), ctypes.byref(ln)) != 0 or ln.value < 6:
+            return None
+        b = bytes(bytearray(buf))[:6]
+        if b == b'\x00' * 6:
+            return None
+        return ':'.join('%02x' % x for x in b)
+    except Exception:
+        return None
+
+
+def _nm_arp_macs():
+    """{mac: ip} from Windows' ARP cache (dynamic entries)."""
+    out = {}
+    if not _NM_IS_WIN:
+        return out
+    try:
+        import subprocess
+        r = subprocess.run(['arp', '-a'], capture_output=True, text=True, timeout=8,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        for line in (r.stdout or '').splitlines():
+            m = re.match(r'\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5})\s+dynamic', line)
+            if m:
+                mac = _nm_mac_norm(m.group(2))
+                if mac and not mac.startswith('01:00:5e') and mac != 'ff:ff:ff:ff:ff:ff':
+                    out[mac] = m.group(1)
+    except Exception:
+        _exc_debug('_nm_arp_macs')
+    return out
+
+
+def _nm_local_ipv4():
+    """This PC's address on the home network (the one used to reach the internet), or None."""
+    import socket
+    try:
+        s_ = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s_.connect(('8.8.8.8', 53))
+            return s_.getsockname()[0]
+        finally:
+            s_.close()
+    except Exception:
+        return None
+
+
+def _nm_arp_sweep(probe=None, my_ip=None, workers=48):
+    """Ask every address of this PC's /24 network (in parallel). {mac: ip} of everything that answered."""
+    probe = probe or _nm_arp_probe
+    my_ip = my_ip or _nm_local_ipv4()
+    if not my_ip or my_ip.startswith('127.'):
+        return {}
+    base = my_ip.rsplit('.', 1)[0]
+    ips = ['%s.%d' % (base, i) for i in range(1, 255) if '%s.%d' % (base, i) != my_ip]
+    found = {}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for ip, mac in zip(ips, ex.map(probe, ips)):
+                if mac:
+                    found[_nm_mac_norm(mac)] = ip
+    except Exception:
+        _exc_debug('_nm_arp_sweep')
+    return found
+
+
+class _NMPhonePresence:
+    """Tracks one phone by its Wi-Fi address. check() every ~30 s; home(minutes) says whether it has been seen
+    within that many minutes (before the first sighting: 'home' for the first `minutes` after start, so a just-started
+    app does not declare you away)."""
+    SWEEP_EVERY_S = 180.0
+
+    def __init__(self, mac, probe=None, table=None, sweep=None, clock=None):
+        self.mac = _nm_mac_norm(mac)
+        self.probe = probe or _nm_arp_probe
+        self.table = table or _nm_arp_macs
+        self.sweep = sweep or (lambda: _nm_arp_sweep(self.probe))
+        self.clock = clock or time.time
+        self.ip = None
+        self.t0 = self.clock()
+        self.last_seen = 0.0
+        self.last_sweep = -1e18
+        self.checks = 0
+
+    def check(self):
+        now = self.clock()
+        self.checks += 1
+        seen = False
+        if self.ip and _nm_mac_norm(self.probe(self.ip)) == self.mac:
+            seen = True
+        if not seen:
+            ip = self.table().get(self.mac)
+            if ip and _nm_mac_norm(self.probe(ip)) == self.mac:
+                self.ip, seen = ip, True
+        if not seen and now - self.last_sweep >= self.SWEEP_EVERY_S:
+            self.last_sweep = now
+            ip = (self.sweep() or {}).get(self.mac)
+            if ip:
+                self.ip, seen = ip, True
+        if seen:
+            self.last_seen = now
+        return seen
+
+    def home(self, minutes=10.0):
+        now = self.clock()
+        ref = self.last_seen if self.last_seen > 0 else self.t0
+        return (now - ref) < float(minutes) * 60.0
 
 
 # ── Wi-Fi: the background watcher ────────────────────────────────────────────
@@ -6835,7 +7079,7 @@ def _nm_wifi_autostart(monitor):
     """At app launch: if the user left 'keep watching in the background' on, start."""
     try:
         _wp = _nm_wifi_load('wifi_prefs.json', {})
-        if (_wp.get('background') or _wp.get('csi_bg')) and _NM_IS_WIN:
+        if (_wp.get('background') or _wp.get('csi_bg') or _nm_mac_norm(_wp.get('phone_mac'))) and _NM_IS_WIN:
             _nm_wifi_get_watcher(monitor).start()
     except Exception:
         _exc('_nm_wifi_autostart')
@@ -6845,8 +7089,11 @@ class _NMWifiWatcher:
     PREF_DEFAULTS = {'background': False, 'away': False, 'auto_away_min': 0,
                      'scan_s': 12, 'alert_away': True,
                      'csi_bg': False, 'csi_port': '', 'csi_baud': 921600,
-                     'web_control': False}      # True: the browser/phone page may also switch things OFF from other devices
-    CSI_SILENT_S = 90.0            # no board data for this long while watching -> one event (alert if away)
+                     'web_control': False,      # True: the browser/phone page may also switch things OFF from other devices
+                     'phone_mac': '', 'phone_name': '', 'phone_away_min': 10, 'phone_notify': True,
+                     'alert_image': True}       # attach a picture of the movement graph to phone alerts
+    CSI_SILENT_S = 90.0
+    PHONE_EVERY_S = 30.0           # how often the phone is looked for            # no board data for this long while watching -> one event (alert if away)
 
     def __init__(self, monitor=None, scan_fn=None, state_dir=None, use_api=True, api_cls=None,
                  db=None, threads=True, alert_fn=None, idle_fn=None):
@@ -6861,7 +7108,8 @@ class _NMWifiWatcher:
         self._use_api = bool(use_api) and (api_cls is not None or (_NM_IS_WIN and scan_fn is None))
         self._api_cls = api_cls or _NMWifiApiSource
         self._threads_on = bool(threads)
-        self.alert_fn = alert_fn or (lambda title, msg, sev: _nm_wifi_alert(self.monitor, title, msg, sev))
+        self.alert_fn = alert_fn or (lambda title, msg, sev, image=None: _nm_wifi_alert(self.monitor, title, msg, sev,
+                                                                                         image=image))
         self.idle_fn = idle_fn or _nm_idle_seconds
         self.lock = threading.RLock()
         self.stop_ev = threading.Event()
@@ -6922,6 +7170,10 @@ class _NMWifiWatcher:
         self._csi_flagged = False
         self._csi_retry_t = 0.0
         self._cmin = None
+        # your phone (automatic Away)
+        self.phone = None                       # _NMPhonePresence for prefs['phone_mac'], made on demand
+        self.phone_factory = None               # tests inject: factory(mac) -> presence object
+        self._phone_home = None                 # last known state (None = not tracking yet)
 
     # ── persistence / prefs ────────────────────────────────────────────────
     def _save_seen(self):
@@ -6938,6 +7190,73 @@ class _NMWifiWatcher:
                 self.api.start()
             except Exception:
                 _exc_debug('set_pref scan_s')
+        if key == 'phone_mac':
+            with self.lock:
+                self.phone = None
+                self._phone_home = None
+
+    # ── your phone: automatic Away ─────────────────────────────────────────
+    def _phone_obj(self):
+        mac = _nm_mac_norm(self.prefs.get('phone_mac'))
+        if not mac:
+            return None
+        if self.phone is None or self.phone.mac != mac:
+            self.phone = (self.phone_factory or _NMPhonePresence)(mac)
+            self._phone_home = None
+        return self.phone
+
+    def phone_state(self):
+        """None when no phone is chosen; True = at home; False = away for longer than the chosen minutes."""
+        if not _nm_mac_norm(self.prefs.get('phone_mac')):
+            return None
+        ph = self.phone
+        if ph is None:
+            return True                         # not looked for yet: assume home
+        try:
+            return bool(ph.home(float(self.prefs.get('phone_away_min') or 10)))
+        except Exception:
+            return True
+
+    def phone_tick(self):
+        """Look for the phone once; note when it leaves or comes back (an event, and a phone alert if wanted)."""
+        ph = self._phone_obj()
+        if ph is None:
+            return None
+        try:
+            ph.check()
+        except Exception:
+            _exc_debug('phone check')
+        home = self.phone_state()
+        prev, self._phone_home = self._phone_home, home
+        nm = self.prefs.get('phone_name') or 'your phone'
+        if prev is not None and home != prev:
+            notify = bool(self.prefs.get('phone_notify', True))
+            if home:
+                self.event('PHONE', f'{nm} is back home — automatic Away is off.', alert=notify, sev='warn',
+                           key='PHONE_HOME', debounce=60.0)
+            else:
+                last = time.strftime('%H:%M', time.localtime(ph.last_seen)) if ph.last_seen else 'not yet today'
+                self.event('PHONE', f'{nm} left (last seen {last}) — automatic Away is on: movement now sends an alert.',
+                           alert=notify, sev='warn', key='PHONE_AWAY', debounce=60.0)
+        return home
+
+    def _phone_loop(self):
+        while not self.stop_ev.is_set():
+            try:
+                if _nm_mac_norm(self.prefs.get('phone_mac')):
+                    self.phone_tick()
+            except Exception:
+                _exc_debug('phone loop')
+            self.stop_ev.wait(self.PHONE_EVERY_S)
+
+    def phone_info(self):
+        mac = _nm_mac_norm(self.prefs.get('phone_mac'))
+        if not mac:
+            return None
+        ph = self.phone
+        return {'name': self.prefs.get('phone_name') or '', 'mac': mac, 'home': self.phone_state(),
+                'ip': getattr(ph, 'ip', None), 'last_seen': (getattr(ph, 'last_seen', 0.0) or 0.0),
+                'away_min': int(self.prefs.get('phone_away_min') or 10)}
 
     AT_PC_S = 120.0                                  # keyboard or mouse used within this long = you are at the PC
 
@@ -6953,6 +7272,10 @@ class _NMWifiWatcher:
             # Away mode stays ticked until you untick it (it is saved), so forgetting it must not mean alerts about
             # your own movement while you sit at the machine: it only counts as away once the PC has sat unused.
             return not self.at_pc()
+        ph = self.phone_state()
+        if ph is not None:
+            # a chosen phone decides: away only while it is gone (so an idle PC at night is not 'away')
+            return (not ph) and not self.at_pc()
         m = int(self.prefs.get('auto_away_min') or 0)
         try:
             return m > 0 and self.idle_fn() >= m * 60
@@ -6973,17 +7296,87 @@ class _NMWifiWatcher:
             now = time.time()
             if now - self._alert_last.get(k, 0.0) >= debounce:
                 self._alert_last[k] = now
-                title = {'MOVEMENT': 'Wi-Fi: movement while you are away', 'NEW AP': 'Wi-Fi: new network nearby',
-                         'ROGUE': 'Wi-Fi: suspicious network',
+                title = {'MOVEMENT': 'Movement while you are away', 'NEW AP': 'Wi-Fi: new network nearby',
+                         'ROGUE': 'Wi-Fi: suspicious network', 'PHONE': 'Away mode',
                          'ESP32': 'ESP32 receiver'}.get(kind, 'Wi-Fi alert')
-                threading.Thread(target=self._safe_alert, args=(title, detail, sev), daemon=True).start()
+                threading.Thread(target=self._safe_alert, args=(title, detail, sev, kind), daemon=True).start()
         return ev
 
-    def _safe_alert(self, title, msg, sev):
+    def _safe_alert(self, title, msg, sev, kind=None):
+        img = None
+        if kind == 'MOVEMENT' and self.prefs.get('alert_image', True):
+            try:
+                img = self.snapshot_png()
+            except Exception:
+                _exc_debug('alert picture')
         try:
-            self.alert_fn(title, msg, sev)
+            import inspect
+            try:
+                ps = inspect.signature(self.alert_fn).parameters
+                takes = 'image' in ps or any(p.kind == p.VAR_KEYWORD for p in ps.values())
+            except (TypeError, ValueError):
+                takes = False
+            if takes:
+                self.alert_fn(title, msg, sev, image=img)
+            else:
+                self.alert_fn(title, msg, sev)
         except Exception:
             _exc_debug('wifi alert')
+
+    def snapshot_png(self, span=120.0, w=6.4, h=2.4, dpi=100):
+        """A small picture of the last two minutes of movement (the boards' level if they are live, otherwise the PC
+        Wi-Fi card's disturbance), with the threshold and the moving moments shaded. PNG bytes, or None."""
+        import io
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        now = time.time()
+        with self.lock:
+            ch = [(t - now, lv, th, mv) for (t, lv, th, mv, _r) in self.csi_hist if now - t <= span and lv is not None]
+            sd = [(t - now, v) for (t, v) in self.motion.stds if now - t <= span]
+            thr_l = self.motion.thr
+        if len(ch) >= 5:
+            xs = [c[0] for c in ch]; ys = [float(c[1]) for c in ch]
+            ths = [c[2] for c in ch if c[2] is not None]
+            thr = float(ths[-1]) if ths else None
+            mv = [bool(c[3]) for c in ch]
+            label = 'ESP32 boards: movement level'
+        elif len(sd) >= 5:
+            xs = [c[0] for c in sd]; ys = [float(c[1]) for c in sd]
+            thr = float(thr_l) if thr_l is not None else None
+            mv = [bool(thr is not None and y >= thr) for y in ys]
+            label = 'PC Wi-Fi: signal disturbance'
+        else:
+            return None
+        fig = Figure(figsize=(w, h), dpi=dpi, facecolor='#0a1626')
+        FigureCanvasAgg(fig)
+        ax = fig.add_axes([0.04, 0.2, 0.93, 0.62])
+        ax.set_facecolor('#0d1630')
+        for sp in ax.spines.values():
+            sp.set_color('#26365f')
+        ax.tick_params(colors='#8fa8cc', labelsize=7, length=2)
+        i = 0
+        while i < len(xs):
+            if mv[i]:
+                j = i
+                while j + 1 < len(xs) and mv[j + 1]:
+                    j += 1
+                ax.axvspan(xs[i], xs[j] if j > i else xs[i] + 1.0, color='#ff3d2e', alpha=0.28, linewidth=0)
+                i = j + 1
+            else:
+                i += 1
+        ax.plot(xs, ys, color='#38b8f0', linewidth=1.3)
+        ax.fill_between(xs, ys, color='#38b8f0', alpha=0.15)
+        if thr is not None:
+            ax.axhline(thr, color='#ff8a3d', linestyle='--', linewidth=0.9)
+        top = max(ys + ([thr] if thr is not None else [])) * 1.12 or 1.0
+        ax.set_xlim(-span, 0)
+        ax.set_ylim(0, top)
+        ax.set_yticks([])
+        ax.set_xlabel('seconds ago', color='#8fa8cc', fontsize=7)
+        fig.text(0.04, 0.88, label + time.strftime('   %H:%M:%S'), color='#e8f1ff', fontsize=9, fontweight='bold')
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', facecolor=fig.get_facecolor())
+        return buf.getvalue()
 
     # ── ESP32 boards, watched in the background ───────────────────────────
     # The receiver board's movement joins the same events, away alerts and activity history as the PC's
@@ -7227,7 +7620,7 @@ class _NMWifiWatcher:
                 self._fallback(str(ex))
         if self._threads_on:
             for fn, nm in ((self._link_loop, 'nm-wifi-link'), (self._aps_loop, 'nm-wifi-aps'),
-                           (self._csi_loop, 'nm-csi-watch')):
+                           (self._csi_loop, 'nm-csi-watch'), (self._phone_loop, 'nm-phone')):
                 threading.Thread(target=fn, daemon=True, name=nm).start()
             if self.csi_wanted():
                 self.csi_start()
@@ -7555,7 +7948,7 @@ class _NMWifiWatcher:
                         'rate': float(cs.get('rate') or 0.0), 'rssi': last_rssi, 'status': self.csi_status_text()},
                 'csi_hist': dec(csi_hist, 300), 'csi_moves': csi_moves,
                 'away': self.is_away(), 'at_pc': self.at_pc(), 'events': events, 'aps': aps, 'health': health,
-                'findings': findings, 'advice': advice, 'prefs': prefs}
+                'findings': findings, 'advice': advice, 'prefs': prefs, 'phone': self.phone_info()}
 
     def web_set(self, key, value, local):
         """One switch from the browser/phone page. Arming (turning something on) is allowed from any device on the
@@ -7654,6 +8047,262 @@ def _nm_wifi_dead_spots(gx, gy, fld, cov, thr=-75.0, router=None, min_cells=6):
     return {'regions': regions, 'mask': keep, 'suggest': suggest}
 
 
+def _nm_phone_dialog(parent, D, W_, scan=None, hostname=None):
+    """'Phone alerts & automatic Away': set up free ntfy push alerts, and choose your phone so Away follows it.
+    scan/hostname are injectable for tests."""
+    import tkinter as tk
+    import threading
+    import secrets
+    from tkinter import ttk as _ttk
+    scan = scan or (lambda: dict(list(_nm_arp_macs().items()) + list(_nm_arp_sweep().items())))
+
+    def _host(ip):
+        if hostname is not None:
+            return hostname(ip)
+        try:
+            import socket
+            return socket.gethostbyaddr(ip)[0].split('.')[0]
+        except Exception:
+            return ''
+
+    win = tk.Toplevel(parent)
+    win.title('Phone alerts & automatic Away')
+    win.configure(bg=D['bg'])
+    win.geometry('780x760')
+    S = {'dead': False, 'found': [], 'prev': None}
+    win.bind('<Destroy>', lambda e: S.__setitem__('dead', True) if e.widget is win else None)
+
+    def H(t):
+        tk.Label(win, text=t, bg=D['bg'], fg=D['text'], font=(_NM_MONO, 11, 'bold'), anchor='w').pack(fill='x', padx=16, pady=(14, 2))
+
+    def P(t, fg=None):
+        l = tk.Label(win, text=t, bg=D['bg'], fg=fg or D['text2'], font=(_NM_MONO, 8), anchor='w', justify='left',
+                     wraplength=720)
+        l.pack(fill='x', padx=16, pady=(0, 4))
+        return l
+
+    S['q'] = []
+
+    def later(fn):                      # from a worker thread: run fn on the Tk thread (picked up by _pump)
+        S['q'].append(fn)
+
+    def _pump():
+        if S['dead']:
+            return
+        while S['q']:
+            try:
+                S['q'].pop(0)()
+            except Exception:
+                _exc_debug('phone dialog update')
+        try:
+            win.after(100, _pump)
+        except Exception:
+            pass
+    win.after(100, _pump)
+
+    # ── 1. alerts on your phone ────────────────────────────────────────────
+    H('1.  Alerts on your phone')
+    st_var = tk.StringVar()
+    tk.Label(win, textvariable=st_var, bg=D['bg'], fg=D['accent'], font=(_NM_MONO, 9, 'bold'), anchor='w',
+             justify='left', wraplength=720).pack(fill='x', padx=16)
+    topic_var = tk.StringVar()
+    howto = P('')
+    row = tk.Frame(win, bg=D['bg']); row.pack(fill='x', padx=16, pady=4)
+    setup_btn = _ttk.Button(row, text='Set up free phone alerts (ntfy)')
+    setup_btn.pack(side='left')
+    copy_btn = _ttk.Button(row, text='Copy topic name')
+    copy_btn.pack(side='left', padx=6)
+    test_btn = _ttk.Button(row, text='Send a test alert')
+    test_btn.pack(side='left')
+    img_v = tk.BooleanVar(value=bool(W_.prefs.get('alert_image', True)))
+    _ttk.Checkbutton(win, text='Attach a picture of the movement graph to movement alerts', variable=img_v,
+                     command=lambda: W_.set_pref('alert_image', bool(img_v.get()))).pack(anchor='w', padx=16, pady=(2, 0))
+    test_var = tk.StringVar()
+    tk.Label(win, textvariable=test_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w').pack(fill='x', padx=16)
+
+    def show_alerts():
+        cfg = _nm_notify_config() or {}
+        b = (cfg.get('backend') or 'none').lower()
+        tp = (cfg.get('ntfy_topic') or '').strip()
+        topic_var.set(tp)
+        if b == 'ntfy' and tp:
+            srv = (cfg.get('ntfy_server') or 'https://ntfy.sh').rstrip('/')
+            st_var.set(f'ON: alerts go to the ntfy topic  {tp}')
+            howto.configure(text=(f'On your phone: install the free "ntfy" app (App Store / Google Play), tap +, and subscribe '
+                                  f'to the topic  {tp}  (server {srv}). Or open  {srv}/{tp}  on the phone. '
+                                  f'Anyone who knows the topic name can read the alerts, so keep it to yourself.'))
+            setup_btn.configure(text='Make a new topic')
+        elif b in ('pushover', 'webhook'):
+            st_var.set(f'ON: alerts go to {b.title()} (set in Alerts & Devices → Notify).')
+            howto.configure(text='Movement pictures are attached only with ntfy; other services get the text.')
+            setup_btn.configure(text='Use ntfy instead')
+        else:
+            st_var.set('OFF: alerts only pop up on this PC.')
+            howto.configure(text='One click makes a private topic on ntfy.sh, a free service that needs no account; '
+                                 'then subscribe to it in the ntfy app on your phone.')
+            setup_btn.configure(text='Set up free phone alerts (ntfy)')
+
+    def do_setup():
+        cfg = dict(_nm_notify_config() or {})
+        cfg['backend'] = 'ntfy'
+        cfg['ntfy_topic'] = 'vanguard-' + secrets.token_hex(8)
+        cfg.setdefault('ntfy_server', 'https://ntfy.sh')
+        if not cfg.get('ntfy_server'):
+            cfg['ntfy_server'] = 'https://ntfy.sh'
+        cfg.setdefault('min_sev', 'warn')
+        _nm_notify_config_save(cfg)
+        show_alerts()
+        test_var.set('Topic made. Subscribe to it on your phone, then press "Send a test alert".')
+
+    def do_copy():
+        try:
+            win.clipboard_clear(); win.clipboard_append(topic_var.get())
+            test_var.set('Topic name copied.')
+        except Exception:
+            pass
+
+    def do_test():
+        test_var.set('Sending…')
+
+        def run():
+            try:
+                img = W_.snapshot_png() if W_.prefs.get('alert_image', True) else None
+            except Exception:
+                img = None
+            ok, why = _nm_notify('Vanguard test alert', 'If you can read this on your phone, alerts work.' +
+                                 (' The picture is the last two minutes of the movement graph.' if img else ''),
+                                 'warn', 'white_check_mark', force=True, attach=img)
+            later(lambda: test_var.set('Sent. It should appear on your phone within a few seconds.' if ok
+                                       else f'Not sent: {why}'))
+        threading.Thread(target=run, daemon=True).start()
+    setup_btn.configure(command=do_setup)
+    copy_btn.configure(command=do_copy)
+    test_btn.configure(command=do_test)
+    show_alerts()
+
+    # ── 2. automatic Away from your phone ──────────────────────────────────
+    H('2.  Away follows your phone')
+    P('When your phone has been off the home Wi-Fi for the time below, Away switches on (movement then sends an alert); '
+      'when it comes back, Away switches off. While a phone is chosen, an idle PC does not count as away, so no alerts '
+      'about yourself at night.')
+    ph_var = tk.StringVar()
+    tk.Label(win, textvariable=ph_var, bg=D['bg'], fg=D['accent'], font=(_NM_MONO, 9, 'bold'), anchor='w',
+             justify='left', wraplength=720).pack(fill='x', padx=16, pady=(2, 4))
+    row2 = tk.Frame(win, bg=D['bg']); row2.pack(fill='x', padx=16)
+    scan_btn = _ttk.Button(row2, text='Find devices on the network')
+    scan_btn.pack(side='left')
+    use_btn = _ttk.Button(row2, text='This one is my phone')
+    use_btn.pack(side='left', padx=6)
+    clr_btn = _ttk.Button(row2, text='Stop following a phone')
+    clr_btn.pack(side='left')
+    lb = tk.Listbox(win, height=9, bg=D['panel'], fg=D['text'], selectbackground=D['frame'], selectforeground='#ffffff',
+                    font=(_NM_MONO, 9), relief='flat', highlightthickness=1, highlightbackground=D['border'],
+                    activestyle='none')
+    lb.pack(fill='both', expand=True, padx=16, pady=6)
+    scan_var = tk.StringVar(value='Press "Find devices on the network" (takes about 15 seconds).')
+    tk.Label(win, textvariable=scan_var, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w', justify='left',
+             wraplength=720).pack(fill='x', padx=16)
+    P('Which one is my phone?  Turn the phone\'s Wi-Fi OFF, press Find, then turn it back ON and press Find again: the '
+      'line marked NEW is your phone. Phones usually show "private address". On an iPhone keep "Private Wi-Fi Address" '
+      'on Fixed (not Rotating) for your home network; on Android use the per-network ("randomised") address, not a new '
+      'one each time.')
+    row3 = tk.Frame(win, bg=D['bg']); row3.pack(fill='x', padx=16, pady=(2, 4))
+    tk.Label(row3, text='Away after the phone has been gone', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 9)).pack(side='left')
+    mins_v = tk.StringVar(value=f"{int(W_.prefs.get('phone_away_min') or 10)} minutes")
+    mins = _ttk.Combobox(row3, textvariable=mins_v, state='readonly', width=12,
+                         values=['3 minutes', '5 minutes', '10 minutes', '15 minutes', '30 minutes'])
+    mins.pack(side='left', padx=6)
+    mins.bind('<<ComboboxSelected>>', lambda e: W_.set_pref('phone_away_min', int(mins_v.get().split()[0])))
+    pn_v = tk.BooleanVar(value=bool(W_.prefs.get('phone_notify', True)))
+    _ttk.Checkbutton(win, text='Tell me on my phone when Away switches on or off', variable=pn_v,
+                     command=lambda: W_.set_pref('phone_notify', bool(pn_v.get()))).pack(anchor='w', padx=16, pady=(0, 12))
+
+    def show_phone():
+        if S['dead']:
+            return
+        pi = W_.phone_info()
+        if pi is None:
+            ph_var.set('No phone chosen: Away works as before (the tick box, or the PC being idle).')
+        else:
+            nm = pi['name'] or 'your phone'
+            seen = pi['last_seen']
+            ago = ('not seen yet' if not seen else
+                   f"seen {int(time.time() - seen)} s ago" if time.time() - seen < 120 else
+                   'last seen ' + time.strftime('%H:%M', time.localtime(seen)))
+            state = 'at home' if pi['home'] else 'AWAY: Away mode is on'
+            ph_var.set(f"Following {nm} ({pi['mac']}{', ' + pi['ip'] if pi['ip'] else ''}): {state}, {ago}.")
+        try:
+            win.after(2000, show_phone)
+        except Exception:
+            pass
+
+    def do_scan():
+        scan_btn.configure(state='disabled')
+        scan_var.set('Looking… (about 15 seconds)')
+
+        def run():
+            try:
+                found = scan() or {}
+            except Exception as ex:
+                found = {}
+                _exc_debug('phone scan ' + str(ex))
+            rows = []
+            from concurrent.futures import ThreadPoolExecutor
+            items = sorted(found.items(), key=lambda kv: tuple(int(x) for x in kv[1].split('.')))
+            try:
+                with ThreadPoolExecutor(max_workers=16) as ex:
+                    names = list(ex.map(lambda kv: _host(kv[1]), items))
+            except Exception:
+                names = [''] * len(items)
+            prev = S['prev']
+            for (mac, ip), nm in zip(items, names):
+                private = len(mac) >= 2 and mac[1] in '26ae'
+                rows.append({'mac': mac, 'ip': ip, 'name': nm, 'private': private,
+                             'new': prev is not None and mac not in prev})
+            S['prev'] = set(found)
+
+            def show():
+                S['found'] = rows
+                lb.delete(0, 'end')
+                cur = _nm_mac_norm(W_.prefs.get('phone_mac'))
+                for r in rows:
+                    tag = ('  NEW' if r['new'] else '') + ('  ← your phone' if r['mac'] == cur else '')
+                    lb.insert('end', f"{r['ip']:<16} {r['mac']}  {'private address' if r['private'] else '               '}"
+                                     f"  {r['name'][:28]}{tag}")
+                scan_var.set(f'{len(rows)} devices answered.' + ('' if rows else ' (Nothing found: is this PC on the '
+                                                                             'home network?)'))
+                scan_btn.configure(state='normal')
+            later(show)
+        threading.Thread(target=run, daemon=True).start()
+
+    def do_use():
+        sel = lb.curselection()
+        if not sel or sel[0] >= len(S['found']):
+            scan_var.set('Pick a line in the list first.')
+            return
+        r = S['found'][sel[0]]
+        W_.set_pref('phone_name', r['name'] or 'My phone')
+        W_.set_pref('phone_mac', r['mac'])
+        if not W_._started:
+            W_.start()
+        threading.Thread(target=W_.phone_tick, daemon=True).start()
+        scan_var.set(f"Following {r['name'] or 'this device'} ({r['mac']}). Vanguard keeps watching in the background "
+                     'while a phone is chosen, also after a restart.')
+
+    def do_clear():
+        W_.set_pref('phone_mac', '')
+        W_.set_pref('phone_name', '')
+        scan_var.set('No phone followed any more.')
+    scan_btn.configure(command=do_scan)
+    use_btn.configure(command=do_use)
+    clr_btn.configure(command=do_clear)
+    show_phone()
+    _nm_wifi_ttk(win, D)
+    return {'win': win, 'scan': do_scan, 'use': do_use, 'clear': do_clear, 'setup': do_setup, 'test': do_test,
+            'lb': lb, 'S': S, 'st_var': st_var, 'ph_var': ph_var, 'scan_var': scan_var, 'test_var': test_var,
+            'topic_var': topic_var, 'mins_v': mins_v}
+
+
 def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     """Wi-Fi Signal window: Live (link + movement + disturbed paths), Networks
     (list, makers, findings, health, channels), Activity (history) and Signal map
@@ -7667,7 +8316,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     from matplotlib.colors import Normalize
     from matplotlib.cm import ScalarMappable
 
-    D = _NM_WIFI_DASH
+    D = _nm_wifi_palette(monitor)        # the app's theme (a private copy: updated in place if the theme changes)
     cmap = _nm_vivid_cmap(True)
     DBM_NORM = Normalize(-90.0, -35.0)
     W_ = watcher or _nm_wifi_get_watcher(monitor, state_dir=state_dir)
@@ -7697,7 +8346,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     hdr_var = tk.StringVar(value='Looking for your Wi-Fi link…')
     tk.Label(head, textvariable=hdr_var, bg=D['bg'], fg=D['text'], font=(_NM_MONO, 12, 'bold'),
              anchor='w').pack(side='left')
-    chip = tk.Label(head, text='CALIBRATING', bg='#1c2b52', fg=D['text2'], font=(_NM_MONO, 9, 'bold'),
+    chip = tk.Label(head, text='CALIBRATING', bg=D['chip'], fg=D['text2'], font=(_NM_MONO, 9, 'bold'),
                     padx=10, pady=3)
     chip.pack(side='right')
     mode_var = tk.StringVar(value='')
@@ -7731,6 +8380,8 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                      command=lambda: W_.set_pref('web_control', bool(web_v.get()))).pack(side='left', padx=(0, 12))
     tk.Label(opts2, text='Off by default: any device on your Wi-Fi could otherwise silence the alarm.', bg=D['bg'],
              fg=D['text2'], font=(_NM_MONO, 8)).pack(side='left')
+    _ttk.Button(opts2, text='Phone alerts & automatic Away…',
+                command=lambda: _nm_phone_dialog(win, D, W_)).pack(side='right')
 
     def _copy_raw():
         txt = ('--- netsh wlan show interfaces ---\n' + W_.raw_link + '\n\n--- netsh wlan show networks mode=bssid ---\n'
@@ -7753,7 +8404,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     def _style_ax(a):
         a.set_facecolor(D['panel'])
         for sp in a.spines.values():
-            sp.set_color('#26365f')
+            sp.set_color(D['border'])
         a.tick_params(colors=D['text2'], labelsize=7, length=2)
         a.grid(True, color='white', alpha=0.06, linewidth=0.6)
 
@@ -7764,8 +8415,8 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     ev_tree = _ttk.Treeview(tab_live, columns=('time', 'kind', 'detail'), show='headings', height=5)
     for c, w_, t_ in (('time', 90, 'Time'), ('kind', 100, 'Event'), ('detail', 960, 'Detail')):
         ev_tree.heading(c, text=t_); ev_tree.column(c, width=w_, anchor='w')
-    for k_, col in (('NEW AP', '#ff9a1e'), ('MOVEMENT', '#ff3d2e'), ('ROAM', '#38b8f0'), ('ROGUE', '#ff5c8a'),
-                    ('INFO', '#8fa8cc')):
+    for k_, col in (('NEW AP', '#ff9a1e'), ('MOVEMENT', '#ff3d2e'), ('ROAM', D['accent']), ('ROGUE', '#ff5c8a'),
+                    ('INFO', D['text2'])):
         ev_tree.tag_configure(k_, foreground=col)
     ev_tree.pack(fill='x', padx=8, pady=(0, 6))
     last_ev = {'id': 0}
@@ -7781,7 +8432,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             ev_tree.delete(k)
 
     LIVE_BAY = 0.105                                            # share of the width kept free beside the graphs for the walking man
-    lwalk = _NMPointWalker(tk, cv_l.get_tk_widget(), 84, 128, bg='#0c1d33')
+    lwalk = _NMPointWalker(tk, cv_l.get_tk_widget(), 84, 128, bg=D['well'], accent=D['accent'])
     lstate = {'pos': None, 'shown': False}
 
     def _live_walk_tick():
@@ -7799,7 +8450,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 lwalk.set_size(int(hh * 0.68), hh)
                 lwalk.canvas.place(relx=pos[0], rely=pos[1], anchor='center')
                 lstate['shown'] = True
-                lwalk.step()
+                lwalk.tick()
             elif lstate['shown']:
                 lwalk.canvas.place_forget()
                 lstate['shown'] = False
@@ -7807,7 +8458,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             _exc_debug('live walker')
         finally:
             try:
-                win.after(70, _live_walk_tick)
+                win.after(30 if lstate['shown'] else 120, _live_walk_tick)
             except Exception:
                 pass
 
@@ -7853,8 +8504,8 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             lo = min(ys.min() - 4, -80); hi = max(ys.max() + 4, -40)
             a1.set_ylim(lo, hi)
             for k in range(1, 9):
-                a1.fill_between(xs, lo, np.minimum(ys, lo + (ys - lo) * k / 8.0), color='#38b8f0', alpha=0.04, lw=0)
-            a1.plot(xs, ys, color='#bfe6ff', lw=3.0, alpha=0.16)
+                a1.fill_between(xs, lo, np.minimum(ys, lo + (ys - lo) * k / 8.0), color=D['accent'], alpha=0.04, lw=0)
+            a1.plot(xs, ys, color=_nm_hex_mix(D['accent'], '#ffffff', 0.7), lw=3.0, alpha=0.16)
             a1.plot(xs, ys, color='#e8f6ff', lw=1.0)
             a1.scatter([xs[-1]], [ys[-1]], s=22, color='white', zorder=5)
         else:
@@ -7865,8 +8516,8 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             ab.set_title('Boards (ESP32): movement level — last 5 minutes', loc='left', color=D['text'], fontsize=9,
                          fontweight='bold')
             bx = np.array([p[0] for p in ch_]); by = np.array([p[1] for p in ch_])
-            ab.fill_between(bx, 0, by, color='#38b8f0', alpha=0.20, lw=0)
-            ab.plot(bx, by, color='#7fd4ff', lw=1.1)
+            ab.fill_between(bx, 0, by, color=D['accent'], alpha=0.20, lw=0)
+            ab.plot(bx, by, color=_nm_hex_mix(D['accent'], '#ffffff', 0.35), lw=1.1)
             ths = [p[2] for p in ch_ if p[2] is not None]
             if ths:
                 ab.axhline(float(ths[-1]), color='#ff3d2e', lw=0.9, ls='--', alpha=0.8)
@@ -7904,7 +8555,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             for a in aps:
                 st = W_.aptrk.state.get(a['bssid'], {})
                 sw.append(float(st.get('swing', 0.0)))
-            cols = ['#ff3d2e' if a.get('disturbed') else '#38b8f0' for a in aps]
+            cols = ['#ff3d2e' if a.get('disturbed') else D['accent'] for a in aps]
             a3.bar(range(len(aps)), sw, color=cols, alpha=0.85, width=0.7)
             a3.set_xticks(range(len(aps)))
             a3.set_xticklabels([f"{a['ssid'][:9]}\n{a['bssid'][-5:]}" for a in aps], fontsize=6)
@@ -8013,7 +8664,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     hist_tree = _ttk.Treeview(tab_act, columns=('time', 'kind', 'detail'), show='headings', height=6)
     for c, w_, t_ in (('time', 150, 'When'), ('kind', 100, 'Event'), ('detail', 920, 'Detail')):
         hist_tree.heading(c, text=t_); hist_tree.column(c, width=w_, anchor='w')
-    for k_, col in (('NEW AP', '#ff9a1e'), ('MOVEMENT', '#ff3d2e'), ('ROAM', '#38b8f0'), ('ROGUE', '#ff5c8a')):
+    for k_, col in (('NEW AP', '#ff9a1e'), ('MOVEMENT', '#ff3d2e'), ('ROAM', D['accent']), ('ROGUE', '#ff5c8a')):
         hist_tree.tag_configure(k_, foreground=col)
     hist_tree.pack(fill='x', padx=8, pady=(0, 6))
 
@@ -8039,7 +8690,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 a1.grid(False)
                 cb = fig_a.colorbar(sm, ax=a1, fraction=0.025, pad=0.02)
                 cb.ax.tick_params(colors=D['text2'], labelsize=6)
-                cb.outline.set_edgecolor('#26365f')
+                cb.outline.set_edgecolor(D['border'])
             except Exception:
                 _exc_debug('wifi activity heat')
         else:
@@ -8056,7 +8707,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 if n:
                     a2.bar(i, s, color=cmap(min(1.0, s / mx)), alpha=0.9, width=0.8)
                 else:
-                    a2.bar(i, 0.4, color='#26365f', alpha=0.7, width=0.8)
+                    a2.bar(i, 0.4, color=D['border'], alpha=0.7, width=0.8)
             a2.set_xticks(range(0, 24, 4)); a2.set_xticklabels([last24[i][0].strftime('%H') for i in range(0, 24, 4)])
             a2.set_ylim(0, max(2.0, mx * 1.2)); a2.set_ylabel('minutes', color=D['text2'], fontsize=7)
         cv_a.draw_idle()
@@ -8242,8 +8893,8 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
         tk.Label(floor_bar, text='Floor', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='left', padx=(0, 8))
         for f in _floor_ids():
             b = tk.Radiobutton(floor_bar, text=f'{_floor_name(f)}', value=str(f), variable=floor_v, indicatoron=0,
-                               command=_on_floor, bg='#10193a', fg=D['text'], selectcolor='#1f6aa5',
-                               activebackground='#17305c', activeforeground='#ffffff', relief='flat', bd=0, highlightthickness=0,
+                               command=_on_floor, bg=D['panel'], fg=D['text'], selectcolor=D['frame'],
+                               activebackground=D['chip'], activeforeground='#ffffff', relief='flat', bd=0, highlightthickness=0,
                                padx=16, pady=6, font=(_NM_MONO, 10, 'bold'), cursor='hand2')
             b.pack(side='left', padx=(0, 4))
             _floor_btns[f] = b
@@ -8493,7 +9144,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             ax.scatter([s['x']], [s['y']], s=46, color=cmap(DBM_NORM(v)), edgecolors='white', linewidths=0.8, zorder=5)
             ax.text(s['x'], s['y'] + 0.18, f'{v:.0f}', color='white', fontsize=6, ha='center', zorder=6)
         if rt:
-            ax.scatter([rt[0]], [rt[1]], s=150, marker='^', color='#38b8f0', edgecolors='white', linewidths=1.2, zorder=8)
+            ax.scatter([rt[0]], [rt[1]], s=150, marker='^', color=D['accent'], edgecolors='white', linewidths=1.2, zorder=8)
             ax.text(rt[0], rt[1] + 0.35, 'router', color='white', fontsize=7, ha='center', zorder=8)
         if cursor['x'] is not None:
             ax.axvline(cursor['x'], color=D['accent'], lw=0.8, alpha=0.7, zorder=4)
@@ -8548,7 +9199,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                     ax.plot([x, x], [y, y], [0, z], color=(1, 1, 1, 0.12), lw=0.6)
             for fl, rt in plan['routers'].items():
                 try:
-                    ax.scatter([rt[0]], [rt[1]], [int(fl) * 3.0 + 1.0], s=160, marker='^', color='#38b8f0',
+                    ax.scatter([rt[0]], [rt[1]], [int(fl) * 3.0 + 1.0], s=160, marker='^', color=D['accent'],
                                edgecolors='white')
                 except Exception:
                     _exc_debug('wifi 3d router')
@@ -8601,7 +9252,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
         try:
             cb.set_label('dBm', color=D['text2'], fontsize=7)
             cb.ax.tick_params(colors=D['text2'], labelsize=6)
-            cb.outline.set_edgecolor('#26365f')
+            cb.outline.set_edgecolor(D['border'])
         except Exception:
             _exc_debug('wifi map colorbar')
         if info:
@@ -8664,11 +9315,11 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
         elif lk is None and csi_live:
             chip.configure(text='BOARDS · AWAY' if W_.is_away() else 'BOARDS · QUIET', bg='#12482b', fg='#c8ffe0')
         elif lk is None:
-            chip.configure(text='NO LINK', bg='#1c2b52', fg=D['text2'])
+            chip.configure(text='NO LINK', bg=D['chip'], fg=D['text2'])
         elif moving:
             chip.configure(text='MOVEMENT', bg='#7a1d12', fg='#ffd5cf')
         elif base is None:
-            chip.configure(text='CALIBRATING', bg='#1c2b52', fg=D['text2'])
+            chip.configure(text='CALIBRATING', bg=D['chip'], fg=D['text2'])
         else:
             chip.configure(text='AWAY · QUIET' if W_.is_away() else 'QUIET', bg='#12482b', fg='#c8ffe0')
 
@@ -8711,9 +9362,52 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 csi_ctl['close']()
             except Exception:
                 _exc_debug('csi close')
-            if not (W_.prefs.get('background') or W_.prefs.get('csi_bg')):
+            if not (W_.prefs.get('background') or W_.prefs.get('csi_bg') or _nm_mac_norm(W_.prefs.get('phone_mac'))):
                 W_.stop()
     win.bind('<Destroy>', _on_destroy, add='+')
+    _nm_wifi_ttk(win, D)
+
+    def _retheme(force=False):
+        """Follow the app's theme: recolour the window in place when it changes (checked every 2 s, so a theme
+        saved in Settings reaches an open Wi-Fi window without reopening it)."""
+        new = _nm_wifi_palette(monitor)
+        if new == D and not force:
+            return False
+        mapping = {}
+        for k in ('bg', 'panel', 'text', 'text2', 'border', 'accent', 'chip', 'well', 'frame'):
+            if str(D.get(k, '')).lower() != str(new[k]).lower():
+                mapping[str(D[k]).lower()] = new[k]
+        D.update(new)
+        try:
+            win.configure(bg=D['bg'])
+            _nm_recolor_tk(win, mapping)
+            _nm_wifi_ttk(win, D)
+            for f_ in (fig_l, fig_n, fig_a, fig_m):
+                f_.set_facecolor(D['bg'])
+            lwalk.set_colors(D['well'], D['accent'])
+            csi_ctl['retheme']()
+            for fn in (_draw_live, _draw_nets, _draw_activity, _draw_map):
+                try:
+                    fn()
+                except Exception:
+                    _exc_debug('wifi retheme redraw')
+        except Exception:
+            _exc_debug('wifi retheme')
+        return True
+
+    def _theme_watch():
+        if stop['v']:
+            return
+        try:
+            _retheme()
+        except Exception:
+            _exc_debug('wifi theme watch')
+        try:
+            win.after(2000, _theme_watch)
+        except Exception:
+            pass
+    win.after(2000, _theme_watch)
+    win._nm_retheme = _retheme
     win._nm_state = {'W': W_, 'survey': survey, 'plan': plan, 'cursor': cursor, 'td': td_v, 'what': what_v,
                      'event_tree': ev_tree, 'net_tree': net_tree, 'hist_tree': hist_tree, 'nb': nb,
                      'figs': (fig_l, fig_n, fig_a, fig_m), 'drain': _drain, 'draw_map': _draw_map, 'lwalk': lwalk, 'lstate': lstate,
@@ -8721,6 +9415,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                      'sample': _sample_here, 'info': info_txt, 'map_var': map_var, 'mode': mode,
                      'tick_click': _map_click, 'what_cb': what_cb, 'csi': csi_ctl, 'view_v': view_v, 'op_v': op_v,
                      'w_v': w_v, 'h_v': h_v, 'match_picture': _match_picture, 'plan_views': PLAN_VIEWS,
+                     'D': D, 'retheme': _retheme,
                      'floors': {'v': floor_v, 'btns': _floor_btns, 'on': _on_floor, 'add': _add_floor,
                                 'rename': _rename_floor, 'delete': _delete_floor, 'name': _floor_name,
                                 'sample_btn': sample_btn}}
@@ -8787,116 +9482,133 @@ def _nm_csi_parse_line(line):
 
 # <<FW_FLASH_BEGIN>>  (generated section: the ESP32 firmware sources travel inside the app so the CSI tab can flash a board)
 _NM_FW_BLOB = (
-    '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'
+    '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'
 )
 
 
@@ -10046,13 +10758,15 @@ class _NMCsiSource:
             self.stop_ev.wait(0.02)
 
     def _board_line(self, line, addr, now):
-        """'CSI_BOARD,csi_recv,<ip>,<channel on air>,<AP rssi>,<channel the firmware expects>'"""
+        """'CSI_BOARD,csi_recv,<ip>,<channel on air>,<AP rssi>,<channel the firmware expects>[,auto]'
+        'auto' = the receiver sends the beacon the transmitter follows, so the channels match by themselves."""
         f = line.strip().split(',')
+        auto = len(f) > 6 and f[6].strip().lower() == 'auto'
         try:
             self.board = {'ip': addr[0], 'port': addr[1], 'ch': int(f[3]), 'rssi': int(f[4]),
-                          'cfg': int(f[5]), 't': now}
+                          'cfg': int(f[5]), 't': now, 'auto': auto}
         except (IndexError, ValueError):
-            self.board = {'ip': addr[0], 'port': addr[1], 'ch': 0, 'rssi': 0, 'cfg': 0, 't': now}
+            self.board = {'ip': addr[0], 'port': addr[1], 'ch': 0, 'rssi': 0, 'cfg': 0, 't': now, 'auto': auto}
 
     def _run_udp(self):
         """The receiver board joined the home Wi-Fi: it announces itself ('CSI_BOARD,...') about once a second to
@@ -10184,11 +10898,18 @@ class _NMCsiSource:
                         'It reconnects by itself when the router is back.')
             if self.t_last_csi == 0.0:
                 ch = b['ch'] or b['cfg']
+                where = f'The receiver board is on your network ({b["ip"]}' + (f', Wi-Fi channel {ch}' if ch else '') + ')'
+                if b.get('auto'):
+                    return (where + ' but no CSI is arriving yet. The transmitter (csi_send) finds the receiver\'s '
+                            'channel by itself within about 5 seconds of being powered. If this lasts: is it powered '
+                            'and in range, and was it flashed with the newer csi_send (the one that searches for the '
+                            'receiver)? A transmitter flashed before that stays on its fixed channel; re-flash it '
+                            'once with Flash ESP32… and it will follow from then on.')
                 chs = f'channel {ch}' if ch else 'the same Wi-Fi channel as the receiver'
-                return (f'The receiver board is on your network ({b["ip"]}' + (f', Wi-Fi channel {ch}' if ch else '') +
-                        f') but no CSI is arriving. Is the transmitter (csi_send) powered, and set to {chs}? The '
-                        'receiver follows your router/extender onto that channel, so the transmitter must use the '
-                        'same one (the board prints a warning over USB if they differ).')
+                return (where + f' but no CSI is arriving. Is the transmitter (csi_send) powered, and set to {chs}? '
+                        'This receiver has the older firmware, which follows your router or Wi-Fi disc onto its channel '
+                        'while the transmitter stays on a fixed one. Re-flash BOTH boards once with Flash ESP32… and '
+                        'the transmitter finds the receiver\'s channel by itself from then on.')
             if now - self.t_last_csi > 4.0:
                 return 'CSI stopped arriving — is the transmitter (csi_send) board still powered and in range?'
             return ''
@@ -10591,10 +11312,20 @@ def _nm_walker_cloud(phase, w=96, h=150):
 _NM_CLOUD_BG = (12, 29, 51)
 
 
-def _nm_cloud_lut():
-    """256-step colour ramp: the tile's navy, deep blue, light blue, icy white."""
+def _nm_cloud_lut(bg=None, accent=None):
+    """256-step colour ramp for the dots: the tile's colour, the accent deepening into it, the accent, near-white.
+    With no colours given: the original navy-and-ice-blue."""
     import numpy as np
-    stops = [(0.00, _NM_CLOUD_BG), (0.18, (20, 52, 96)), (0.45, (40, 112, 190)), (0.72, (120, 190, 240)), (1.00, (255, 255, 255))]
+    if bg is None and accent is None:
+        stops = [(0.00, _NM_CLOUD_BG), (0.18, (20, 52, 96)), (0.45, (40, 112, 190)), (0.72, (120, 190, 240)),
+                 (1.00, (255, 255, 255))]
+    else:
+        def rgb(h):
+            h = h.lstrip('#'); return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+        b_, a_ = rgb(bg or '#0c1d33'), rgb(accent or '#38b8f0')
+        mix = lambda x, y, t: tuple(int(round(p + (q - p) * t)) for p, q in zip(x, y))
+        stops = [(0.00, b_), (0.18, mix(b_, a_, 0.25)), (0.45, mix(b_, a_, 0.75)), (0.72, mix(a_, (255, 255, 255), 0.45)),
+                 (1.00, (255, 255, 255))]
     xs = np.linspace(0.0, 1.0, 256)
     lut = np.zeros((256, 3), dtype=np.uint8)
     for c in range(3):
@@ -10603,9 +11334,10 @@ def _nm_cloud_lut():
 
 
 _NM_CLOUD_LUT = [None]
+_NM_CLOUD_LUTS = {}
 
 
-def _nm_cloud_ppm(pts, w, h):
+def _nm_cloud_ppm(pts, w, h, lut=None):
     """Draws the dots into a w x h picture (soft round dots drawn at double size and shrunk back, plus a faint
     glow) and returns it as PPM bytes that tk.PhotoImage(data=...) understands. Needs only numpy."""
     import numpy as np
@@ -10630,7 +11362,7 @@ def _nm_cloud_ppm(pts, w, h):
     pad2 = np.pad(blur, ((0, 0), (2, 2)), mode='edge')
     blur = sum(k[i] * pad2[:, i:i + w] for i in range(5)) / 16.0
     v = np.clip(img * 1.0 + blur * 0.55, 0.0, 1.0)
-    rgb = _NM_CLOUD_LUT[0][(v * 255).astype(np.uint8)]
+    rgb = (lut if lut is not None else _NM_CLOUD_LUT[0])[(v * 255).astype(np.uint8)]
     return b'P6 %d %d 255\n' % (w, h) + rgb.tobytes()
 
 
@@ -10638,8 +11370,10 @@ class _NMPointWalker:
     """The animated point-cloud walking man: a label showing a freshly drawn picture of the dots every frame.
     set_size() refits it (the CSI tab sizes him to the gap between its two graphs)."""
 
-    def __init__(self, tk, parent, w=84, h=128, bg='#0c1d33'):
+    def __init__(self, tk, parent, w=84, h=128, bg='#0c1d33', accent=None):
         self.tk = tk
+        self.lut = None
+        self._colors = (None, None)
         self.w = int(w)
         self.h = int(h)
         self.phase = 0.0
@@ -10649,11 +11383,62 @@ class _NMPointWalker:
                                padx=0, pady=0)
         self.widget = self.canvas
         self.last_ms = 0.0
+        self._cache = {}            # frame index -> picture, for the current size: one stride is drawn once, then replayed
+        self._shown = None
+        if accent is not None:
+            self.set_colors(bg, accent)
+
+    def set_colors(self, bg, accent):
+        """Theme the dots: tile colour and accent (a new ramp, and a fresh set of pictures)."""
+        if (bg, accent) == self._colors:
+            return
+        self._colors = (bg, accent)
+        key = (bg, accent)
+        if key not in _NM_CLOUD_LUTS:
+            _NM_CLOUD_LUTS[key] = _nm_cloud_lut(bg, accent)
+        self.lut = _NM_CLOUD_LUTS[key]
+        self._cache = {}
+        self._shown = None
+        try:
+            self.canvas.configure(bg=bg)
+        except Exception:
+            pass
+
+    CYCLE_S = 1.05                  # one full stride (two steps)
+    N_FRAMES = 40                   # pictures per stride: ~38 a second, smooth at any screen refresh
 
     def set_size(self, w, h):
         w, h = max(24, int(w)), max(40, int(h))
         if (w, h) != (self.w, self.h):
             self.w, self.h = w, h
+            self._cache = {}
+            self._shown = None
+
+    def tick(self, t=None):
+        """Show the picture for time t (seconds): the stride follows the clock, not the frame rate, so a late frame
+        never slows him down, and each picture is drawn only once per size (later strides reuse it).
+        Returns True when the picture changed."""
+        import math
+        import time as _tm
+        if t is None:
+            t = _tm.monotonic()
+        idx = int((t / self.CYCLE_S) * self.N_FRAMES) % self.N_FRAMES
+        if idx == self._shown:
+            return False
+        img = self._cache.get(idx)
+        t0 = _tm.perf_counter()
+        if img is None:
+            ph = 2 * math.pi * idx / self.N_FRAMES
+            pts = _nm_walker_cloud(ph, self.w, self.h)
+            img = self.tk.PhotoImage(data=_nm_cloud_ppm([(x, y, b) for (x, y, b, _s) in pts], self.w, self.h, self.lut))
+            self._cache[idx] = img
+        self.canvas.configure(image=img)
+        self.img = img
+        self._shown = idx
+        self.phase = 2 * math.pi * idx / self.N_FRAMES
+        self.frames += 1
+        self.last_ms = (_tm.perf_counter() - t0) * 1000.0
+        return True
 
     def step(self, dphase=0.42):
         import math
@@ -10661,7 +11446,7 @@ class _NMPointWalker:
         t0 = _tm.time()
         self.phase = (self.phase + dphase) % (2 * math.pi)
         pts = _nm_walker_cloud(self.phase, self.w, self.h)
-        data = _nm_cloud_ppm([(x, y, b) for (x, y, b, _s) in pts], self.w, self.h)
+        data = _nm_cloud_ppm([(x, y, b) for (x, y, b, _s) in pts], self.w, self.h, self.lut)
         img = self.tk.PhotoImage(data=data)
         self.canvas.configure(image=img)
         self.img = img                                      # keep a reference, or Tk drops the picture
@@ -10680,8 +11465,14 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
     W = watcher
     cmap = _nm_vivid_cmap(True)
     from matplotlib.colors import LinearSegmentedColormap as _LSC
-    act_cmap = _LSC.from_list('nm_csi_act', [(0.0, '#0b1636'), (0.25, '#173f7d'), (0.5, '#ff8a3d'),
-                                              (0.75, '#ffd23f'), (1.0, '#fffbe6')])
+    CM = {}
+
+    def _make_cmaps():
+        """The heat map's colours: the panel colour for 'steady', the theme accent deepening in, then the usual
+        orange-yellow-white for change (those mean the same in every theme)."""
+        CM['act'] = _LSC.from_list('nm_csi_act', [(0.0, D['panel']), (0.25, _nm_hex_mix(D['panel'], D['accent'], 0.32)),
+                                                  (0.5, '#ff8a3d'), (0.75, '#ffd23f'), (1.0, '#fffbe6')])
+    _make_cmaps()
     prefs = _nm_wifi_load('csi_prefs.json', {}, state_dir)
     if not isinstance(prefs, dict):
         prefs = {}
@@ -10711,7 +11502,7 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
     _ttk.Combobox(top, textvariable=baud_var, width=8, values=('115200', '460800', '921600', '1500000', '2000000')
                   ).pack(side='left')
     conn_btn.pack(side='left', padx=8)
-    tk.Frame(top, bg='#26365f', width=1, height=18).pack(side='left', padx=8)
+    tk.Frame(top, bg=D['border'], width=1, height=18).pack(side='left', padx=8)
     scen_var = tk.StringVar(value='Someone walking about')
     scen_cb = _ttk.Combobox(top, textvariable=scen_var, width=36, state='readonly', values=list(SCEN))
     demo_btn = _ttk.Button(top, text='Try demo (simulated)')
@@ -10722,9 +11513,9 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
 
     mid = tk.Frame(parent, bg=D['bg'])
     mid.pack(fill='x', padx=10, pady=2)
-    chip_m = tk.Label(mid, text='NOT CONNECTED', bg='#1c2b52', fg=D['text2'], font=(_NM_MONO, 10, 'bold'), padx=12, pady=4)
+    chip_m = tk.Label(mid, text='NOT CONNECTED', bg=D['chip'], fg=D['text2'], font=(_NM_MONO, 10, 'bold'), padx=12, pady=4)
     chip_m.pack(side='left')
-    chip_r = tk.Label(mid, text='ROOM: no reference', bg='#1c2b52', fg=D['text2'], font=(_NM_MONO, 10, 'bold'),
+    chip_r = tk.Label(mid, text='ROOM: no reference', bg=D['chip'], fg=D['text2'], font=(_NM_MONO, 10, 'bold'),
                       padx=12, pady=4)
     chip_r.pack(side='left', padx=8)
     breath_var = tk.StringVar(value='breathing: —')
@@ -10836,9 +11627,63 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
     def _style_ax(a):
         a.set_facecolor(D['panel'])
         for sp in a.spines.values():
-            sp.set_color('#26365f')
+            sp.set_color(D['border'])
         a.tick_params(colors=D['text2'], labelsize=7, length=2)
         a.grid(True, color='white', alpha=0.06, linewidth=0.6)
+
+    # ── smooth graphs: blitting + a sliding time axis (see _draw and _anim_tick) ──
+    from matplotlib.transforms import Affine2D as _Aff
+    S['tf'] = _Aff()                 # the time graphs' slide, in seconds (0 when reviewing history)
+    LAG_S = 0.75                     # the right edge shows 'now' this much late, so new data is always ready off-screen
+
+    def _cur_shift():
+        if not S.get('live'):
+            return 0.0
+        return min(LAG_S, max(-0.5, LAG_S - (clock() - S.get('t_data', clock()))))
+
+    def _apply_shift():
+        sh = _cur_shift()
+        S['tf'].clear().translate(sh, 0.0)
+        im = S.get('img')
+        if im is not None:
+            ext = im.get_extent()
+            im.set_extent([-S.get('span', 60.0) + sh, sh, ext[2], ext[3]])
+
+    def _fit_y(ax, arrays):
+        vals = np.concatenate([np.ravel(np.asarray(v, dtype=float)) for v in arrays]) if arrays else np.zeros(0)
+        vals = vals[np.isfinite(vals)]
+        if vals.size:
+            lo, hi = float(vals.min()), float(vals.max())
+            r = (hi - lo) or max(abs(hi), 1.0)
+            ax.set_ylim(lo - 0.05 * r, hi + 0.05 * r)
+
+    def _blit(axes):
+        bg, dyn = S.get('bg'), S.get('dyn')
+        if not bg or dyn is None or any(ax not in bg for ax in axes):
+            return False
+        for ax in axes:
+            cv.restore_region(bg[ax])
+            for art in dyn.get(ax, ()):
+                ax.draw_artist(art)
+        for ax in axes:
+            cv.blit(ax.bbox)
+        return True
+
+    def _on_draw(_ev=None):
+        """After a full redraw (layout change, resize): keep a picture of the empty graphs, then add the data."""
+        axes = S.get('axes')
+        if not axes or S['dead']:
+            return
+        try:
+            S['bg'] = {ax: cv.copy_from_bbox(ax.bbox) for ax in axes}
+            _apply_shift()
+            for ax in axes:
+                for art in S.get('dyn', {}).get(ax, ()):
+                    ax.draw_artist(art)
+        except Exception:
+            S['bg'] = None
+            _exc_debug('csi on_draw')
+    cv.mpl_connect('draw_event', _on_draw)
 
     def _save_prefs():
         _nm_wifi_save('csi_prefs.json', {'port': port_var.get(), 'baud': baud_var.get(), 'range': range_var.get(),
@@ -11026,14 +11871,16 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         except Exception:
             _exc_debug('csi copy log')
 
-    def _draw(force=False):
+    def _draw(force=False, full=False):
         an = S['an']
         now = clock()
+        force_full = bool(full)
         src = S['src']
         with (src.lock if src is not None else _nullctx()):
             snap = an.snapshot(now)
-            act = an.activity(now, 60.0, 240, 8)
-            turb = [(t - now, v) for (t, v) in list(an.turb) if now - t <= 60]
+            act = an.activity(now, 61.0, 244, 8)      # one second wider than the graph: the frame loop slides it left
+            act_span = 61.0
+            turb = [(t - now, v) for (t, v) in list(an.turb) if now - t <= 61.5]
             dev = [(t - now, v) for (t, v) in list(an.dev) if now - t <= 60]
             prof = None
             if an.n_sc and len(an.X) > 10:
@@ -11042,11 +11889,11 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
             valid = an.valid
         # chips / text
         if src is None:
-            chip_m.configure(text='NOT CONNECTED', bg='#1c2b52', fg=D['text2'])
+            chip_m.configure(text='NOT CONNECTED', bg=D['chip'], fg=D['text2'])
         elif snap['frames'] == 0:
-            chip_m.configure(text='WAITING FOR DATA', bg='#1c2b52', fg=D['text2'])
+            chip_m.configure(text='WAITING FOR DATA', bg=D['chip'], fg=D['text2'])
         elif not snap['ready']:
-            chip_m.configure(text='LEARNING BASELINE…', bg='#1c2b52', fg=D['text2'])
+            chip_m.configure(text='LEARNING BASELINE…', bg=D['chip'], fg=D['text2'])
         elif snap['moving']:
             chip_m.configure(text=f"MOTION  {snap['score']:.0f}", bg='#7a1d12', fg='#ffd5cf')
         else:
@@ -11057,7 +11904,7 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         elif rs == 'match':
             chip_r.configure(text='ROOM: matches empty reference', bg='#12482b', fg='#c8ffe0')
         else:
-            chip_r.configure(text='ROOM: no reference' if empty is None else 'ROOM: measuring…', bg='#1c2b52',
+            chip_r.configure(text='ROOM: no reference' if empty is None else 'ROOM: measuring…', bg=D['chip'],
                              fg=D['text2'])
         b = snap['breath']
         breath_var.set(f"breathing: {b['bpm']:.0f} per min" if b['bpm'] else 'breathing: —')
@@ -11095,16 +11942,139 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         if not force and (now - S['last_draw']) < 0.45:
             return
         S['last_draw'] = now
+        if not force and not parent.winfo_ismapped():
+            S['lay'] = None                     # hidden: nothing to draw; rebuild when the tab is shown again
+            return
         no_data_msg = None
         if rv is not None:
             if rv['empty']:
-                act = np.full((8, 240), np.nan); turb = []; prof = None; empty = None
+                act = np.full((8, 240), np.nan); turb = []; prof = None; empty = None; act_span = 60.0
                 b = {'bpm': None, 'freqs': None, 'power': None, 'why': 'nothing was recorded here'}
                 no_data_msg = 'nothing was recorded around this time'
                 snap = dict(snap, thr=None, mu=None)
             else:
                 act, turb, prof, empty, valid, b = rv['act'], rv['turb'], rv['prof'], rv['ref'], rv['valid'], rv['b']
+                act_span = 60.0
                 snap = rv['snap']
+        # ── the graphs ─────────────────────────────────────────────────────────────────────────────────────────────
+        # The figure (axes, titles, ticks, labels) is rebuilt only when its layout changes. The data on it -- heat map,
+        # lines, fills, and the words written inside the graphs -- are 'animated' artists drawn over a saved picture of
+        # the empty graphs (blitting). A data update then costs a few milliseconds instead of a full redraw of a
+        # window-wide figure, and the frame loop (_anim_tick, ~30 fps) can glide the two time graphs left continuously
+        # instead of jumping every half second.
+        thr = snap['thr']
+        learning = thr is None
+        has_act = bool(np.isfinite(act).any())
+        span_s = float(act_span)
+        if b['freqs'] is not None and b['bpm']:
+            bkind = 'found'
+        elif b['freqs'] is not None:
+            bkind = 'grey'
+        else:
+            bkind = ('none', str(b['why']))
+        _tw = cv.get_tk_widget()
+        lay = (rv is None, has_act, bool(learning and has_act), src is None, no_data_msg, prof is None, empty is None,
+               (len(prof) if prof is not None else 0), bkind, _tw.winfo_width(), _tw.winfo_height())
+        S['t_data'] = now
+        S['live'] = rv is None
+        S['span'] = span_s
+
+        def _paint_dyn(aw, am, ap, ab):
+            """Everything that changes with the data, as animated artists: {axes: [artists in drawing order]}."""
+            dyn = {aw: [], am: [], ap: [], ab: []}
+            sh = _cur_shift()
+            S['img'] = None
+            if has_act:
+                # each slice is judged against its own quiet level, so a naturally noisier part of the channel
+                # does not glow all the time; orange = clearly more change than that slice's quiet level
+                floor = np.nanpercentile(act, 20, axis=1)
+                rel = act - floor[:, None]
+                if not learning and snap['mu'] is not None:
+                    span = 2.5 * max(float(thr - snap['mu']), 1e-4)       # one slice is noisier than the average of all
+                else:
+                    span = max(float(np.nanpercentile(rel, 90)), 1e-4)
+                q = rel / span
+                rgba = CM['act'](np.clip(np.nan_to_num(q, nan=0.0), 0.0, 2.0) / 2.0, bytes=True)   # colour once here,
+                rgba[..., 3] = np.where(np.isfinite(q), 255, 0).astype(np.uint8)                # not in every frame
+                im = aw.imshow(rgba, aspect='auto', origin='lower', extent=[-span_s + sh, sh, 0, act.shape[0]],
+                               interpolation='nearest', animated=True)
+                S['img'] = im
+                dyn[aw].append(im)
+            tfm = S['tf'] + am.transData                          # slides with the frame loop (live only)
+            if turb:
+                xs = np.asarray([x for x, _ in turb]); ys = np.asarray([y for _, y in turb])
+                vals = [ys, np.zeros(1)]
+                dyn[am] += am.plot(xs, ys, color=D['accent'], linewidth=1.2, transform=tfm, animated=True)
+                dyn[am].append(am.fill_between(xs, ys, color=D['accent'], alpha=0.15, transform=tfm, animated=True))
+                if thr is not None:
+                    tarr = (rv['thr_arr'] if rv is not None and not rv['empty'] else np.full(len(xs), float(thr)))
+                    tarr = np.where(np.isfinite(tarr), tarr, float(thr))
+                    vals.append(tarr)
+                    dyn[am] += am.plot(xs, tarr, color='#ff8a3d', linestyle='--', linewidth=0.9, transform=tfm,
+                                       animated=True)
+                    dyn[am].append(am.fill_between(xs, ys, tarr, where=ys >= tarr, color='#ff5c4d', alpha=0.45,
+                                                   interpolate=True, transform=tfm, animated=True))
+                if snap['mu'] is not None:
+                    vals.append(np.asarray([float(snap['mu'])]))
+                    dyn[am].append(am.axhline(snap['mu'], color='#2fe07a', linestyle=':', linewidth=0.8, animated=True))
+                _fit_y(am, vals)
+                if thr is not None:
+                    # kept inside the graph (clipped, and under the line when the line is near the top), because
+                    # only the inside of the graph is repainted between full redraws
+                    _y0, _y1 = am.get_ylim()
+                    _hi = (_y1 - _y0) > 0 and (thr - _y0) / (_y1 - _y0) > 0.80
+                    dyn[am].append(am.text(-59.5, thr, ' someone / something moving above this line', color='#ff8a3d',
+                                           fontsize=7, va=('top' if _hi else 'bottom'), animated=True, clip_on=True))
+            if prof is not None:
+                ks = np.arange(len(prof))
+                pm = np.where(valid, prof, np.nan)
+                vals = [pm]
+                dyn[ap] += ap.plot(ks, pm, color='#ffd23f', linewidth=1.2, label='now', animated=True)
+                if empty is not None:
+                    em = np.where(valid, empty['mean'], np.nan)
+                    vals.append(em)
+                    dyn[ap] += ap.plot(ks, em, color='#2fe07a', linewidth=1.0, linestyle='--', label='empty room',
+                                       animated=True)
+                    leg = ap.legend(fontsize=7, facecolor=D['panel'], edgecolor=D['border'], labelcolor=D['text2'],
+                                    loc='upper right')
+                    leg.set_animated(True)
+                    dyn[ap].append(leg)
+                _fit_y(ap, vals)
+            if bkind == 'found':
+                dyn[ab] += ab.plot(b['freqs'] * 60.0, b['power'], color='#bf5af2', linewidth=1.2, animated=True)
+                dyn[ab].append(ab.fill_between(b['freqs'] * 60.0, b['power'], color='#bf5af2', alpha=0.18,
+                                               animated=True))
+                dyn[ab].append(ab.axvline(b['bpm'], color='#2fe07a', linewidth=1.4, animated=True))
+                dyn[ab].append(ab.text(0.97, 0.88, f"about {b['bpm']:.0f} per minute", transform=ab.transAxes,
+                                       ha='right', color='#2fe07a', fontsize=8, fontweight='bold', animated=True))
+                _fit_y(ab, [np.asarray(b['power']), np.zeros(1)])
+            elif bkind == 'grey':
+                dyn[ab] += ab.plot(b['freqs'] * 60.0, b['power'], color=_nm_hex_mix(D['panel'], D['text2'], 0.4), linewidth=1.0, animated=True)
+                dyn[ab].append(ab.text(0.5, 0.56, 'no breathing detected', transform=ab.transAxes, ha='center',
+                                       va='center', color=D['text'], fontsize=9, fontweight='bold', animated=True,
+                                       bbox=dict(boxstyle='round,pad=0.35', fc=D['panel'], ec='none', alpha=0.85)))
+                dyn[ab].append(ab.text(0.5, 0.30, '(grey line = background wobble, not a breath)',
+                                       transform=ab.transAxes, ha='center', va='center', color=D['text2'],
+                                       fontsize=6.5, animated=True))
+                _fit_y(ab, [np.asarray(b['power'])])
+            return dyn
+
+        if (rv is None and not force_full and lay == S.get('lay') and S.get('dyn') is not None and S.get('bg')
+                and S.get('axes') is not None):
+            # same layout: swap the data artists and blit -- no figure redraw
+            for _arts in S['dyn'].values():
+                for _art in _arts:
+                    try:
+                        _art.remove()
+                    except Exception:
+                        pass
+            S['dyn'] = _paint_dyn(*S['axes'])
+            S['fast'] = S.get('fast', 0) + 1
+            _blit(S['axes'])
+            return
+        S['lay'] = lay
+        S['bg'] = None
+        S['full'] = S.get('full', 0) + 1
         fig.clear()
         # Laid out by hand: the gap between the heat map and the movement graph is where the walking man stands, so it
         # is sized to him (about a quarter of the window height, at least 100 px) while the other gaps keep what their labels need.
@@ -11124,25 +12094,13 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         ab = fig.add_axes([_x0 + _cw * (1.0 + _ww), _yb, _cw, _hb])
         for a in (aw, am, ap, ab):
             _style_ax(a)
-        thr = snap['thr']
-        learning = thr is None
         # ① heat strip: is the signal changing, and where in the channel -- on the same clock as the line below
         aw.set_title('Is the signal changing?  Brighter = more change' +
-                     ('   (still learning what normal looks like)' if learning and np.isfinite(act).any() else ''),
+                     ('   (still learning what normal looks like)' if learning and has_act else ''),
                      loc='left', color=D['text'], fontsize=9, fontweight='bold')
-        if np.isfinite(act).any():
-            # each slice is judged against its own quiet level, so a naturally noisier part of the channel
-            # does not glow all the time; orange = clearly more change than that slice's quiet level
-            floor = np.nanpercentile(act, 20, axis=1)
-            rel = act - floor[:, None]
-            if not learning and snap['mu'] is not None:
-                span = 2.5 * max(float(thr - snap['mu']), 1e-4)       # one slice is noisier than the average of all
-            else:
-                span = max(float(np.nanpercentile(rel, 90)), 1e-4)
-            aw.imshow(np.ma.masked_invalid(rel / span), aspect='auto', cmap=act_cmap, vmin=0.0, vmax=2.0,
-                      origin='lower', extent=[-60, 0, 0, act.shape[0]], interpolation='nearest')
+        if has_act:
             ins = aw.inset_axes([0.745, 1.10, 0.25, 0.13])
-            ins.imshow(np.linspace(0, 2, 64)[None, :], aspect='auto', cmap=act_cmap, vmin=0.0, vmax=2.0,
+            ins.imshow(np.linspace(0, 2, 64)[None, :], aspect='auto', cmap=CM['act'], vmin=0.0, vmax=2.0,
                        extent=[0, 2, 0, 1])
             ins.set_yticks([]); ins.set_xticks([0.0, 1.0, 2.0])
             ins.set_xticklabels(['steady', 'some change', 'strong'], fontsize=6)
@@ -11164,19 +12122,6 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         # ② the same thing as one line, with a threshold and the moments that crossed it shaded
         am.set_title('Movement level: the same thing as one line', loc='left', color=D['text'], fontsize=9,
                      fontweight='bold')
-        if turb:
-            xs = np.asarray([x for x, _ in turb]); ys = np.asarray([y for _, y in turb])
-            am.plot(xs, ys, color='#38b8f0', linewidth=1.2)
-            am.fill_between(xs, ys, color='#38b8f0', alpha=0.15)
-            if thr is not None:
-                tarr = (rv['thr_arr'] if rv is not None and not rv['empty'] else np.full(len(xs), float(thr)))
-                tarr = np.where(np.isfinite(tarr), tarr, float(thr))
-                am.plot(xs, tarr, color='#ff8a3d', linestyle='--', linewidth=0.9)
-                am.fill_between(xs, ys, tarr, where=ys >= tarr, color='#ff5c4d', alpha=0.45, interpolate=True)
-                am.text(-59.5, thr, ' someone / something moving above this line', color='#ff8a3d', fontsize=7,
-                        va='bottom')
-            if snap['mu'] is not None:
-                am.axhline(snap['mu'], color='#2fe07a', linestyle=':', linewidth=0.8)
         am.set_xlim(-60, 0)
         am.set_yticks([])
         am.set_ylabel('level', color=D['text2'], fontsize=7)
@@ -11187,14 +12132,9 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         # ③ signal shape
         ap.set_title('Signal shape: now vs empty room', loc='left', color=D['text'], fontsize=9, fontweight='bold')
         if prof is not None:
-            ks = np.arange(len(prof))
-            pm = np.where(valid, prof, np.nan)
-            ap.plot(ks, pm, color='#ffd23f', linewidth=1.2, label='now')
-            if empty is not None:
-                ap.plot(ks, np.where(valid, empty['mean'], np.nan), color='#2fe07a', linewidth=1.0, linestyle='--',
-                        label='empty room')
-                ap.legend(fontsize=7, facecolor=D['panel'], edgecolor='#26365f', labelcolor=D['text2'], loc='upper right')
-            else:
+            _n = max(1, len(prof) - 1)
+            ap.set_xlim(-0.05 * _n, 1.05 * _n)
+            if empty is None:
                 ap.text(0.5, 0.06, 'calibrate the empty room to compare', transform=ap.transAxes, ha='center',
                         color=D['text2'], fontsize=7)
         ap.set_yticks([])
@@ -11204,29 +12144,16 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
                      fontweight='bold')
         ab.set_yticks([])
         ab.set_xlabel('breaths per minute', color=D['text2'], fontsize=7)
-        if b['freqs'] is not None and b['bpm']:
-            ab.plot(b['freqs'] * 60.0, b['power'], color='#bf5af2', linewidth=1.2)
-            ab.fill_between(b['freqs'] * 60.0, b['power'], color='#bf5af2', alpha=0.18)
-            ab.axvline(b['bpm'], color='#2fe07a', linewidth=1.4)
-            ab.set_xlim(9, 30)
-            ab.text(0.97, 0.88, f"about {b['bpm']:.0f} per minute", transform=ab.transAxes, ha='right',
-                    color='#2fe07a', fontsize=8, fontweight='bold')
-        elif b['freqs'] is not None:
-            ab.plot(b['freqs'] * 60.0, b['power'], color='#3a4a78', linewidth=1.0)
-            ab.set_xlim(9, 30)
-            ab.text(0.5, 0.56, 'no breathing detected', transform=ab.transAxes, ha='center', va='center',
-                    color=D['text'], fontsize=9, fontweight='bold',
-                    bbox=dict(boxstyle='round,pad=0.35', fc=D['panel'], ec='none', alpha=0.85))
-            ab.text(0.5, 0.30, '(grey line = background wobble, not a breath)', transform=ab.transAxes,
-                    ha='center', va='center', color=D['text2'], fontsize=6.5)
-        else:
-            ab.set_xlim(9, 30)
+        ab.set_xlim(9, 30)
+        if bkind not in ('found', 'grey'):
             ab.text(0.5, 0.5, b['why'], transform=ab.transAxes, ha='center', va='center', color=D['text2'],
                     fontsize=8, wrap=True)
         if rv is not None:
             fig.text(0.735, 0.975, 'RECORDED · ' + datetime.fromtimestamp(S['hist_t']).strftime('%a %d %b %H:%M:%S') +
                      ('  · SIMULATED DATA' if rv.get('kind') == 'sim' else ''), ha='right', va='top',
                      color=('#ffa43a' if rv.get('kind') == 'sim' else '#38b8f0'), fontsize=9, fontweight='bold')
+        S['axes'] = (aw, am, ap, ab)
+        S['dyn'] = _paint_dyn(aw, am, ap, ab)
         cv.draw_idle()
 
     # ── history: record, review, scrub ────────────────────────────────────
@@ -11317,14 +12244,14 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
     def _review_chips(rv):
         _update_rev(rv)
         if rv['empty'] or rv['gap']:
-            chip_m.configure(text='NOTHING RECORDED HERE', bg='#1c2b52', fg=D['text2'])
-            chip_r.configure(text='ROOM: —', bg='#1c2b52', fg=D['text2'])
+            chip_m.configure(text='NOTHING RECORDED HERE', bg=D['chip'], fg=D['text2'])
+            chip_r.configure(text='ROOM: —', bg=D['chip'], fg=D['text2'])
             breath_var.set('breathing: —')
             stats_var.set('')
             return
         sn = rv['snap']
         if not sn['ready']:
-            chip_m.configure(text='PAST · LEARNING BASELINE…', bg='#1c2b52', fg=D['text2'])
+            chip_m.configure(text='PAST · LEARNING BASELINE…', bg=D['chip'], fg=D['text2'])
         elif sn['moving']:
             chip_m.configure(text=f"PAST · MOTION  {sn['score']:.0f}", bg='#7a1d12', fg='#ffd5cf')
         else:
@@ -11334,7 +12261,7 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         elif sn['room'] == 'match':
             chip_r.configure(text='ROOM: matched empty reference', bg='#12482b', fg='#c8ffe0')
         else:
-            chip_r.configure(text='ROOM: no reference then', bg='#1c2b52', fg=D['text2'])
+            chip_r.configure(text='ROOM: no reference then', bg=D['chip'], fg=D['text2'])
         bpm = sn['breath']['bpm']
         breath_var.set(f'breathing: {bpm:.0f} per min' if bpm else 'breathing: —')
         stats_var.set((f"{sn['rate']:.0f} packets/s" if sn['rate'] is not None else '') +
@@ -11641,36 +12568,54 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
     S['job'] = win.after(500, _tick)
 
     WALK_W, WALK_H = 84, 128
-    pw = _NMPointWalker(tk, cv.get_tk_widget(), WALK_W, WALK_H, bg='#0c1d33')
+    pw = _NMPointWalker(tk, cv.get_tk_widget(), WALK_W, WALK_H, bg=D.get('well', '#0c1d33'),
+                        accent=D.get('accent', '#38b8f0'))
     walker = pw.canvas
     walk = {'phase': 0.0, 'shown': False, 'frames': 0}
 
-    def _walk_tick():
-        """The animated point-cloud walking man above the movement graph's -30 mark, shown only while movement is detected."""
+    def _anim_tick():
+        """The frame loop (~30 fps while there is something moving on screen): slides the two time graphs left in step
+        with the clock, and plays the walking man above the movement graph's -30 mark while movement is detected."""
         if S['dead']:
             return
+        nxt = 150
+        _t0 = time.perf_counter()
         try:
+            mapped = parent.winfo_ismapped()
+            if mapped and S.get('live') and S['src'] is not None and S.get('bg') and S.get('axes'):
+                _apply_shift()
+                if _blit(S['axes'][:2]):
+                    S['anim_frames'] = S.get('anim_frames', 0) + 1
+                nxt = 30
             moving = bool(S['src'] is not None and S['hist_t'] is None and S['an'].state.get('moving'))
             pos = S.get('walk_pos')
-            if moving and pos is not None and parent.winfo_ismapped():
+            if moving and pos is not None and mapped:
                 hh = int(max(64, min(260, pos[2] * cv.get_tk_widget().winfo_height() - 9)))   # fit the gap between the two graphs
                 pw.set_size(int(hh * 0.68), hh)
-                walker.place(relx=pos[0], rely=1.0 - pos[1], anchor='s', y=-1)
-                walk['shown'] = True
-                pw.step()
+                if not walk['shown']:
+                    walker.place(relx=pos[0], rely=1.0 - pos[1], anchor='s', y=-1)
+                    walk['shown'] = True
+                    walk['pos'] = pos
+                elif walk.get('pos') != pos:
+                    walker.place(relx=pos[0], rely=1.0 - pos[1], anchor='s', y=-1)
+                    walk['pos'] = pos
+                pw.tick()
                 walk['phase'] = pw.phase
                 walk['frames'] = pw.frames
+                nxt = 30
             elif walk['shown']:
                 walker.place_forget()
                 walk['shown'] = False
         except Exception:
-            _exc_debug('csi walker')
+            _exc_debug('csi frame loop')
         finally:
+            if nxt < 100:                    # aim for a frame every 33 ms, whatever this one cost
+                nxt = max(4, 33 - int((time.perf_counter() - _t0) * 1000.0))
             try:
-                win.after(70, _walk_tick)
+                win.after(nxt, _anim_tick)
             except Exception:
                 pass
-    win.after(70, _walk_tick)
+    win.after(70, _anim_tick)
 
     def _auto_attach():
         """Opened while the board is being watched in the background: show it live straight away (the tab takes
@@ -11687,13 +12632,27 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         except Exception:
             _exc('csi auto attach')
     win.after(400, _auto_attach)
-    ctl = {'S': S, 'close': _on_close, 'draw': _draw, 'begin': _begin, 'stop': _stop, 'calibrate': _calibrate,
+    def _retheme():
+        """The app's theme changed (D was updated in place): new heat-map colours, walker, figure backgrounds,
+        and one full redraw."""
+        try:
+            _make_cmaps()
+            fig.set_facecolor(D['bg'])
+            fig2.set_facecolor(D['bg'])
+            pw.set_colors(D.get('well', '#0c1d33'), D.get('accent', '#38b8f0'))
+            S['lay'] = None
+            _draw(force=True, full=True)
+            _draw_overview(True)
+        except Exception:
+            _exc_debug('csi retheme')
+
+    ctl = {'S': S, 'close': _on_close, 'draw': _draw, 'retheme': _retheme, 'begin': _begin, 'stop': _stop, 'calibrate': _calibrate,
            'toggle_demo': _toggle_demo, 'scen_var': scen_var, 'port_var': port_var, 'copy_raw': _copy_raw,
            'chip_m': chip_m, 'chip_r': chip_r, 'breath_var': breath_var, 'hint_var': hint_var, 'cal_var': cal_var,
            'flash_btn': flash_btn, 'open_flash': _open_flash, 'breath_cb': breath_cb, 'breath_var': breath_var,
            'breath_sens_var': breath_sens_var, 'breath_changed': _breath_changed, 'save_raw': _save_raw, 'keep_var': keep_var, 'keep_changed': _keep_changed,
            'keep_status': keep_status, 'feed_watcher': _feed_watcher, 'S_': S, 'walker': walker, 'pw': pw, 'walk': walk,
-           'walk_tick': _walk_tick, 'badge': badge, 'fig': fig, 'fill_ports': _fill_ports, 'port_cb': port_cb, 'clear_cal': _clear_cal, 'stats_var': stats_var,
+           'walk_tick': _anim_tick, 'anim_tick': _anim_tick, 'apply_shift': _apply_shift, 'blit': _blit, 'cv': cv, 'badge': badge, 'fig': fig, 'fill_ports': _fill_ports, 'port_cb': port_cb, 'clear_cal': _clear_cal, 'stats_var': stats_var,
            'toggle_conn': _toggle_conn, 'hist': lambda: S['hist'], 'record': _record, 'goto': _goto,
            'go_live': _go_live, 'step': _step, 'event_jump': _event_jump, 'toggle_play': _toggle_play,
            'overview': _draw_overview, 'rev_var': rev_var, 'hist_var': hist_var, 'fig2': fig2,
@@ -17597,9 +18556,33 @@ class EtherApeWindow:
 
     def _render_tick(self):
         if self._closed: return
-        try: self._render_tick_inner()
+        try:
+            mode = self._render_mode()
+            self._render_mode_last = mode
+            now = time.time()
+            # Full speed (20 fps) only while this window is the one in use. Minimised: nothing. Open but another
+            # window in front (e.g. the Wi-Fi window): 2 frames a second. Its full redraws (every label, every
+            # ribbon) used to run at full speed behind other windows and took over half of the app's time,
+            # which made every other window's animation stutter.
+            if mode == 'full' or (mode == 'slow' and now - getattr(self, '_last_render_t', 0.0) >= 0.5):
+                self._last_render_t = now
+                self._render_tick_inner()
         except Exception: _exc('_render_tick')
         self._schedule_render()
+
+    def _render_mode(self):
+        """'full' when this window has the keyboard focus, 'slow' when it is on screen but another window is in
+        use, 'off' when minimised or hidden."""
+        try:
+            top = self.root.winfo_toplevel()
+            if not top.winfo_viewable() or str(top.state()) in ('iconic', 'withdrawn'):
+                return 'off'
+            f = top.focus_displayof()
+            if f is not None and f.winfo_toplevel() is top:
+                return 'full'
+            return 'slow'
+        except Exception:
+            return 'full'
 
     def _blit_frame(self, force=False):
         """Draw a frame by blitting: restore a cached bitmap of the static scene
@@ -17619,10 +18602,13 @@ class EtherApeWindow:
         view = (round(self._zoom, 4), round(self._pan_x, 4), round(self._pan_y, 4))
         # Refresh the snapshot when the geometry or the view changes, and on a
         # slow timer so the ribbon activity-fade and labels stay current.
-        need = (force or self._bg is None
-                or self._bg_sig != self._ribbon_sig
-                or self._bg_view != view
-                or (now - self._bg_t) > 0.40)
+        if getattr(self, '_render_mode_last', 'full') == 'full':
+            need = (force or self._bg is None
+                    or self._bg_sig != self._ribbon_sig
+                    or self._bg_view != view
+                    or (now - self._bg_t) > 0.40)
+        else:   # another window is in use: repaint the whole scene at most every 2 s
+            need = force or self._bg is None or (now - self._bg_t) > 2.0
         try:
             if need:
                 _vis = self._pkt_arrows.get_visible()
@@ -28027,6 +29013,7 @@ class UserGuideWindow:
             ('bullet', 'Boards (ESP32) graph — when the ESP32 boards are connected (in the CSI tab, or watched in the background with "Keep watching") a fourth graph shows their movement level for the last five minutes: the line, the movement threshold as a red dashed line, and the stretches counted as movement shaded red. It works even when this PC has no Wi-Fi link: the signal graphs then say so and the header chip reads BOARDS · QUIET, BOARDS · MOVEMENT or BOARDS · AWAY.'),
             ('bullet', 'The walking man — while the boards see movement, a glowing dotted figure walks in a bay kept free to the right of the graphs (the graphs are about a tenth narrower while boards are reporting). He is built from a few thousand fine dots in the style of a 3-D body scan: the edge of the body glows white, the inside is a soft blue, the legs swing, the knees bend and the arms swing against the legs. He disappears when the movement stops, when you switch to another tab and when the boards go quiet.'),
             ('bullet', 'On your phone or another computer: open the Wi-Fi & Boards page from the phone dashboard menu (or go to /wifi on the dashboard address). It shows the same graphs, walking man, Activity, Signal map and Networks, with Away and Keep watching switches. Other devices can switch alerts on; switching them off from another device needs the "Let other devices switch alerts off too" tick on the PC.'),
+            ('bullet', 'Phone alerts & automatic Away… (button under the tick boxes): free phone notifications through ntfy, with a picture of the movement graph, and Away that switches on when your phone leaves the home Wi-Fi and off when it comes back.'),
             ('h2', 'Networks tab'),
             ('bullet', 'Every access point in range with its maker (looked up from its address), channel, band and '
                        'security, and how far its signal has swung.'),
@@ -28085,7 +29072,7 @@ class UserGuideWindow:
                        'Default 921600 baud. Close any other program using that port first.'),
             ('bullet', 'Breathing level and saved calibration — the box next to the breathing readout picks Normal, High (default) or Maximum. Higher levels listen for 60 s and accept weaker rhythms, so they find fainter breathing but can occasionally show a wrong rate; they need you to sit or lie still within a couple of metres of the line between the boards. The empty-room calibration is now remembered for each board across restarts; press Clear calibration (and calibrate again) after you move a board or the furniture. Save raw (60 s) writes the last minute of raw data to a file so a real capture can be examined.'),
             ('bullet', 'Keep watching with this board — tick it in the CSI tab (with the receiver\'s port chosen) and the boards feed the same away-mode alerts and Activity history as your PC\'s Wi-Fi card: movement near the boards becomes a MOVEMENT event ("ESP32 boards: movement detected"), raises a real alert while Away mode is on (at most one every 5 minutes) and adds to the day-by-hour heatmap. It keeps running with the Wi-Fi window closed. While the tab itself is connected to that board the tab does the reading and the calibration carries over. If the board goes silent for 90 s you get one event saying why. The simulated demo never triggers anything. It cannot tell people from pets or a fan, and it only sees movement near the line between the two boards.'),
-            ('bullet', 'Flash ESP32… — the button in the CSI tab sets up a new board without editing any files: plug in ONLY that board, press the button, type the Wi-Fi name (capitals matter) and password, pick the channel (the scan list fills it in) and press Flash. Choose Receiver for the board that joins your Wi-Fi, Transmitter for the other one (it only needs the channel, which must match). Needs PlatformIO on this PC (python -m pip install platformio). If it says it cannot connect, hold the board\'s BOOT button while it starts writing. The password is used only to build that board and is not saved.'),
+            ('bullet', 'Flash ESP32… — the button in the CSI tab sets up a new board without editing any files: plug in ONLY that board, press the button, type the Wi-Fi name (capitals matter) and password, and press Flash. Choose Receiver for the board that joins your Wi-Fi, Transmitter for the other one. The channel no longer has to match: the receiver sends a small beacon and the transmitter searches the channels for it and follows it, so a router or Wi-Fi disc changing channel no longer breaks the pair (both boards need flashing once with this version). Needs PlatformIO on this PC (python -m pip install platformio). If it says it cannot connect, hold the board\'s BOOT button while it starts writing. The password is used only to build that board and is not saved.'),
             ('bullet', 'Receiver over Wi-Fi — if the receiver cannot be next to this PC, set it up with the Flash ESP32… button (no file editing), or put your Wi-Fi name and '
                        'password in its csi_config.h yourself, re-flash it, plug it into any phone charger where you want it, '
                        'and choose the "wifi" entry at the end of the list. The board announces itself on your '
@@ -28137,6 +29124,12 @@ class UserGuideWindow:
             ('bullet', 'Flash ESP32… button in the CSI tab: type your Wi-Fi name (capitals matter) and password, pick Receiver or Transmitter, press Flash — no files to edit. The password is only used to build that board and is not saved.'),
             ('bullet', 'Keep watching with this board: the boards feed the same Away alerts, Activity heatmap and event list as your PC\'s Wi-Fi card, even with the window closed. The tab also reconnects to the board by itself when you open it.'),
             ('bullet', 'Live tab: a Boards (ESP32) graph of the movement level, and a header chip that says BOARDS · QUIET / MOVEMENT / AWAY, so the Live tab works with no Wi-Fi link on the PC.'),
+            ('h2', 'Phone alerts and Away that follows your phone'),
+            ('bullet', 'Wi-Fi window → Phone alerts & automatic Away…: one click sets up free push alerts through ntfy (no account: install the ntfy app and subscribe to the private topic it shows, then press Send a test alert). Movement alerts carry a small picture of the last two minutes of the movement graph.'),
+            ('bullet', 'Away can follow your phone: press Find devices on the network, pick your phone (turn its Wi-Fi off and on and scan again: the NEW line is it), and Away switches on when the phone has been off the home Wi-Fi for 10 minutes (adjustable) and off when it is back. While a phone is chosen, an idle PC no longer counts as away, so no alerts about yourself at night. You can be told on your phone when Away switches on or off. The phone is found by asking the network who has its address, which a phone answers even with the screen off; Vanguard keeps watching in the background while a phone is chosen.'),
+            ('bullet', 'The phone dashboard\'s front page now has a Wi-Fi & Boards card (status, boards, phone, Away) that opens the full Wi-Fi page.'),
+            ('h2', 'ESP32 boards find each other\'s channel'),
+            ('bullet', 'The two boards no longer need a matching channel. The receiver sends a small beacon ten times a second, and the transmitter searches channels 1–13 for it, locks on, and searches again if it loses it, so a router or Wi-Fi disc that changes channel (or a receiver that moves to another disc) no longer stops the CSI. Flash both boards once with this version (Flash ESP32…); the CSI tab tells you if a board still has the older firmware.'),
             ('h2', 'Wi-Fi & Boards on your phone and in a browser'),
             ('bullet', 'New page at http://<this PC>:8765/wifi (also in the phone dashboard menu under MONITOR as "Wi-Fi & Boards"): the boards\' movement graph with the walking man, your Wi-Fi link and disturbance, the 30-day Activity heatmap with the last-24-hours strip and event list, the floor-plan Signal map with dead spots, and the Networks health score, findings and access points. It updates every two seconds and works the same on a phone.'),
             ('bullet', 'Switches on that page: Away mode, Away when the PC is idle, Keep watching in the background and Keep watching with the ESP32 boards. Any device on your Wi-Fi can switch alerts ON. Switching them OFF from another device is refused unless you tick "Let other devices switch alerts off" in the Wi-Fi window on the PC, because the dashboard has no login. The PC itself can always switch them off.'),
@@ -28212,7 +29205,7 @@ class UserGuideWindow:
             ('bullet', 'Since this version a ticked Away mode only counts when the keyboard and mouse have not been used for two minutes, so alerts while you are typing should no longer happen. If you sit very still for more than two minutes (watching a film, say) and the boards see movement, you will still get one alert.'),
             ('bullet', 'The "Keep watching" alerts are limited to one every five minutes for movement.'),
             ('h2', 'CSI tab shows nothing or the walking man never appears'),
-            ('bullet', 'Wi-Fi receiver: choose the "wifi:4210" entry at the end of the port list and press Connect (or tick Keep watching). The tab should show packets per second within a few seconds; if it says nothing is coming, check the receiver is powered and on your Wi-Fi, the transmitter is running on the same channel, and Windows Firewall allows this app on private networks.'),
+            ('bullet', 'Wi-Fi receiver: choose the "wifi:4210" entry at the end of the port list and press Connect (or tick Keep watching). The tab should show packets per second within a few seconds; if it says nothing is coming, check the receiver is powered and on your Wi-Fi, the transmitter is powered (it finds the receiver\'s channel by itself; boards flashed before this version must be re-flashed once for that), and Windows Firewall allows this app on private networks.'),
             ('bullet', 'The man only appears while the detector reports movement, which needs the board connected, "MOTION" showing, and you not reviewing recorded history. Press "Back to live" if the tab says RECORDED.'),
             ('bullet', 'Breathing never shows: it needs someone sitting still within a couple of metres of the line between the boards. Try the Breathing level box (High or Maximum), and press "Save raw (60 s)" while you sit still so a real capture can be examined.'),
             ('h2', 'Charts look wrong after switching views'),
@@ -28574,7 +29567,7 @@ def _nm_ai_complete(prompt, want_json=False, timeout=30):
         try:
             body = {'model': model, 'prompt': prompt, 'stream': False,
                     # Keep the model resident so later asks don't cold-load.
-                    'keep_alive': '30m',
+                    'keep_alive': '5m',          # unload 5 min after the last question: the model holds ~6 GB
                     # num_predict was 700 -- fine for a plain instruct model,
                     # but a reasoning model (deepseek-r1 and friends) spends a
                     # chunk of this budget on its own <think>...</think>
@@ -29414,12 +30407,25 @@ def _nm_notify_config_save(cfg):
         _exc('_nm_notify_config_save'); return False
 
 
-def _nm_notify(title, message, sev='warn', tags='', force=False):
+def _nm_hdr(v):
+    """An HTTP header value that survives non-ASCII text (a '—' or a Wi-Fi name with accents): plain ASCII as is,
+    anything else as an RFC 2047 encoded word, which ntfy decodes. urllib would otherwise refuse to send it."""
+    v = str(v or '').replace('\r', ' ').replace('\n', ' ')
+    try:
+        v.encode('ascii')
+        return v
+    except UnicodeEncodeError:
+        import base64
+        return '=?UTF-8?B?' + base64.b64encode(v.encode('utf-8')).decode('ascii') + '?='
+
+
+def _nm_notify(title, message, sev='warn', tags='', force=False, attach=None, filename='graph.png'):
     """Send a push notification via the configured relay. No-op if unconfigured
     or if the alert is below the configured minimum severity. Backends: ntfy
     (default, free, has an iOS/Android app), Pushover, or a generic webhook.
     Pass force=True for user-requested pings (e.g. report ready) so they are
-    not suppressed by the alert min-severity threshold."""
+    not suppressed by the alert min-severity threshold. attach: optional picture
+    bytes (PNG), shown in the notification by ntfy; the other backends get the text."""
     import json, urllib.request, urllib.parse
     cfg = _nm_notify_config()
     backend = (cfg.get('backend') or 'none').lower()
@@ -29434,10 +30440,19 @@ def _nm_notify(title, message, sev='warn', tags='', force=False):
             if not topic: return False, 'no ntfy topic set'
             server = (cfg.get('ntfy_server') or 'https://ntfy.sh').rstrip('/')
             prio = {'info': 'low', 'warn': 'default', 'crit': 'high'}.get(sev, 'default')
-            req = urllib.request.Request(
-                server + '/' + topic, data=message.encode('utf-8'),
-                headers={'Title': title, 'Priority': prio,
-                         'Tags': tags or 'warning'}, method='POST')
+            hdrs = {'Title': _nm_hdr(title), 'Priority': prio, 'Tags': _nm_hdr(tags or 'warning')}
+            if attach:
+                # picture as the body; the text goes in the Message header (ntfy shows both)
+                hdrs.update({'Message': _nm_hdr(message), 'Filename': filename})
+                req = urllib.request.Request(server + '/' + topic, data=bytes(attach), headers=hdrs, method='PUT')
+                try:
+                    urllib.request.urlopen(req, timeout=20).read()
+                    return True, ''
+                except Exception:
+                    _exc_debug('ntfy attachment (sending the text alone)')
+                    hdrs.pop('Message', None); hdrs.pop('Filename', None)
+            req = urllib.request.Request(server + '/' + topic, data=message.encode('utf-8'), headers=hdrs,
+                                         method='POST')
             urllib.request.urlopen(req, timeout=10).read()
             return True, ''
         if backend == 'pushover':
@@ -29464,9 +30479,9 @@ def _nm_notify(title, message, sev='warn', tags='', force=False):
     return False, 'unknown backend'
 
 
-def _nm_notify_async(title, message, sev='warn', tags='', force=False):
+def _nm_notify_async(title, message, sev='warn', tags='', force=False, attach=None):
     import threading
-    threading.Thread(target=lambda: _nm_notify(title, message, sev, tags, force),
+    threading.Thread(target=lambda: _nm_notify(title, message, sev, tags, force, attach=attach),
                      daemon=True).start()
 
 
@@ -39781,6 +40796,17 @@ poll();
  .wmenu .wm-tx{flex:1;min-width:0;line-height:1.2;}
  .wmenu .wm-tx small{display:block;font-size:11.5px;font-weight:500;color:var(--muted);margin-top:3px;letter-spacing:.01em;}
  .wmenu .wm-ch{color:var(--faint);font-size:20px;flex:none;}
+ .boards{display:flex;align-items:center;gap:14px;margin-top:12px;text-decoration:none;color:var(--ink);
+   background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:14px 16px;position:relative;overflow:hidden;}
+ .boards::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--cyan);opacity:.9;}
+ .boards:active{transform:translateY(1px);}
+ .boards .bl{flex:1;min-width:0;}
+ .boards .mlabel{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:600;}
+ .boards .bchip{display:inline-block;margin-top:8px;font-family:var(--mono);font-size:12px;font-weight:700;letter-spacing:.06em;
+   padding:4px 10px;border-radius:8px;background:var(--line);color:var(--muted);}
+ .boards .bchip.moving{background:#7a1d12;color:#ffd5cf;} .boards .bchip.quiet{background:#12482b;color:#c8ffe0;}
+ .boards .bsub{font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.4;}
+ .boards .bch{color:var(--faint);font-size:24px;flex:none;}
 </style>
 </head>
 <body>
@@ -39797,6 +40823,13 @@ poll();
   <div class="metric ping"><div class="mlabel">Ping</div><div class="mval"><span id="ping">&#8211;</span><i>ms</i></div></div>
   <div class="metric dns"><div class="mlabel">DNS</div><div class="mval"><span id="dns">&#8211;</span><i>ms</i></div></div>
 </section>
+
+<a class="boards" href="/wifi" id="boards">
+  <div class="bl"><div class="mlabel">Wi-Fi &amp; Boards</div>
+    <span class="bchip" id="bChip">&#8230;</span>
+    <div class="bsub" id="bSub">Live movement, the walking man, activity, signal map and switches</div></div>
+  <div class="bch">&#8250;</div>
+</a>
 
 <section class="chart-card">
   <div class="chart-head">
@@ -40030,6 +41063,18 @@ refresh(); setInterval(refresh,5000);
 document.addEventListener('visibilitychange',function(){if(!document.hidden)refresh();});
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(function(){});}
 </script>
+<script>
+(function(){
+  function upd(){fetch('/api/wifi/web?lite=1',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    var c=document.getElementById('bChip'),sb=document.getElementById('bSub');if(!c)return;
+    if(!d.ok){c.textContent='NOT AVAILABLE';c.className='bchip';sb.textContent=d.error||'';return;}
+    c.textContent=d.chip||'NOT WATCHING';c.className='bchip '+(d.tone||'');
+    var bits=[];if(d.boards)bits.push('boards live');if(d.phone)bits.push(d.phone);bits.push(d.away?'Away is ON':'Away is off');
+    sb.textContent=bits.join(' \u00b7 ')+'  \u2014  tap for graphs, activity and switches';
+  }).catch(function(){});}
+  upd();setInterval(upd,5000);
+})();
+</script>
 </body>
 </html>'''
         # <<<ASSET:mobile.html
@@ -40144,14 +41189,14 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
- :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;--acc:#38b8f0;--red:#ff5c4d;--grn:#2fe07a;--amb:#ff9f43;}
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;--acc:@@ACCENT@@;--red:#ff5c4d;--grn:#2fe07a;--amb:#ff9f43;}
  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
    padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 28px);min-height:100vh;max-width:820px;margin:0 auto;-webkit-font-smoothing:antialiased;}
  header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
  header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
  header h1{font-size:16px;font-weight:650;flex:1;}
- .chip{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:7px;letter-spacing:.5px;white-space:nowrap;background:#1c2b52;color:var(--tick);}
+ .chip{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:7px;letter-spacing:.5px;white-space:nowrap;background:var(--line);color:var(--tick);}
  .chip.moving{background:#7a1d12;color:#ffd5cf;}
  .chip.quiet{background:#12482b;color:#c8ffe0;}
  .dot{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
@@ -40168,7 +41213,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
  .grow{flex:1;min-width:0;}
  .man{flex:0 0 auto;width:84px;display:none;}
  .man.on{display:block;}
- .man canvas{width:84px;height:128px;border:1px solid #24507f;border-radius:4px;background:#0c1d33;}
+ .man canvas{width:84px;height:128px;border:1px solid var(--line);border-radius:4px;background:var(--panel);}
  .stats{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--tick);margin-top:6px;font-variant-numeric:tabular-nums;}
  .stats b{color:var(--text);font-weight:650;}
  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px;}
@@ -40190,7 +41235,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
  .tag.d{background:#4a2a08;color:var(--amb);} .tag.n{background:#4a1230;color:#ff8fbf;}
  .health{display:flex;align-items:center;gap:14px;margin:6px 0 8px;}
  .health .g{font-size:34px;font-weight:700;line-height:1;}
- .find{font-size:12px;line-height:1.5;padding:6px 10px;border-left:3px solid var(--acc);background:rgba(56,184,240,.07);margin:6px 0;border-radius:0 6px 6px 0;}
+ .find{font-size:12px;line-height:1.5;padding:6px 10px;border-left:3px solid var(--acc);background:var(--panel);margin:6px 0;border-radius:0 6px 6px 0;}
  .find.high{border-color:var(--red);} .find.warn{border-color:var(--amb);}
  .sw{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);}
  .sw:last-of-type{border-bottom:0;}
@@ -40257,6 +41302,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 <div class="card" id="ctl">
  <h2>Controls</h2>
  <div class="note" id="ctlNote"></div>
+ <div id="phoneInfo"></div>
  <div id="sws"></div>
  <div class="msg" id="ctlMsg"></div>
 </div>
@@ -40320,7 +41366,12 @@ function cloud(phase,w,h){
     out.push([ox+q[0]*scale,oy+q[1]*scale,br]);});
   return out;
 }
-var RAMP=[[0,[12,29,51]],[0.18,[20,52,96]],[0.45,[40,112,190]],[0.72,[120,190,240]],[1,[255,255,255]]];
+/* the dots' colours follow the app's theme: the tile colour, the accent deepening into it, the accent, near-white */
+function hexRgb(h){h=String(h||'').trim().replace('#','');if(h.length===3)h=h.replace(/./g,'$&$&');var n=parseInt(h,16);return isNaN(n)?[12,29,51]:[n>>16&255,n>>8&255,n&255];}
+function mixRgb(a,b,t){return [0,1,2].map(function(i){return Math.round(a[i]+(b[i]-a[i])*t);});}
+var RAMP=(function(){var cs=getComputedStyle(document.documentElement),bg=hexRgb(cs.getPropertyValue('--panel')),ac=hexRgb(cs.getPropertyValue('--acc'));
+  return [[0,bg],[0.18,mixRgb(bg,ac,0.25)],[0.45,mixRgb(bg,ac,0.75)],[0.72,mixRgb(ac,[255,255,255],0.45)],[1,[255,255,255]]];})();
+function accA(a){var c=hexRgb(getComputedStyle(document.documentElement).getPropertyValue('--acc'));return 'rgba('+c[0]+','+c[1]+','+c[2]+','+a+')';}
 function ramp(v){v=Math.max(0,Math.min(1,v));for(var i=1;i<RAMP.length;i++){if(v<=RAMP[i][0]){var a=RAMP[i-1],b=RAMP[i],t=(v-a[0])/(b[0]-a[0]);
   return 'rgb('+Math.round(a[1][0]+(b[1][0]-a[1][0])*t)+','+Math.round(a[1][1]+(b[1][1]-a[1][1])*t)+','+Math.round(a[1][2]+(b[1][2]-a[1][2])*t)+')';}}return 'rgb(255,255,255)';}
 var manCv=null,manCtx=null,glow=null;
@@ -40329,15 +41380,16 @@ function drawMan(){
   if(!manCv){manCv=$('cMan');manCv.width=W*DPR;manCv.height=H*DPR;manCtx=manCv.getContext('2d');
     glow=document.createElement('canvas');glow.width=Math.ceil(W*DPR/3);glow.height=Math.ceil(H*DPR/3);}
   var c=manCtx,pts=cloud(st.phase,W,H);
-  c.setTransform(1,0,0,1,0,0);c.globalCompositeOperation='source-over';c.fillStyle='rgb(12,29,51)';c.fillRect(0,0,manCv.width,manCv.height);
+  c.setTransform(1,0,0,1,0,0);c.globalCompositeOperation='source-over';c.fillStyle='rgb('+RAMP[0][1].join(',')+')';c.fillRect(0,0,manCv.width,manCv.height);
   var d=Math.max(1.5,1.35*DPR);
   for(var i=0;i<pts.length;i++){var p=pts[i];c.fillStyle=ramp(p[2]*1.05);c.fillRect(p[0]*DPR-d/2,p[1]*DPR-d/2,d,d);}
   var g=glow.getContext('2d');g.setTransform(1,0,0,1,0,0);g.clearRect(0,0,glow.width,glow.height);g.drawImage(manCv,0,0,glow.width,glow.height);
   c.globalCompositeOperation='lighter';c.globalAlpha=0.55;c.imageSmoothingEnabled=true;c.drawImage(glow,0,0,manCv.width,manCv.height);c.globalAlpha=1;c.globalCompositeOperation='source-over';
 }
-var lastT=0;
+var lastIdx=-1;
 function loop(ts){
-  if(st.man){if(ts-lastT>=70){lastT=ts;st.phase=(st.phase+0.42)%(2*Math.PI);drawMan();}}
+  /* the stride follows the clock (40 pictures per 1.05 s stride), so it is smooth at any screen rate and never slows down */
+  if(st.man){var idx=Math.floor(ts/1050*40)%40;if(idx!==lastIdx){lastIdx=idx;st.phase=2*Math.PI*idx/40;drawMan();}}
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
@@ -40379,7 +41431,7 @@ function renderLive(d){
   var top=Math.max(mx*1.2,th!=null?th*1.3:0,0.001);
   var spans=[];var s0=null;ch.forEach(function(p){if(p[3]&&s0===null)s0=p[0];else if(!p[3]&&s0!==null){spans.push([s0,p[0]]);s0=null;}});if(s0!==null)spans.push([s0,0]);
   lineChart($('cBoards'),{xmin:-300,xmax:0,ymin:0,ymax:top,spans:spans,hline:th,yfmt:function(v){return v.toFixed(2);},
-    series:[{pts:ch.map(function(p){return [p[0],p[1]];}),color:'#7fd4ff',fill:'rgba(56,184,240,0.18)'}],
+    series:[{pts:ch.map(function(p){return [p[0],p[1]];}),color:css('--acc'),fill:accA(0.18)}],
     empty:ch.length<2?(d.csi&&d.csi.wanted?'waiting for the boards…':'no boards connected — pick one in the CSI tab on the PC'):''});
   var cs=d.csi||{};
   $('bStats').innerHTML='<span><b>'+(cs.live?Math.round(cs.rate||0):0)+'</b> packets/s</span>'+(cs.rssi!=null?'<span>RSSI <b>'+Math.round(cs.rssi)+'</b> dBm</span>':'')
@@ -40387,7 +41439,7 @@ function renderLive(d){
   st.man=!!(cs.moving);$('man').classList.toggle('on',st.man);
   $('linkNote').textContent=lk?'Real signal in dBm, last five minutes.':'No Wi-Fi link on this PC right now.';
   var lh=d.link_hist||[],lo=-90,hi=-30;lh.forEach(function(p){lo=Math.min(lo,p[1]-4);hi=Math.max(hi,p[1]+4);});
-  lineChart($('cLink'),{xmin:-300,xmax:0,ymin:lo,ymax:hi,spans:d.moves,series:[{pts:lh,color:'#e8f6ff',fill:'rgba(56,184,240,0.12)'}],
+  lineChart($('cLink'),{xmin:-300,xmax:0,ymin:lo,ymax:hi,spans:d.moves,series:[{pts:lh,color:'#e8f6ff',fill:accA(0.12)}],
     empty:lh.length<2?'no signal samples':''});
   var sd=d.stds||[],sm=2;sd.forEach(function(p){sm=Math.max(sm,p[1]*1.2);});if(d.thr)sm=Math.max(sm,d.thr*1.3);
   lineChart($('cDist'),{xmin:-300,xmax:0,ymin:0,ymax:sm,spans:d.moves,hline:d.thr,yfmt:function(v){return v.toFixed(1);},
@@ -40421,7 +41473,16 @@ var SW=[['away','Away mode','Alert me when the boards or the Wi-Fi see movement 
 var lastCtl='';
 function renderCtl(d){
   var p=d.prefs||{};
-  var key=JSON.stringify([p,d.can_disarm,d.local,d.away,d.at_pc]);if(key===lastCtl)return;lastCtl=key;
+  var ph=d.phone||null,nt=d.ntfy||null;
+  var key=JSON.stringify([p,d.can_disarm,d.local,d.away,d.at_pc,ph&&[ph.home,Math.round((ph.last_seen||0)/60)],nt]);if(key===lastCtl)return;lastCtl=key;
+  var ib='';
+  if(ph){var ago=ph.last_seen?Math.max(0,Math.round(d.now-ph.last_seen)):null;
+    ib+='<div class="find">Away follows <b>'+esc(ph.name||'your phone')+'</b>: '+(ph.home?'at home':'<b>away</b> — Away mode is on')
+      +(ago==null?'':(ago<120?' (seen '+ago+' s ago)':' (last seen '+new Date(ph.last_seen*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+')'))+'</div>';}
+  else ib+='<div class="find">Tip: Away can follow your phone (on when it leaves the Wi-Fi, off when it is back). Set it up on the PC: Wi-Fi window → <b>Phone alerts &amp; automatic Away…</b></div>';
+  if(nt&&nt.topic){var u=(nt.server||'https://ntfy.sh').replace(/\/$/,'')+'/'+encodeURIComponent(nt.topic);
+    ib+='<div class="find">Phone alerts: subscribe to <b>'+esc(nt.topic)+'</b> in the free ntfy app, or <a href="'+esc(u)+'" style="color:var(--acc)">open it on this phone</a>.</div>';}
+  $('phoneInfo').innerHTML=ib;
   $('ctlNote').textContent=(d.away?'Away mode is counting right now. ':(p.away?'Away mode is on, but you are at the PC, so it is not counting. ':''))
     +(d.can_disarm?'':'From this device you can switch things on, but not off (the dashboard has no login, so only the PC can).');
   var h='';SW.forEach(function(s){var on=!!(s[0]==='auto_away_min'?(p[s[0]]>0):p[s[0]]);
@@ -40493,7 +41554,7 @@ function drawMap(){
       for(var rr=0;rr<f.ny;rr++)for(var qq=0;qq<f.nx;qq++)if(dm[rr][qq])c.fillRect(qq*cw,(f.ny-1-rr)*chh,cw+0.5,chh+0.5);}}
   if(paper){c.globalCompositeOperation='multiply';c.drawImage(MAPST.img,0,0,w,h);c.globalCompositeOperation='source-over';}
   (m.samples||[]).forEach(function(s){var col=mcol(s.v);c.beginPath();c.arc(s.x*sx,h-s.y*sy,4,0,6.3);c.fillStyle='rgb('+col+')';c.fill();c.lineWidth=1.3;c.strokeStyle=paper?'#111':'#fff';c.stroke();});
-  if(m.router){var rx=m.router[0]*sx,ry=h-m.router[1]*sy;c.beginPath();c.moveTo(rx,ry-8);c.lineTo(rx+7,ry+6);c.lineTo(rx-7,ry+6);c.closePath();c.fillStyle='#38b8f0';c.fill();c.strokeStyle='#fff';c.lineWidth=1.2;c.stroke();}
+  if(m.router){var rx=m.router[0]*sx,ry=h-m.router[1]*sy;c.beginPath();c.moveTo(rx,ry-8);c.lineTo(rx+7,ry+6);c.lineTo(rx-7,ry+6);c.closePath();c.fillStyle=css('--acc');c.fill();c.strokeStyle='#fff';c.lineWidth=1.2;c.stroke();}
   if(m.dead&&m.dead.suggest){var gx=m.dead.suggest[0]*sx,gy=h-m.dead.suggest[1]*sy;c.fillStyle='#ffd23f';c.strokeStyle='#000';c.lineWidth=1;c.font='bold 16px system-ui';c.textAlign='center';c.strokeText('★',gx,gy+5);c.fillText('★',gx,gy+5);}
   $('mapNote').textContent=(m.samples.length?m.samples.length+' samples on this floor. ':'No samples on this floor yet — walk around with the PC and press "Sample here" in the Signal map tab. ')+(m.field?'':'(Needs three samples to draw the map.)');
   $('mapStats').innerHTML=(m.router?'<span>▲ router</span>':'')+(m.dead&&m.dead.regions.length?'<span>pink = weaker than −75 dBm ('+m.dead.regions.length+' area'+(m.dead.regions.length>1?'s':'')+')</span>':'')+(m.dead&&m.dead.suggest?'<span>★ a spot for an extra node</span>':'');
@@ -40507,6 +41568,7 @@ function refresh(){
   fetch('/api/wifi/web'+(st.first?'?start=1':''),{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
     st.first=false;$('dot').classList.add('live');
     if(!d.ok){$('sub').textContent=d.error||'Unavailable';$('chip').textContent='UNAVAILABLE';return;}
+    if(d.theme){if(st.theme&&st.theme!==d.theme){location.reload();return;}st.theme=d.theme;}   /* theme changed in the app: repaint */
     st.live=d;renderLive(d);
   }).catch(function(){$('sub').textContent='Desktop app unreachable — same Wi‑Fi?';$('dot').classList.remove('live');}).finally(function(){busy=false;});
 }
@@ -40521,7 +41583,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden){ref
         _ui = _nm_theme_ui(self._monitor)
         for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
                             ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
-                            ('@@TEXT2@@', _ui['text2'])):
+                            ('@@TEXT2@@', _ui['text2']), ('@@ACCENT@@', _ui['accent'])):
             _html = _html.replace(_tok, _val)
         _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
@@ -42862,9 +43924,27 @@ ol.steps li{margin:6px 0}
                                                                     'csi_port', 'alert_away', 'web_control')},
                                     'local': local, 'can_disarm': local})
                 return
+            if qs.get('lite'):
+                chip_, tone_ = w.chip()
+                pi = w.phone_info()
+                handler._json(200, {'ok': True, 'chip': chip_, 'tone': tone_, 'away': w.is_away(),
+                                    'boards': bool(w.csi_state.get('owner')) and time.time() - w.csi_state.get('t', 0.0) <= 3.5,
+                                    'phone': (None if pi is None else ((pi['name'] or 'phone') + (' at home' if pi['home'] else ' away')))})
+                return
             d = w.web_view()
+            try:
+                _u = _nm_theme_ui(self._monitor)
+                d['theme'] = '|'.join(str(_u[k]) for k in ('bg', 'panel', 'border', 'text', 'text2', 'accent'))
+            except Exception:
+                d['theme'] = ''
             d['local'] = local
             d['can_disarm'] = bool(local or w.prefs.get('web_control'))
+            try:
+                _nc = _nm_notify_config() or {}
+                d['ntfy'] = ({'topic': _nc.get('ntfy_topic'), 'server': _nc.get('ntfy_server') or 'https://ntfy.sh'}
+                             if (_nc.get('backend') == 'ntfy' and _nc.get('ntfy_topic')) else None)
+            except Exception:
+                d['ntfy'] = None
             handler._json(200, d)
         except Exception as e:
             _exc('_serve_wifi_web')

@@ -85,13 +85,13 @@
   },
   "static": {
     "/": {
-      "bytes": 28633,
-      "sha256": "a61c889e79eaafb0e475e57af1466c8df69c76e8a4a7c65653ab0771fd14b437",
+      "bytes": 30655,
+      "sha256": "6993a74bab24a4f005b53d51d0b67156df6850f8d0b6f374d9691841a488c000",
       "status": 200
     },
     "/3d": {
       "bytes": 227791,
-      "sha256": "9a2ebc89bce98ed36c544a1ac8523ee776b4c3ebe09e23b1d81fd7233e61a39c",
+      "sha256": "f68c03fbd4cda0156d1c06ad97bd910adbd9a1d4fdaf0d629d2fb41b47f25b25",
       "status": 200
     },
     "/agents": {
@@ -110,8 +110,8 @@
       "status": 200
     },
     "/guide": {
-      "bytes": 113656,
-      "sha256": "aff6c4cb4feaf9fe69c773b8c2f25836d249a3f09947ad79fcaee29d913dc8e3",
+      "bytes": 115788,
+      "sha256": "227de1a255e4a44fb81dfee3631e430fed5756d421f9f056e91b9614ffbe31b8",
       "status": 200
     },
     "/honeypot": {
@@ -175,8 +175,8 @@
       "status": 200
     },
     "/wifi": {
-      "bytes": 34024,
-      "sha256": "25171ca6da08981c1da8b15104637e2bafa5db23e75ee47a7c06598aeb9873a3",
+      "bytes": 36085,
+      "sha256": "2bcb8f7bf7a6e0f12679dd0bd8b98ddcbfcd82218b6ce73b671e6835e1baf6ac",
       "status": 200
     },
     "/world-map.jpg": {
