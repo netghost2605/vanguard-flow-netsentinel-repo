@@ -2716,7 +2716,7 @@ def _fmt_ms(v):
 # units mismatch or a bad parse from a speed-test CLI, not a real reading.
 # Short build fingerprint, logged at startup and shown in the status bar,
 # so it is obvious whether a running instance includes a given fix.
-_NM_BUILD_ID = 'b-0c94e7a3'
+_NM_BUILD_ID = 'b-7c0a62f5'
 
 _NM_MAX_SANE_MBPS = 100000.0
 
@@ -7298,6 +7298,7 @@ class _NMWifiWatcher:
                 self._alert_last[k] = now
                 title = {'MOVEMENT': 'Movement while you are away', 'NEW AP': 'Wi-Fi: new network nearby',
                          'ROGUE': 'Wi-Fi: suspicious network', 'PHONE': 'Away mode',
+                         'HONEYPOT': 'Honeypot: someone is probing your network',
                          'ESP32': 'ESP32 receiver'}.get(kind, 'Wi-Fi alert')
                 threading.Thread(target=self._safe_alert, args=(title, detail, sev, kind), daemon=True).start()
         return ev
@@ -7394,12 +7395,49 @@ class _NMWifiWatcher:
                 up = int(port.split(':', 1)[1])
             except ValueError:
                 up = _NM_CSI_UDP_PORT
-            return _NMCsiSource(an, udp_port=up)
+            return _NMCsiSource(an, udp_port=up, on_honeypot=self._on_honeypot_hit)
         try:
             baud = int(self.prefs.get('csi_baud') or _NM_CSI_BAUD)
         except (TypeError, ValueError):
             baud = _NM_CSI_BAUD
         return _NMCsiSource(an, port=port, baud=baud)
+
+    def _on_honeypot_hit(self, info):
+        """The receiver board's honeypot reported a connection to a decoy port (likely a scan/intrusion).
+        Record it the same way the PC honeypot records a hit — into the honeypot history and, if the Honeypot
+        window is open, its live view — and raise a movement-style away alert so it reaches your phone."""
+        try:
+            ip = info.get('ip'); port = int(info.get('port') or 0)
+            if not ip or ip.startswith('127.'):
+                return
+            proto = info.get('proto') or 'tcp'
+            first = info.get('first') or b''
+            hp = _nm_honeypot() if '_nm_honeypot' in globals() else None
+            if hp is not None:
+                # straight into the running honeypot: it persists, dedups, alerts and updates the open window
+                try:
+                    hp._record(ip, port, first, force=True, proto=proto)
+                except Exception:
+                    _exc_debug('board honeypot record')
+            elif self.db is not None:
+                # no PC honeypot running: still keep the history so the Honeypot page shows board hits
+                try:
+                    svc = (_NM_HONEYPOT_UDP_PORTS.get(port) if proto == 'udp'
+                           else _NM_HONEYPOT_PORTS.get(port)) or str(port)
+                    self.db.insert_honeypot_hit({'time': time.time(), 'ip': ip, 'port': port, 'proto': proto,
+                                                 'service': svc, 'known': False,
+                                                 'tool': _nm_hp_fingerprint(first),
+                                                 'sample': first[:120].decode('latin-1', 'replace')})
+                except Exception:
+                    _exc_debug('board honeypot persist')
+            svc = (_NM_HONEYPOT_UDP_PORTS.get(port) if proto == 'udp' else _NM_HONEYPOT_PORTS.get(port)) or str(port)
+            tool = _nm_hp_fingerprint(first)
+            detail = f'Board honeypot: {ip} connected to the decoy {svc} port ({proto} {port})' + (
+                f' — looks like {tool}' if tool else '')
+            # one alert per source per 5 min, so a sweep does not flood the phone
+            self.event('HONEYPOT', detail, alert=True, sev='warn', key='HP:' + ip, debounce=300.0)
+        except Exception:
+            _exc_debug('board honeypot hit')
 
     def csi_start(self):
         """Own the board connection (background). Returns True if running."""
@@ -9482,133 +9520,155 @@ def _nm_csi_parse_line(line):
 
 # <<FW_FLASH_BEGIN>>  (generated section: the ESP32 firmware sources travel inside the app so the CSI tab can flash a board)
 _NM_FW_BLOB = (
-    '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'
+    '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'
 )
 
 
@@ -10682,7 +10742,7 @@ class _NMCsiSource:
     on a thread, and feeds the analyzer."""
 
     def __init__(self, analyzer, port=None, baud=_NM_CSI_BAUD, sim=None, serial_cls=None, clock=None,
-                 udp_port=None):
+                 udp_port=None, on_honeypot=None):
         import threading
         from collections import deque
         self.an = analyzer
@@ -10690,6 +10750,7 @@ class _NMCsiSource:
         self.baud = baud
         self.sim = sim
         self.udp_port = udp_port
+        self.on_honeypot = on_honeypot          # callback(dict) when the board reports a honeypot hit
         self.board = None                       # last 'CSI_BOARD' announcement (Wi-Fi mode)
         self.discover = None                    # Wi-Fi mode: where to broadcast 'CSI_SUBSCRIBE'; None = the whole LAN
         self.sock = None
@@ -10768,6 +10829,29 @@ class _NMCsiSource:
         except (IndexError, ValueError):
             self.board = {'ip': addr[0], 'port': addr[1], 'ch': 0, 'rssi': 0, 'cfg': 0, 't': now, 'auto': auto}
 
+    def _honeypot_line(self, line, addr, now):
+        """'CSI_HONEYPOT,<source ip>,<port>,<proto>,<first bytes as hex>': the receiver board's honeypot saw a
+        connection to a decoy port. Parse it and hand it to the callback (the watcher records it like a PC
+        honeypot hit). The hex is only a short sample for display; it is never executed or parsed as a protocol."""
+        f = line.strip().split(',')
+        if len(f) < 4 or self.on_honeypot is None:
+            return
+        try:
+            src = f[1].strip()
+            port = int(f[2])
+            proto = (f[3].strip() or 'tcp').lower()
+            hexb = f[4].strip() if len(f) > 4 else ''
+            try:
+                first = bytes.fromhex(hexb) if hexb else b''
+            except ValueError:
+                first = b''
+            if not re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', src):
+                return
+            self.on_honeypot({'ip': src, 'port': port, 'proto': proto, 'first': first,
+                              'board_ip': addr[0] if addr else None, 't': now})
+        except (IndexError, ValueError):
+            pass
+
     def _run_udp(self):
         """The receiver board joined the home Wi-Fi: it announces itself ('CSI_BOARD,...') about once a second to
         the whole network; we answer 'CSI_SUBSCRIBE' every 2 s and it streams one CSI line per datagram to us."""
@@ -10818,6 +10902,8 @@ class _NMCsiSource:
                     for ln in data.decode('utf-8', 'replace').splitlines():
                         if ln.startswith('CSI_BOARD,'):
                             self._board_line(ln, addr, now)
+                        elif ln.startswith('CSI_HONEYPOT,'):
+                            self._honeypot_line(ln, addr, now)
                         else:
                             self.feed_line(ln.rstrip('\r'), now)
                     # Announcements can be blocked (Windows Firewall, a router that drops broadcasts) while the
@@ -11799,7 +11885,8 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
                     up = int(port.split(':', 1)[1])
                 except ValueError:
                     up = _NM_CSI_UDP_PORT
-                S['src'] = _NMCsiSource(S['an'], udp_port=up, clock=clock)
+                S['src'] = _NMCsiSource(S['an'], udp_port=up, clock=clock,
+                                        on_honeypot=(W._on_honeypot_hit if W is not None else None))
             else:
                 S['src'] = _NMCsiSource(S['an'], port=port, baud=baud, clock=clock)
             conn_btn.configure(text='Disconnect')
@@ -29014,6 +29101,7 @@ class UserGuideWindow:
             ('bullet', 'The walking man — while the boards see movement, a glowing dotted figure walks in a bay kept free to the right of the graphs (the graphs are about a tenth narrower while boards are reporting). He is built from a few thousand fine dots in the style of a 3-D body scan: the edge of the body glows white, the inside is a soft blue, the legs swing, the knees bend and the arms swing against the legs. He disappears when the movement stops, when you switch to another tab and when the boards go quiet.'),
             ('bullet', 'On your phone or another computer: open the Wi-Fi & Boards page from the phone dashboard menu (or go to /wifi on the dashboard address). It shows the same graphs, walking man, Activity, Signal map and Networks, with Away and Keep watching switches. Other devices can switch alerts on; switching them off from another device needs the "Let other devices switch alerts off too" tick on the PC.'),
             ('bullet', 'Phone alerts & automatic Away… (button under the tick boxes): free phone notifications through ntfy, with a picture of the movement graph, and Away that switches on when your phone leaves the home Wi-Fi and off when it comes back.'),
+            ('bullet', 'Board honeypot: the receiver opens decoy ports (telnet/SSH/SMB/RDP/web) nothing legitimate uses and reports any connection as a likely scan or intrusion — into the Honeypot window and as a phone alert. It is part of the receiver firmware (on by default); re-flash the receiver once to add it. The board only records the source and the first bytes; it never answers a service or runs anything.'),
             ('h2', 'Networks tab'),
             ('bullet', 'Every access point in range with its maker (looked up from its address), channel, band and '
                        'security, and how far its signal has swung.'),
@@ -29124,6 +29212,8 @@ class UserGuideWindow:
             ('bullet', 'Flash ESP32… button in the CSI tab: type your Wi-Fi name (capitals matter) and password, pick Receiver or Transmitter, press Flash — no files to edit. The password is only used to build that board and is not saved.'),
             ('bullet', 'Keep watching with this board: the boards feed the same Away alerts, Activity heatmap and event list as your PC\'s Wi-Fi card, even with the window closed. The tab also reconnects to the board by itself when you open it.'),
             ('bullet', 'Live tab: a Boards (ESP32) graph of the movement level, and a header chip that says BOARDS · QUIET / MOVEMENT / AWAY, so the Live tab works with no Wi-Fi link on the PC.'),
+            ('h2', 'Board honeypot: catch whoever is probing your network'),
+            ('bullet', 'The receiver board now opens a handful of decoy ports (telnet, SSH, SMB, RDP and a couple of web ports) that nothing legitimate ever uses. Anything that connects to them is almost certainly a scan or an intrusion attempt, so the board reports it and Vanguard files it with the Honeypot window and sends a phone alert ("someone is probing your network") with the source address and, where it can tell, the tool. The board never answers a real service and never runs anything it receives — it only records who connected and the first few bytes. It is on by default; re-flash the receiver (Flash ESP32… → Receiver) to add it to a board flashed before this version. There is no over-the-air flashing: a firmware-upload server on your Wi-Fi would itself be a way in, so updates stay on the USB cable.'),
             ('h2', 'Phone alerts and Away that follows your phone'),
             ('bullet', 'Wi-Fi window → Phone alerts & automatic Away…: one click sets up free push alerts through ntfy (no account: install the ntfy app and subscribe to the private topic it shows, then press Send a test alert). Movement alerts carry a small picture of the last two minutes of the movement graph.'),
             ('bullet', 'Away can follow your phone: press Find devices on the network, pick your phone (turn its Wi-Fi off and on and scan again: the NEW line is it), and Away switches on when the phone has been off the home Wi-Fi for 10 minutes (adjustable) and off when it is back. While a phone is chosen, an idle PC no longer counts as away, so no alerts about yourself at night. You can be told on your phone when Away switches on or off. The phone is found by asking the network who has its address, which a phone answers even with the screen off; Vanguard keeps watching in the background while a phone is chosen.'),
