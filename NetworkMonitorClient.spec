@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+
+datas = []
+datas += collect_data_files('matplotlib')
 
 
 a = Analysis(
     ['nm_client.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=datas,
+    hiddenimports=['matplotlib.backends.backend_tkagg', 'numpy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

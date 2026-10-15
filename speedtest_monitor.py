@@ -7299,6 +7299,7 @@ class _NMWifiWatcher:
                 title = {'MOVEMENT': 'Movement while you are away', 'NEW AP': 'Wi-Fi: new network nearby',
                          'ROGUE': 'Wi-Fi: suspicious network', 'PHONE': 'Away mode',
                          'HONEYPOT': 'Honeypot: someone is probing your network',
+                         'FLOORMOVE': 'Movement detected — which floor',
                          'ESP32': 'ESP32 receiver'}.get(kind, 'Wi-Fi alert')
                 threading.Thread(target=self._safe_alert, args=(title, detail, sev, kind), daemon=True).start()
         return ev
@@ -10737,12 +10738,153 @@ _NM_CSI_UDP_PORT = 4210            # the receiver board sends here when it joins
 _NM_CSI_UDP_TOKEN = 'wifi'          # port-box entry: "wifi:4210 — receiver board over Wi-Fi"
 
 
+class _NMCsiUdpBroker:
+    """One shared UDP socket per port. The Wi-Fi receiver board streams CSI to this PC on a UDP port; more
+    than one part of the app may want that same board at once (the CSI tab, the background "Keep watching"
+    watcher, and the Floor-detection window). A single exclusive socket would let only one of them have it,
+    so instead they all subscribe here: the broker binds the port once, receives every datagram, and fans
+    each one out to every subscriber's _udp_consume(). It also sends the CSI_SUBSCRIBE handshake for the
+    group. Ref-counted: the socket is opened on the first subscriber and closed after the last leaves."""
+    _lock = None
+    _by_port = {}
+
+    @classmethod
+    def get(cls, port):
+        import threading
+        if cls._lock is None:
+            cls._lock = threading.Lock()
+        with cls._lock:
+            b = cls._by_port.get(int(port))
+            if b is None:
+                b = cls(int(port))
+                cls._by_port[int(port)] = b
+            return b
+
+    def __init__(self, port):
+        import threading
+        self.port = int(port)
+        self.subs = []
+        self.lock = threading.Lock()
+        self.stop_ev = threading.Event()
+        self.sock = None
+        self.error = ''
+        self.thread = None
+
+    def subscribe(self, src):
+        """Add a source; (re)start the receive thread if needed. Returns True once the socket is bound."""
+        import threading
+        with self.lock:
+            if src not in self.subs:
+                self.subs.append(src)
+            if self.thread is None or not self.thread.is_alive():
+                self.stop_ev = threading.Event()
+                self.error = ''
+                self.sock = None
+                self.thread = threading.Thread(target=self._run, daemon=True, name='nm-csi-udp')
+                self.thread.start()
+        for _ in range(40):                       # wait briefly for bind success or failure
+            if self.sock is not None or self.error:
+                break
+            time.sleep(0.05)
+        return self.sock is not None
+
+    def unsubscribe(self, src):
+        with self.lock:
+            if src in self.subs:
+                self.subs.remove(src)
+            empty = not self.subs
+        if empty:
+            self.stop_ev.set()
+
+    def _run(self):
+        import socket
+        s = None
+        err = None
+        for _try in range(8):                     # a quick Disconnect -> Connect can race the old socket closing
+            s = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):      # Windows: keep other programs off the port
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                s.bind(('', self.port))
+                s.settimeout(0.25)
+                try:                              # Windows: an ICMP 'port unreachable' must not break recvfrom
+                    s.ioctl(socket.SIO_UDP_CONNRESET, False)
+                except Exception:
+                    pass
+                err = None
+                break
+            except Exception as ex:
+                err = ex
+                if s is not None:
+                    s.close()
+                s = None
+                if self.stop_ev.wait(0.15):
+                    self.sock = None
+                    return
+        if s is None:
+            self.error = (f'Could not listen on UDP port {self.port}: {err}. Another copy of this app (or '
+                          f'another program) may be using it.')
+            return
+        self.sock = s
+        last_sub = 0.0
+        try:
+            while not self.stop_ev.is_set():
+                data = addr = None
+                try:
+                    data, addr = s.recvfrom(8192)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    self.stop_ev.wait(0.05)
+                if data:
+                    with self.lock:
+                        subs = list(self.subs)
+                    for src in subs:
+                        try:
+                            src._udp_consume(data, addr, src.clock())
+                        except Exception:
+                            _exc_debug('csi udp dispatch')
+                now = time.time()
+                if now - last_sub >= 2.0:
+                    last_sub = now
+                    # Ask for the stream by broadcast (the board answers whoever asks) and straight to each
+                    # known board address, so one blocked direction does not stop it.
+                    targets = [('255.255.255.255', self.port)]
+                    with self.lock:
+                        for src in self.subs:
+                            if src.board:
+                                targets.append((src.board['ip'], src.board['port']))
+                            if src.discover:
+                                targets += list(src.discover)
+                    seen = set()
+                    for tgt in targets:
+                        if tgt in seen:
+                            continue
+                        seen.add(tgt)
+                        try:
+                            s.sendto(b'CSI_SUBSCRIBE', tgt)
+                        except OSError:
+                            pass
+        except Exception as ex:
+            self.error = str(ex)
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self.sock = None
+            with self.lock:
+                self.thread = None
+
+
 class _NMCsiSource:
     """Reads lines from a serial port, a UDP socket fed by the receiver board over Wi-Fi, or the simulator,
     on a thread, and feeds the analyzer."""
 
     def __init__(self, analyzer, port=None, baud=_NM_CSI_BAUD, sim=None, serial_cls=None, clock=None,
-                 udp_port=None, on_honeypot=None):
+                 udp_port=None, on_honeypot=None, board_ip=None):
         import threading
         from collections import deque
         self.an = analyzer
@@ -10751,6 +10893,7 @@ class _NMCsiSource:
         self.sim = sim
         self.udp_port = udp_port
         self.on_honeypot = on_honeypot          # callback(dict) when the board reports a honeypot hit
+        self.board_ip = board_ip                # if set, only take datagrams from this board (two Wi-Fi boards, one port)
         self.board = None                       # last 'CSI_BOARD' announcement (Wi-Fi mode)
         self.discover = None                    # Wi-Fi mode: where to broadcast 'CSI_SUBSCRIBE'; None = the whole LAN
         self.sock = None
@@ -10852,87 +10995,43 @@ class _NMCsiSource:
         except (IndexError, ValueError):
             pass
 
-    def _run_udp(self):
-        """The receiver board joined the home Wi-Fi: it announces itself ('CSI_BOARD,...') about once a second to
-        the whole network; we answer 'CSI_SUBSCRIBE' every 2 s and it streams one CSI line per datagram to us."""
-        import socket
-        s = None
-        err = None
-        for _try in range(8):                     # a quick Disconnect -> Connect can race the old socket closing
-            s = None
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):      # Windows: never share the port with another program
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                s.bind(('', int(self.udp_port)))
-                s.settimeout(0.25)
-                try:                              # Windows: an ICMP 'port unreachable' must not break recvfrom
-                    s.ioctl(socket.SIO_UDP_CONNRESET, False)
-                except Exception:
-                    pass
-                err = None
-                break
-            except Exception as ex:
-                err = ex
-                if s is not None:
-                    s.close()
-                s = None
-                if self.stop_ev.wait(0.15):
-                    return
-        if s is None:
-            self.error = (f'Could not listen on UDP port {self.udp_port}: {err}. Another copy of this app (or '
-                          f'another program) may be using it.')
+    def _udp_consume(self, data, addr, now):
+        """Handle one datagram's lines (called by the shared _NMCsiUdpBroker for every subscriber, so the
+        CSI tab, the background watcher and the Floor-detection window can all read the one board at once).
+        When board_ip is set (two Wi-Fi boards sharing the one port -- e.g. a receiver on each floor) we take
+        only the datagrams from that board, so the two floors' links stay separate."""
+        if self.board_ip and addr and addr[0] != self.board_ip:
             return
-        self.sock = s
-        last_sub = 0.0
+        self.bytes += len(data)
+        self.t_last_byte = now
+        for ln in data.decode('utf-8', 'replace').splitlines():
+            if ln.startswith('CSI_BOARD,'):
+                self._board_line(ln, addr, now)
+            elif ln.startswith('CSI_HONEYPOT,'):
+                self._honeypot_line(ln, addr, now)
+            else:
+                self.feed_line(ln.rstrip('\r'), now)
+        # Announcements can be blocked (Windows Firewall, a router that drops broadcasts) while the
+        # board's data still reaches us: learn the board from its data too.
+        if self.board is None and addr:
+            self.board = {'ip': addr[0], 'port': addr[1], 'ch': 0, 'rssi': 0, 'cfg': 0, 't': now}
+        elif self.board is not None and addr and addr[0] == self.board['ip']:
+            self.board['t'] = now
+
+    def _run_udp(self):
+        """The receiver board joined the home Wi-Fi and streams one CSI line per datagram. Rather than own
+        the UDP port ourselves (which would stop any other part of the app reading the same board), we
+        subscribe to the shared _NMCsiUdpBroker for this port; it binds once and fans each line out to us."""
+        broker = _NMCsiUdpBroker.get(int(self.udp_port))
+        if not broker.subscribe(self):
+            self.error = broker.error or (f'Could not listen on UDP port {self.udp_port}. Another copy of this '
+                                          f'app (or another program) may be using it.')
+            return
         try:
-            while not self.stop_ev.is_set():
-                data = addr = None
-                try:
-                    data, addr = s.recvfrom(8192)
-                except socket.timeout:
-                    pass
-                except OSError:
-                    self.stop_ev.wait(0.05)
-                now = self.clock()
-                if data:
-                    self.bytes += len(data)
-                    self.t_last_byte = now
-                    for ln in data.decode('utf-8', 'replace').splitlines():
-                        if ln.startswith('CSI_BOARD,'):
-                            self._board_line(ln, addr, now)
-                        elif ln.startswith('CSI_HONEYPOT,'):
-                            self._honeypot_line(ln, addr, now)
-                        else:
-                            self.feed_line(ln.rstrip('\r'), now)
-                    # Announcements can be blocked (Windows Firewall, a router that drops broadcasts) while the
-                    # board's data still reaches us: learn the board from its data too.
-                    if self.board is None and addr:
-                        self.board = {'ip': addr[0], 'port': addr[1], 'ch': 0, 'rssi': 0, 'cfg': 0, 't': now}
-                    elif self.board is not None and addr and addr[0] == self.board['ip']:
-                        self.board['t'] = now
-                if now - last_sub >= 2.0:
-                    last_sub = now
-                    # Ask for the stream two ways: straight to the board once we know it, and by broadcast to the
-                    # whole network (the board answers whoever asks), so one blocked direction doesn't stop it.
-                    targets = []
-                    if self.board:
-                        targets.append((self.board['ip'], self.board['port']))
-                    targets += self.discover if self.discover is not None else [('255.255.255.255', int(self.udp_port))]
-                    for tgt in targets:
-                        try:
-                            s.sendto(b'CSI_SUBSCRIBE', tgt)
-                        except OSError:
-                            pass
-        except Exception as ex:
-            self.error = str(ex)
+            while not self.stop_ev.is_set():      # the broker thread feeds us via _udp_consume; just idle here
+                self.stop_ev.wait(0.25)
         finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-            self.sock = None
+            broker.unsubscribe(self)
 
     def _run_serial(self):
         ser = None
@@ -11538,6 +11637,181 @@ class _NMPointWalker:
         self.img = img                                      # keep a reference, or Tk drops the picture
         self.frames += 1
         self.last_ms = (_tm.time() - t0) * 1000.0
+
+
+class _NMFloorDetector:
+    """Two CSI receivers (one per floor), one shared transmitter, used to tell WHICH floor moved.
+
+    A single transmitter->receiver link can only say "something moved on the path between them": it
+    cannot localise, because a body on either floor perturbs that one link. With a receiver on each
+    floor we get two links whose disturbance SPLITS differently with where the motion is -- the
+    upstairs link reacts more to upstairs motion, the downstairs link more to downstairs motion.
+    Every house's split is different (walls, furniture, where the boards sit), so we LEARN it once by
+    calibration (walk each floor for a bit), then live we compare the two links' movement scores and
+    attribute motion to the better-matching floor.
+
+    This is pure logic. The window creates the two _NMCsiSource readers (serial upstairs, Wi-Fi
+    downstairs), points them at an['up'] / an['down'], and calls tick() on a timer. When a floor
+    starts moving it calls on_floor(floor, detail) -- the window turns that into a phone alert.
+    """
+    FLOORS = ('up', 'down')
+
+    def __init__(self, clock=None, on_floor=None):
+        self.clock = clock or time.time
+        self.on_floor = on_floor                  # on_floor(floor, detail) when a floor starts moving (debounced)
+        self.an = {'up': _NMCsiAnalyzer(), 'down': _NMCsiAnalyzer()}
+        self.cal = {'up': None, 'down': None}      # learned {'ratio','mag','n'} per floor (upstairs-share of the split)
+        self._learn = None                         # active floor walk: {'floor','t0','dur','vals':[(s_up,s_down)]}
+        self.live = {'up': {}, 'down': {}}         # last per-link analyzer snapshot
+        self.verdict = {'floor': None, 'label': 'starting…', 'moving': False, 'ratio': None,
+                        'conf': 0.0, 's_up': 0.0, 's_down': 0.0, 't': 0.0}
+        self._hold_floor = None                    # hysteresis: the currently attributed floor
+        self._hold_since = 0.0
+        self._last_alert_floor = None
+        self._last_alert_t = -1e9
+        self.alert_dwell = 1.0                     # a floor must stay attributed this long before it alerts
+        self.alert_gap = 300.0                     # and at most one alert per floor per this many seconds
+        self.both_frac = 0.25                      # live split this close to BOTH learned splits -> "both floors"
+
+    # ── calibration ───────────────────────────────────────────────────────
+    def start_empty(self, dur=20.0):
+        """Phase 1 (house empty): learn each link's quiet baseline. Scores are meaningless until this is done."""
+        t = self.clock()
+        for f in self.FLOORS:
+            self.an[f].start_calibration(t, dur)
+
+    def empty_progress(self):
+        t = self.clock()
+        if self.empty_done():
+            return 1.0
+        ps = [self.an[f].cal_progress(t) for f in self.FLOORS]
+        ps = [p for p in ps if p is not None]
+        return min(ps) if ps else 0.0
+
+    def empty_done(self):
+        return all(self.an[f].empty is not None for f in self.FLOORS)
+
+    def start_floor(self, floor, dur=25.0):
+        """Phase 2/3: capture the two links' split while someone walks `floor` ('up' or 'down')."""
+        if floor not in self.FLOORS:
+            raise ValueError('floor must be "up" or "down"')
+        self._learn = {'floor': floor, 't0': self.clock(), 'dur': dur, 'vals': []}
+
+    def floor_progress(self):
+        if not self._learn:
+            return None
+        return max(0.0, min(1.0, (self.clock() - self._learn['t0']) / self._learn['dur']))
+
+    def _finish_floor(self):
+        c, self._learn = self._learn, None
+        vals = [(u, d) for (u, d) in c['vals'] if (u + d) > 1e-6]
+        if len(vals) < 5:
+            return False, 'Not enough movement captured — walk around more on that floor and retry.'
+        ratios = sorted(u / (u + d) for (u, d) in vals)
+        mags = sorted(u + d for (u, d) in vals)
+        self.cal[c['floor']] = {'ratio': ratios[len(ratios) // 2], 'mag': mags[len(mags) // 2], 'n': len(vals)}
+        return True, 'Learned %s floor: upstairs-share %.2f over %d samples.' % (
+            c['floor'], self.cal[c['floor']]['ratio'], len(vals))
+
+    def calibrated(self):
+        return self.cal['up'] is not None and self.cal['down'] is not None
+
+    def clear_calibration(self):
+        self._learn = None
+        self.cal = {'up': None, 'down': None}
+        for f in self.FLOORS:
+            self.an[f].clear_calibration()
+
+    # ── per tick ──────────────────────────────────────────────────────────
+    def _link_score(self, snap):
+        """One non-negative movement number for a link (the analyzer's own score; 0 when quiet/absent)."""
+        if not snap:
+            return 0.0
+        try:
+            return max(0.0, float(snap.get('score') or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def tick(self):
+        t = self.clock()
+        snaps = {}
+        for f in self.FLOORS:
+            try:
+                snaps[f] = self.an[f].snapshot(t) or {}
+            except Exception:
+                snaps[f] = {}
+            self.live[f] = snaps[f]
+        s_up, s_down = self._link_score(snaps['up']), self._link_score(snaps['down'])
+        up_move, down_move = bool(snaps['up'].get('moving')), bool(snaps['down'].get('moving'))
+
+        # while a floor-walk capture is running, sample the split whenever there is any movement
+        if self._learn is not None:
+            if up_move or down_move or (s_up + s_down) > 0:
+                self._learn['vals'].append((s_up, s_down))
+            if (self.floor_progress() or 0.0) >= 1.0:
+                self._finish_floor()
+
+        total = s_up + s_down
+        ratio = (s_up / total) if total > 1e-6 else None
+        floor, label, conf = None, 'quiet', 0.0
+
+        if up_move or down_move:
+            if self.calibrated() and ratio is not None:
+                ru, rd = self.cal['up']['ratio'], self.cal['down']['ratio']
+                du, dd = abs(ratio - ru), abs(ratio - rd)
+                sep = abs(ru - rd) + 1e-6
+                if du <= dd:
+                    floor, label, conf = 'up', 'upstairs', max(0.0, min(1.0, (dd - du) / sep))
+                else:
+                    floor, label, conf = 'down', 'downstairs', max(0.0, min(1.0, (du - dd) / sep))
+                # live split almost equally close to BOTH learned splits, and both links active -> both floors
+                if up_move and down_move and abs(du - dd) < self.both_frac * sep:
+                    floor, label, conf = 'both', 'both floors', 0.3
+            else:
+                # not calibrated yet: fall back to raw dominance so it is still useful
+                if up_move and down_move:
+                    if ratio is not None and abs(ratio - 0.5) < 0.15:
+                        floor, label = 'both', 'both floors (uncalibrated)'
+                    else:
+                        floor = 'up' if s_up >= s_down else 'down'
+                        label = ('upstairs' if floor == 'up' else 'downstairs') + ' (uncalibrated)'
+                elif up_move:
+                    floor, label = 'up', 'upstairs (uncalibrated)'
+                else:
+                    floor, label = 'down', 'downstairs (uncalibrated)'
+
+        moving = floor is not None
+        if floor != self._hold_floor:
+            self._hold_floor, self._hold_since = floor, t
+        if moving and (t - self._hold_since) >= self.alert_dwell:
+            if floor != self._last_alert_floor or (t - self._last_alert_t) >= self.alert_gap:
+                self._last_alert_floor, self._last_alert_t = floor, t
+                if self.on_floor is not None:
+                    try:
+                        self.on_floor(floor, self._alert_detail(floor, s_up, s_down))
+                    except Exception:
+                        _exc_debug('floor on_floor')
+
+        self.verdict = {'floor': floor, 'label': label, 'moving': moving, 'ratio': ratio, 'conf': conf,
+                        's_up': s_up, 's_down': s_down, 't': t, 'up_move': up_move, 'down_move': down_move}
+        return self.verdict
+
+    def _alert_detail(self, floor, s_up, s_down):
+        where = {'up': 'upstairs', 'down': 'downstairs', 'both': 'both floors'}.get(floor, 'a floor')
+        return 'Movement %s (up %.0f / down %.0f)' % (where, s_up, s_down)
+
+    def snapshot(self):
+        return {'verdict': dict(self.verdict),
+                'calibrated': self.calibrated(),
+                'empty_done': self.empty_done(),
+                'cal': {f: (dict(self.cal[f]) if self.cal[f] else None) for f in self.FLOORS},
+                'learn': ({'floor': self._learn['floor'], 'progress': self.floor_progress()}
+                          if self._learn else None),
+                'live': {f: {'score': self._link_score(self.live.get(f)),
+                             'moving': bool((self.live.get(f) or {}).get('moving')),
+                             'rate': (self.live.get(f) or {}).get('rate'),
+                             'rssi': (self.live.get(f) or {}).get('rssi'),
+                             'frames': (self.live.get(f) or {}).get('frames')} for f in self.FLOORS}}
 
 
 def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
@@ -12749,6 +13023,639 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
 
 
 # ── Outage log window ────────────────────────────────────────────────────────
+
+def _nm_csi_discover_boards(port=None, secs=2.5):
+    """Briefly listen on the shared CSI UDP port (through the broker, so it does not disturb anything already
+    reading the board) and return the IP addresses of the boards currently streaming, busiest first. Used by
+    the Floor window to offer each Wi-Fi board by address when there is a receiver on each floor."""
+    port = int(port or _NM_CSI_UDP_PORT)
+    seen = {}
+
+    class _Collector:
+        def __init__(self):
+            self.clock = time.time
+            self.board = None
+            self.discover = None
+
+        def _udp_consume(self, data, addr, now):
+            if addr and (b'CSI_DATA,' in data or b'CSI_BOARD,' in data):
+                seen[addr[0]] = seen.get(addr[0], 0) + 1
+
+    c = _Collector()
+    broker = _NMCsiUdpBroker.get(port)
+    if not broker.subscribe(c):
+        return []
+    try:
+        time.sleep(secs)
+    finally:
+        broker.unsubscribe(c)
+    return [ip for ip, _n in sorted(seen.items(), key=lambda kv: -kv[1])]
+
+
+# ── Floor Detection: side-by-side floor plans with a rough "where it was disturbed" plot ──────────────────
+_NM_FLOOR_IMG_CACHE = {}
+
+
+def _nm_floor_ids(plan):
+    """Survey floor numbers for the two detector floors. Defaults Downstairs=0 / Upstairs=1 and follows
+    floors the user renamed ('Ground', 'First' ...)."""
+    ids = {'down': 0, 'up': 1}
+    try:
+        for k, v in (plan.get('floors') or {}).items():
+            n = str(v).lower()
+            try:
+                ki = int(float(k))
+            except (TypeError, ValueError):
+                continue
+            if 'down' in n or 'ground' in n:
+                ids['down'] = ki
+            elif 'up' in n or 'first' in n:
+                ids['up'] = ki
+    except Exception:
+        _exc_debug('_nm_floor_ids')
+    return ids
+
+
+def _nm_floor_plan_lines(ip):
+    """Floor-plan picture -> (dark line-art RGBA, width/height). Cached; big pictures are shrunk."""
+    c = _NM_FLOOR_IMG_CACHE.get(ip)
+    if c is None:
+        from PIL import Image
+        im = Image.open(ip).convert('RGB')
+        iw, ih = im.size
+        if iw > 1400:
+            im = im.resize((1400, max(1, int(round(ih * 1400.0 / iw)))), Image.LANCZOS)
+        lum = np.asarray(im.convert('L'), float) / 255.0
+        light_paper = float(np.median(lum)) >= 0.5
+        ink = np.clip(((1.0 - lum) if light_paper else lum) * 1.7, 0.0, 1.0)
+        ink[ink < 0.12] = 0.0
+        fg = np.array([8, 14, 32] if light_paper else [236, 244, 255], 'uint8')
+        lines = np.zeros(ink.shape + (4,), 'uint8')
+        lines[..., :3] = fg
+        lines[..., 3] = (ink * 255).astype('uint8')
+        c = {'lines': lines, 'ratio': im.size[0] / float(im.size[1]), 'paper': light_paper}
+        _NM_FLOOR_IMG_CACHE[ip] = c
+    return c
+
+
+def _nm_floor_paint(ax, D, plan, samples, fid, name):
+    """Paint one floor's signal heat map (the survey's picture, field and router) onto *ax*.
+    Returns {'W','H'} metres so the live overlay can use the same coordinates."""
+    from matplotlib.colors import Normalize
+    cmap = _nm_vivid_cmap(True)
+    norm = Normalize(-90.0, -35.0)
+    fk = str(fid)
+    sz = (plan.get('sizes') or {}).get(fk) or [plan.get('w', 12), plan.get('h', 8)]
+    try:
+        W = max(2.0, float(sz[0] or 12))
+        Hh = max(2.0, float(sz[1] or 8))
+    except (TypeError, ValueError):
+        W, Hh = 12.0, 8.0
+    lay = None
+    ip = (plan.get('images') or {}).get(fk)
+    if ip and os.path.isfile(ip):
+        try:
+            lay = _nm_floor_plan_lines(ip)
+            Hh = max(2.0, min(500.0, W / lay['ratio']))
+        except Exception:
+            _exc_debug('floor plan image')
+            lay = None
+    ax.set_facecolor('#ffffff' if lay is not None else D['panel'])
+    for sp in ax.spines.values():
+        sp.set_color(D['border'])
+    ax.tick_params(colors=D['text2'], labelsize=6, length=2)
+    pts = []
+    for s_ in samples or []:
+        try:
+            if int(float(s_.get('z', 0))) == int(fid) and s_.get('link') is not None \
+                    and s_.get('x') is not None and s_.get('y') is not None:
+                pts.append(s_)
+        except (TypeError, ValueError):
+            continue
+    if len(pts) >= 3:
+        xs = np.array([q['x'] for q in pts], float)
+        ys = np.array([q['y'] for q in pts], float)
+        vs = np.array([q['link'] for q in pts], float)
+        gx, gy, fld, cov = _nm_wifi_field(xs, ys, vs, W, Hh, nx=64)
+        rgba = np.asarray(cmap(norm(fld)), float)
+        if lay is not None:
+            rgba[..., 3] = np.clip(cov, 0, 1) * (0.35 + 0.65 * 0.55)
+        else:
+            rgba[..., 3] = np.clip(cov * 1.6, 0, 1) ** 0.8
+        ax.imshow(rgba, extent=(0, W, 0, Hh), origin='lower', aspect='equal', interpolation='bicubic', zorder=2)
+    if lay is not None:
+        ax.imshow(lay['lines'], extent=(0, W, 0, Hh), origin='upper', aspect='equal', zorder=3.3,
+                  interpolation='antialiased')
+    for q in pts:
+        ax.scatter([q['x']], [q['y']], s=14, color=cmap(norm(q['link'])), edgecolors='white',
+                   linewidths=0.5, zorder=5)
+    rt = (plan.get('routers') or {}).get(fk)
+    if rt:
+        ax.scatter([rt[0]], [rt[1]], s=110, marker='^', color=D['accent'], edgecolors='white',
+                   linewidths=1.0, zorder=8)
+        ax.text(rt[0], rt[1] + 0.35, 'router', color='#0b1b2b' if lay is not None else 'white',
+                fontsize=7, ha='center', zorder=8)
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, Hh)
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlabel('metres', color=D['text2'], fontsize=7)
+    if lay is None and len(pts) < 3:
+        ax.text(W / 2.0, Hh / 2.0, 'no floor plan or survey yet\n(Wi-Fi Signal \u2192 Signal map)', color=D['text2'],
+                fontsize=8, ha='center', va='center', zorder=4)
+    return {'W': W, 'H': Hh, 'n': len(pts), 'img': lay is not None}
+
+
+def _nm_floor_overlay(ax, W, Hh, tx, rx, moving, inten):
+    """Live layer for one floor: the Tx-Rx link, and when it is disturbed a red zone along it. A single
+    link cannot say WHERE along its path someone is, so the zone is the whole corridor between the boards;
+    with no board positions set the whole floor is washed red instead. Returns the artists to remove next time."""
+    import math
+    from matplotlib.patches import Ellipse, Rectangle
+    RED = '#ff3b30'
+    arts = []
+    inten = max(0.25, min(1.0, float(inten or 0.0))) if moving else 0.0
+    if tx and rx:
+        (x0, y0), (x1, y1) = tx, rx
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        L = max(math.hypot(x1 - x0, y1 - y0), 0.6)
+        ang = math.degrees(math.atan2(y1 - y0, x1 - x0))
+        arts += ax.plot([x0, x1], [y0, y1], color=RED if moving else '#38b8f0', lw=1.4,
+                        ls='-' if moving else '--', alpha=0.9, zorder=9)
+        if moving:
+            for k, (wf, al) in enumerate(((1.0, 0.24), (0.66, 0.32), (0.34, 0.42))):
+                e = Ellipse((cx, cy), L + 1.2 * wf + 0.6, max(1.2, 0.55 * L) * wf + 0.5, angle=ang,
+                            fc=RED, ec='none', alpha=al * (0.6 + 0.4 * inten), zorder=6 + k * 0.1)
+                ax.add_patch(e)
+                arts.append(e)
+        arts.append(ax.scatter([x0], [y0], s=70, marker='s', color='#ffd23f', edgecolors='black', zorder=10))
+        arts.append(ax.text(x0, y0 + 0.4, 'Tx', color='#ffd23f', fontsize=7, ha='center', zorder=10,
+                            fontweight='bold'))
+        arts.append(ax.scatter([x1], [y1], s=70, marker='o', color='#38f0a8', edgecolors='black', zorder=10))
+        arts.append(ax.text(x1, y1 + 0.4, 'Rx', color='#38f0a8', fontsize=7, ha='center', zorder=10,
+                            fontweight='bold'))
+    elif moving:
+        r = Rectangle((0, 0), W, Hh, fc=RED, ec='none', alpha=0.10 + 0.22 * inten, zorder=6)
+        ax.add_patch(r)
+        arts.append(r)
+        arts.append(ax.text(W / 2.0, Hh / 2.0, 'movement on this floor\n(set the Tx / Rx spots to narrow it down)',
+                            color='white', fontsize=8, ha='center', va='center', zorder=11,
+                            bbox=dict(boxstyle='round,pad=0.3', fc=RED, ec='none', alpha=0.85)))
+    return arts
+
+
+
+def _nm_open_floor(monitor, parent=None):
+    """Floor Detection window: two CSI receivers (one per floor) share one transmitter; after a short
+    calibration the app tells which floor movement is on. Each receiver can be on USB (a COM port) or on
+    Wi-Fi (picked by its board IP, so two Wi-Fi boards stay separate). See _NMFloorDetector."""
+    import tkinter as tk
+    from tkinter import ttk as _ttk
+    D = _nm_wifi_palette(monitor)
+    W = _nm_wifi_get_watcher(monitor, create=True) if monitor is not None else None
+    clock = time.time
+    win = tk.Toplevel(parent)
+    win.title('Floor Detection — which floor moved')
+    win.configure(bg=D['bg'])
+    win.geometry('1080x960')
+    win.minsize(900, 760)
+
+    det = _NMFloorDetector(clock=clock, on_floor=lambda floor, detail: _on_floor(floor, detail))
+    S = {'src': {'up': None, 'down': None}, 'job': None, 'dead': False, 'connected': False, 'paused': False}
+    alerts_on = tk.BooleanVar(value=True)
+
+    def _on_floor(floor, detail):
+        # raise one debounced phone alert per floor (the detector already rate-limits by alert_gap)
+        if not alerts_on.get() or W is None:
+            return
+        try:
+            W.event('FLOORMOVE', detail, alert=True, sev='warn', key='FLOOR:' + floor, debounce=det.alert_gap)
+        except Exception:
+            _exc_debug('floor alert')
+
+    ports = []
+    try:
+        ports = _nm_csi_list_ports(with_names=True)
+    except Exception:
+        _exc_debug('floor list ports')
+    wifi_tok = 'wifi:%d' % _NM_CSI_UDP_PORT
+    port_vals = [wifi_tok] + [p for (p, _d, _e) in ports]
+    esp = [p for (p, _d, e) in ports if e]
+    prefs = _nm_wifi_load('floor_prefs.json', {}, None)        # remember the receiver picks across opens
+    if not isinstance(prefs, dict):
+        prefs = {}
+    up_default = prefs.get('up') or (esp[0] if esp else (ports[0][0] if ports else wifi_tok))
+    down_default = prefs.get('down') or wifi_tok
+    for v in (up_default, down_default):          # a remembered port that is not plugged in right now stays selectable
+        if v and v not in port_vals:
+            port_vals.append(v)
+
+    def _save_prefs(*_a):
+        try:
+            _nm_wifi_save('floor_prefs.json', {'up': up_var.get(), 'down': down_var.get()}, None)
+        except Exception:
+            _exc_debug('floor prefs save')
+
+    tk.Label(win, text='Which floor moved', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 15, 'bold')).pack(
+        anchor='w', padx=16, pady=(14, 0))
+    tk.Label(win, text='One transmitter, a receiver on each floor. Connect both, calibrate once, then the '
+             'app compares the two links to place movement.', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9),
+             wraplength=720, justify='left').pack(anchor='w', padx=16, pady=(2, 10))
+
+    # ── source pickers ──────────────────────────────────────────────────────
+    src_f = tk.Frame(win, bg=D['bg']); src_f.pack(fill='x', padx=16)
+    tk.Label(src_f, text='Upstairs receiver', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).grid(row=0, column=0, sticky='w')
+    up_var = tk.StringVar(value=up_default)
+    up_cb = _ttk.Combobox(src_f, textvariable=up_var, values=port_vals, width=30, state='readonly')
+    up_cb.grid(row=0, column=1, padx=8, pady=3)
+    up_cb.set(up_default)                          # force the readonly box to actually show the pick (no blank on open)
+    up_cb.bind('<<ComboboxSelected>>', _save_prefs)
+    tk.Label(src_f, text='(S3 board on USB)', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8)).grid(row=0, column=2, sticky='w')
+    tk.Label(src_f, text='Downstairs receiver', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).grid(row=1, column=0, sticky='w')
+    down_var = tk.StringVar(value=down_default)
+    down_cb = _ttk.Combobox(src_f, textvariable=down_var, values=port_vals, width=30, state='readonly')
+    down_cb.grid(row=1, column=1, padx=8, pady=3)
+    down_cb.set(down_default)
+    down_cb.bind('<<ComboboxSelected>>', _save_prefs)
+    tk.Label(src_f, text='(classic board over Wi-Fi)', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8)).grid(row=1, column=2, sticky='w')
+
+    conn_btn = tk.Button(src_f, text='Connect', font=(_NM_MONO, 10, 'bold'), bg=D['accent'], fg='#04121f',
+                         relief='flat', bd=0, padx=16, command=lambda: _toggle())
+    conn_btn.grid(row=0, column=3, rowspan=2, padx=(14, 0))
+
+    def _apply_boards(ips):
+        if not ips:
+            _set_status('No Wi-Fi boards are streaming right now — make sure each board is powered and on Wi-Fi.')
+            return
+        vals = list(up_cb['values'])
+        for ip in ips:
+            e = 'wifi %s' % ip
+            if e not in vals:
+                vals.append(e)
+        up_cb['values'] = vals
+        down_cb['values'] = vals
+        _set_status('Found %d Wi-Fi board(s): %s. Pick one for each floor (a 192.168.x.x each).'
+                    % (len(ips), ', '.join(ips)))
+
+    def _find_boards():
+        import threading
+        _set_status('Looking for Wi-Fi boards…')
+        def work():
+            try:
+                ips = _nm_csi_discover_boards(_NM_CSI_UDP_PORT, 2.5)
+            except Exception:
+                ips = []
+                _exc_debug('floor discover')
+            try:
+                win.after(0, lambda: _apply_boards(ips))
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True, name='nm-floor-discover').start()
+
+    find_btn = tk.Button(src_f, text='Find Wi-Fi boards', font=(_NM_MONO, 9), bg=D['panel'], fg=D['text'],
+                         relief='flat', bd=0, padx=10, command=_find_boards)
+    find_btn.grid(row=2, column=0, columnspan=2, sticky='w', pady=(4, 2))
+    tk.Label(src_f, text='(use this when a floor’s receiver is on Wi-Fi, not USB)', bg=D['bg'],
+             fg=D['text2'], font=(_NM_MONO, 8)).grid(row=2, column=2, sticky='w')
+
+    # ── live verdict ──────────────────────────────────────────────────────────
+    chip = tk.Label(win, text='NOT CONNECTED', bg=D['chip'], fg=D['text2'], font=(_NM_MONO, 12, 'bold'),
+                    pady=5)
+    chip.pack(fill='x', padx=16, pady=(10, 6))
+
+    # ── the two floors, side by side: signal heat map + where the disturbance is ─────────────────
+    import matplotlib.figure as _mf
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FCanvas
+    sdir = W.state_dir if W is not None else None
+    FP = {'plan': {}, 'samples': [], 'ids': {'down': 0, 'up': 1}, 'ax': {}, 'dim': {}, 'arts': {},
+          'key': None, 'last_static': 0.0, 'place': None}
+    FLAY = _nm_wifi_load('floor_layout.json', {}, sdir)       # {'up': {'tx': [x, y], 'rx': [x, y]}, 'down': {...}}
+    if not isinstance(FLAY, dict):
+        FLAY = {}
+    fig_f = _mf.Figure(figsize=(10, 4.0), facecolor=D['bg'])
+    cv_f = _FCanvas(fig_f, master=win)
+    cv_f.get_tk_widget().pack(fill='both', expand=True, padx=16, pady=(0, 4))
+
+    def _fp_name(fl):
+        try:
+            nm = (FP['plan'].get('floors') or {}).get(str(FP['ids'][fl]))
+        except Exception:
+            nm = None
+        return str(nm or ('Downstairs' if fl == 'down' else 'Upstairs'))
+
+    def _fp_static():
+        try:
+            sv = _nm_wifi_load('wifi_survey.json', {}, sdir)
+            if not isinstance(sv, dict):
+                sv = {}
+            pl = sv.get('plan') or {}
+            FP['plan'] = pl if isinstance(pl, dict) else {}
+            FP['samples'] = [q for q in (sv.get('samples') or []) if isinstance(q, dict)]
+            FP['ids'] = _nm_floor_ids(FP['plan'])
+            fig_f.clear()
+            FP['ax'], FP['dim'], FP['arts'], FP['key'] = {}, {}, {}, None
+            axd = fig_f.add_subplot(1, 2, 1)
+            axu = fig_f.add_subplot(1, 2, 2)
+            fig_f.subplots_adjust(left=0.045, right=0.985, top=0.88, bottom=0.12, wspace=0.12)
+            for fl, ax_ in (('down', axd), ('up', axu)):
+                FP['ax'][fl] = ax_
+                FP['dim'][fl] = _nm_floor_paint(ax_, D, FP['plan'], FP['samples'], FP['ids'][fl], _fp_name(fl))
+            FP['last_static'] = time.time()
+            _fp_dyn(force=True)
+        except Exception:
+            _exc('floor static draw')
+
+    def _fp_dyn(force=False):
+        try:
+            snap = det.snapshot()
+            live = snap['live']
+            vf = snap['verdict'].get('floor') if S['connected'] else None
+            mv = {fl: (vf == fl or vf == 'both') for fl in ('down', 'up')}
+            sc = {fl: float((live.get(fl) or {}).get('score') or 0.0) for fl in ('down', 'up')}
+            key = (mv['down'], mv['up'], int(min(100.0, sc['down']) / 10), int(min(100.0, sc['up']) / 10),
+                   S['connected'], json.dumps(FLAY, sort_keys=True))
+            if not force and key == FP['key']:
+                return
+            FP['key'] = key
+            for fl in ('down', 'up'):
+                ax_ = FP['ax'].get(fl)
+                if ax_ is None:
+                    continue
+                for a in FP['arts'].get(fl, []):
+                    try:
+                        a.remove()
+                    except Exception:
+                        pass
+                dm = FP['dim'][fl]
+                lay = FLAY.get(fl) or {}
+                FP['arts'][fl] = _nm_floor_overlay(ax_, dm['W'], dm['H'], lay.get('tx'), lay.get('rx'),
+                                                   mv[fl], sc[fl] / 60.0)
+                for sp in ax_.spines.values():
+                    sp.set_color('#ff3b30' if mv[fl] else D['border'])
+                    sp.set_linewidth(3.2 if mv[fl] else 0.8)
+                tail = '  \u2014  MOVEMENT' if mv[fl] else ('  \u2014  quiet' if S['connected'] else '')
+                ax_.set_title(_fp_name(fl).upper() + tail, loc='left', fontsize=10, fontweight='bold',
+                              color='#ff6b5e' if mv[fl] else D['text'])
+            cv_f.draw_idle()
+        except Exception:
+            _exc('floor dynamic draw')
+
+    pl_f = tk.Frame(win, bg=D['bg'])
+    pl_f.pack(fill='x', padx=16, pady=(0, 2))
+    tk.Label(pl_f, text='Mark the boards on the plans:', bg=D['bg'], fg=D['text2'],
+             font=(_NM_MONO, 8)).pack(side='left', padx=(0, 6))
+
+    pl_msg = tk.Label(win, text='', bg=D['bg'], fg='#ffd23f', font=(_NM_MONO, 9, 'bold'), anchor='w',
+                      justify='left', wraplength=980)
+    pl_msg.pack(fill='x', padx=16, pady=(0, 2))
+    pl_btns = {}
+
+    def _fp_say(msg):
+        try:
+            pl_msg.configure(text=msg)
+        except Exception:
+            pass
+        _set_status(msg)
+
+    def _fp_unarm():
+        FP['place'] = None
+        for b_ in pl_btns.values():
+            b_.configure(bg=D['panel'], fg=D['text'])
+        try:
+            cv_f.get_tk_widget().configure(cursor='')
+        except Exception:
+            pass
+
+    def _arm(fl, kind):
+        _fp_unarm()
+        FP['place'] = (fl, kind)
+        pl_btns[(fl, kind)].configure(bg='#ffd23f', fg='#04121f')
+        try:
+            cv_f.get_tk_widget().configure(cursor='crosshair')
+        except Exception:
+            pass
+        _fp_say('\u25b6 Now click the %s plan where the %s board sits.' % (
+            'DOWNSTAIRS' if fl == 'down' else 'UPSTAIRS', 'transmitter (Tx)' if kind == 'tx' else 'receiver (Rx)'))
+
+    for _fl, _kd, _tx in (('down', 'tx', 'Downstairs Tx'), ('down', 'rx', 'Downstairs Rx'),
+                          ('up', 'tx', 'Upstairs Tx'), ('up', 'rx', 'Upstairs Rx')):
+        pl_btns[(_fl, _kd)] = tk.Button(pl_f, text=_tx, font=(_NM_MONO, 8), bg=D['panel'], fg=D['text'],
+                                        relief='flat', bd=0, padx=7, pady=2,
+                                        command=lambda a=_fl, b=_kd: _arm(a, b))
+        pl_btns[(_fl, _kd)].pack(side='left', padx=2)
+
+    def _fp_clear_marks():
+        FLAY.clear()
+        _nm_wifi_save('floor_layout.json', FLAY, sdir)
+        _fp_unarm()
+        _fp_dyn(force=True)
+        _fp_say('Board marks cleared.')
+    tk.Button(pl_f, text='Clear marks', font=(_NM_MONO, 8), bg=D['panel'], fg=D['text2'], relief='flat', bd=0,
+              padx=7, pady=2, command=_fp_clear_marks).pack(side='left', padx=(8, 2))
+    tk.Button(pl_f, text='Reload plans', font=(_NM_MONO, 8), bg=D['panel'], fg=D['text2'], relief='flat', bd=0,
+              padx=7, pady=2, command=_fp_static).pack(side='right')
+
+    def _fp_click(ev):
+        arm = FP['place']
+        if not arm or ev.inaxes is None or ev.xdata is None:
+            return
+        fl, kind = arm
+        if ev.inaxes is not FP['ax'].get(fl):
+            _fp_say('That is the wrong plan \u2014 click on the %s one.' % ('DOWNSTAIRS' if fl == 'down' else 'UPSTAIRS'))
+            return
+        FLAY.setdefault(fl, {})[kind] = [round(float(ev.xdata), 2), round(float(ev.ydata), 2)]
+        _nm_wifi_save('floor_layout.json', FLAY, sdir)
+        _fp_unarm()
+        _fp_dyn(force=True)
+        _fp_say('Saved the %s %s spot. The red zone will run along the line between that floor\u2019s Tx and Rx.' % (
+            'downstairs' if fl == 'down' else 'upstairs', 'Tx' if kind == 'tx' else 'Rx'))
+    fig_f.canvas.mpl_connect('button_press_event', _fp_click)
+    links_f = tk.Frame(win, bg=D['bg']); links_f.pack(fill='x', padx=16)
+    up_lbl = tk.Label(links_f, text='Upstairs link: —', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 10), anchor='w')
+    up_lbl.pack(fill='x')
+    down_lbl = tk.Label(links_f, text='Downstairs link: —', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 10), anchor='w')
+    down_lbl.pack(fill='x')
+
+    # ── calibration ─────────────────────────────────────────────────────────
+    cal_f = tk.Frame(win, bg=D['well']); cal_f.pack(fill='x', padx=16, pady=14)
+    tk.Label(cal_f, text='Calibration', bg=D['well'], fg=D['text'], font=(_NM_MONO, 11, 'bold')).pack(anchor='w', padx=10, pady=(8, 0))
+    cal_status = tk.Label(cal_f, text='Connect both receivers to begin.', bg=D['well'], fg=D['text2'],
+                          font=(_NM_MONO, 9), wraplength=700, justify='left')
+    cal_status.pack(anchor='w', padx=10, pady=(2, 6))
+    cal_prog = _ttk.Progressbar(cal_f, maximum=1.0, length=700, mode='determinate')
+    cal_prog.pack(padx=10, pady=(0, 8))
+    cal_btns = tk.Frame(cal_f, bg=D['well']); cal_btns.pack(anchor='w', padx=10, pady=(0, 10))
+
+    def _mkbtn(parent_, text, cmd):
+        return tk.Button(parent_, text=text, font=(_NM_MONO, 9, 'bold'), bg=D['panel'], fg=D['text'],
+                         relief='flat', bd=0, padx=10, pady=4, activebackground=D['chip'], command=cmd)
+    b_empty = _mkbtn(cal_btns, '1 · Learn empty room', lambda: _cal_empty())
+    b_empty.pack(side='left', padx=(0, 6))
+    b_up = _mkbtn(cal_btns, '2 · Walk upstairs', lambda: _cal_floor('up'))
+    b_up.pack(side='left', padx=6)
+    b_down = _mkbtn(cal_btns, '3 · Walk downstairs', lambda: _cal_floor('down'))
+    b_down.pack(side='left', padx=6)
+    b_clear = _mkbtn(cal_btns, 'Clear', lambda: (det.clear_calibration(), _set_status('Calibration cleared.')))
+    b_clear.pack(side='left', padx=6)
+
+    tk.Checkbutton(win, text='Send a phone alert when a floor moves', variable=alerts_on, bg=D['bg'],
+                   fg=D['text2'], selectcolor=D['bg'], activebackground=D['bg'], activeforeground=D['text'],
+                   font=(_NM_MONO, 9)).pack(anchor='w', padx=16)
+
+    def _set_status(msg):
+        try:
+            cal_status.configure(text=msg)
+        except Exception:
+            pass
+
+    def _wifi_key(sel):
+        """None for a serial/COM pick; the board IP for 'wifi 192.168.1.x'; '*' for a plain 'wifi:4210'
+        (every board on the port, unfiltered)."""
+        s = (sel or '').strip().lower()
+        if not s.startswith('wifi'):
+            return None
+        m = re.search(r'\d{1,3}(?:\.\d{1,3}){3}', sel)
+        return m.group(0) if m else '*'
+
+    def _mk_source(sel, an):
+        sel = (sel or '').strip()
+        if sel.lower().startswith('wifi'):
+            ip = None
+            port = _NM_CSI_UDP_PORT
+            rest = sel[4:].lstrip(' :')                 # after 'wifi': ' 192.168.1.9', ':4210', '192.168.1.9:4210'
+            m = re.match(r'(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?', rest)
+            if m:
+                ip = m.group(1)
+                if m.group(2):
+                    port = int(m.group(2))
+            elif rest.isdigit():
+                port = int(rest)
+            return _NMCsiSource(an, udp_port=port, clock=clock, board_ip=ip)
+        return _NMCsiSource(an, port=sel, baud=_NM_CSI_BAUD, clock=clock)
+
+    def _toggle():
+        if S['connected']:
+            _disconnect(); return
+        u, d = up_var.get().strip(), down_var.get().strip()
+        if not u or not d:
+            _set_status('Pick a receiver for each floor first.'); return
+        if u == d:
+            _set_status('The two floors need different receivers (one is doubled up).'); return
+        ku, kd = _wifi_key(u), _wifi_key(d)
+        if ku is not None and kd is not None and (ku == '*' or kd == '*' or ku == kd):
+            _set_status('With both receivers on Wi-Fi, pick a specific board for each floor — press "Find Wi-Fi '
+                        'boards" and choose a 192.168.x.x for each. A plain "wifi:4210" grabs every board, so '
+                        'the two floors would mix.'); return
+        # The Wi-Fi board is read through the shared _NMCsiUdpBroker, so the Floor window can run at the
+        # same time as "Keep watching" and the CSI tab -- no need to pause the background watcher.
+        try:
+            S['src']['up'] = _mk_source(u, det.an['up'])
+            S['src']['down'] = _mk_source(d, det.an['down'])
+            S['src']['up'].start(); S['src']['down'].start()
+        except Exception as ex:
+            _set_status('Could not connect: %s' % ex)
+            _disconnect(); return
+        S['connected'] = True
+        _save_prefs()                              # remember this working pick for next time
+        conn_btn.configure(text='Disconnect')
+        _set_status('Connected. Step 1: with the house empty and still, press "Learn empty room".')
+
+    def _disconnect():
+        for f in det.FLOORS:
+            if S['src'][f] is not None:
+                try:
+                    S['src'][f].stop()
+                except Exception:
+                    _exc_debug('floor src stop')
+                S['src'][f] = None
+        S['connected'] = False
+        conn_btn.configure(text='Connect')
+
+    def _cal_empty():
+        if not S['connected']:
+            _set_status('Connect both receivers first.'); return
+        det.start_empty(dur=20.0)
+        _set_status('Learning the empty room — keep the house still for 20 s…')
+
+    def _cal_floor(floor):
+        if not det.empty_done():
+            _set_status('Learn the empty room first (step 1).'); return
+        det.start_floor(floor, dur=25.0)
+        _set_status('Now walk around %s for 25 s…' % ('UPSTAIRS' if floor == 'up' else 'DOWNSTAIRS'))
+
+    VCOL = {'up': ('#7a1d12', '#ffd5cf', 'UPSTAIRS'), 'down': ('#7a1d12', '#ffd5cf', 'DOWNSTAIRS'),
+            'both': ('#6b3d00', '#ffe0b0', 'BOTH FLOORS')}
+
+    def _fmt_link(name, L):
+        if not L:
+            return '%s: —' % name
+        rate = L.get('rate'); rssi = L.get('rssi'); sc = L.get('score') or 0.0
+        parts = [name + ':']
+        parts.append('%.0f/s' % rate if rate else 'no data')
+        if rssi is not None:
+            parts.append('%d dBm' % rssi)
+        parts.append('score %.0f' % sc)
+        parts.append('MOVING' if L.get('moving') else 'still')
+        return '  '.join(parts)
+
+    def _tick():
+        if S['dead']:
+            return
+        try:
+            if S['connected']:
+                det.tick()
+            snap = det.snapshot()
+            lv = snap['live']
+            up_lbl.configure(text=_fmt_link('Upstairs link', lv['up']))
+            down_lbl.configure(text=_fmt_link('Downstairs link', lv['down']))
+            # calibration progress / status
+            learn = snap['learn']
+            if learn is not None:
+                cal_prog.configure(value=learn['progress'] or 0.0)
+            elif S['connected'] and not det.empty_done() and det.empty_progress() < 1.0:
+                cal_prog.configure(value=det.empty_progress())
+            else:
+                cal_prog.configure(value=1.0 if snap['calibrated'] else 0.0)
+            if snap['calibrated'] and det._learn is None:
+                cu, cd = snap['cal']['up'], snap['cal']['down']
+                if 'Learned' not in cal_status.cget('text') and 'Calibration cleared' not in cal_status.cget('text'):
+                    _set_status('Calibrated — upstairs split %.2f, downstairs split %.2f. Watching.'
+                                % (cu['ratio'], cd['ratio']))
+            # verdict chip
+            if not S['connected']:
+                chip.configure(text='NOT CONNECTED', bg=D['chip'], fg=D['text2'])
+            else:
+                v = snap['verdict']
+                fl = v['floor']
+                if fl in VCOL:
+                    bg, fg, txt = VCOL[fl]
+                    chip.configure(text=txt, bg=bg, fg=fg)
+                else:
+                    chip.configure(text='QUIET', bg='#12482b', fg='#c8ffe0')
+            if time.time() - FP['last_static'] > 90.0:
+                _fp_static()                                  # pick up new survey samples / plan changes
+            else:
+                _fp_dyn()
+        except Exception:
+            _exc('floor tick')
+        S['job'] = win.after(500, _tick)
+
+    def _on_close():
+        S['dead'] = True
+        if S['job']:
+            try:
+                win.after_cancel(S['job'])
+            except Exception:
+                pass
+        _disconnect()
+        try:
+            win.destroy()
+        except Exception:
+            pass
+    win.protocol('WM_DELETE_WINDOW', _on_close)
+    win.after(150, _fp_static)
+    S['job'] = win.after(500, _tick)
+    return win
+
 
 def _nm_open_outages(monitor):
     """Outage log: when the line dropped, for how long, and uptime %."""
@@ -14318,6 +15225,256 @@ def _nm_scan_devices(db):
     return len(arp)
 
 
+# ── Live device map (Devices tab) ────────────────────────────────────────────
+# Reuses the discovery stack above (ARP table, OUI vendor, device-type guess) to
+# draw an isometric, auto-updating map of what's on the LAN. The pure-data
+# helpers here are GUI-free so they can be unit-tested; the Tk/matplotlib wiring
+# lives in the Devices tab.
+
+_NM_DEVMAP_COL = {              # group -> accent hex (matches the app theme)
+    'infra':    '#38b8f0',
+    'esp':      '#39ff14',
+    'iot':      '#c084fc',
+    'computer': '#ff9f43',
+    'phone':    '#38f0a8',
+    'other':    '#6b8299',
+}
+_NM_DEVMAP_LABEL = {
+    'infra': 'Infrastructure', 'esp': 'NetSentinel / ESP', 'iot': 'Cameras / IoT',
+    'computer': 'Computers', 'phone': 'Phones / mobile', 'other': 'Other',
+}
+_NM_IOT_VENDORS = ('ring', 'amazon', 'google', 'nest', 'philips', 'hue', 'sonos',
+    'wiz', 'eufy', 'anker', 'fantasia', 'hive', 'lifx', 'withings', 'hisense',
+    'tuya', 'sonoff', 'shelly', 'ecobee', 'roku', 'chromecast', 'tp-link')
+_NM_PC_VENDORS = ('hewlett', 'hp ', 'dell', 'lenovo', 'intel', 'micro-star',
+    'msi', 'gigabyte', 'asustek', 'elitegroup', 'ecs', 'wistron', 'wnc',
+    'realtek', 'biostar', 'clevo', 'framework')
+_NM_PHONE_VENDORS = ('apple', 'samsung', 'xiaomi', 'huawei', 'oneplus', 'oppo',
+    'vivo', 'motorola', 'nothing', 'pixel', 'honor')
+
+
+def _nm_mac_is_random(mac):
+    """True if the MAC is locally-administered (a randomised privacy MAC) — the
+    hallmark of a modern phone/tablet that hides its real hardware address."""
+    try:
+        return bool(int((mac or '').split(':')[0], 16) & 0x02)
+    except Exception:
+        return False
+
+
+def _nm_dev_group(vendor, dtype, is_gw, is_self, mac=None):
+    """Bucket a device into one of the map's colour groups (best-effort)."""
+    v = (vendor or '').lower()
+    if is_self:
+        return 'esp'                       # this PC = the NetSentinel host
+    if is_gw:
+        return 'infra'
+    if 'espressif' in v:
+        return 'esp'
+    if dtype == 'router' or any(r in v for r in _NM_ROUTER_VENDORS) or 'arcadyan' in v:
+        return 'infra'
+    if any(k in v for k in _NM_PHONE_VENDORS):
+        return 'phone'
+    if any(k in v for k in _NM_PC_VENDORS) or dtype in ('windows', 'server', 'nas', 'printer'):
+        return 'computer'
+    if any(k in v for k in _NM_IOT_VENDORS) or dtype == 'iot':
+        return 'iot'
+    if mac and _nm_mac_is_random(mac):
+        return 'phone'
+    return 'other'
+
+
+def _nm_dev_snapshot(db, arp=None, gateway=None, myip=None, port_cache=None):
+    """Merge the persisted device table with the live ARP cache into one list of
+    fully-annotated device dicts (name, vendor, type, group, online, timestamps)."""
+    if arp is None:
+        arp = _nm_arp_table()
+    rows = {}
+    if db is not None:
+        try:
+            for d in db.list_devices():
+                rows[d['ip']] = {'ip': d['ip'], 'mac': (d['mac'] or '').lower(),
+                                 'label': d['label'], 'first_seen': d['first_seen'],
+                                 'last_seen': d['last_seen']}
+        except Exception:
+            _exc('_nm_dev_snapshot.db')
+    now = datetime.now().isoformat()
+    for ip, mac in (arp or {}).items():
+        r = rows.setdefault(ip, {'ip': ip, 'mac': mac, 'label': None,
+                                 'first_seen': now, 'last_seen': now})
+        if mac:
+            r['mac'] = mac
+        r['_live'] = True
+    pc = port_cache or {}
+    devs = []
+    for ip, r in rows.items():
+        if not _nm_dev_ip_ok(ip):
+            continue
+        mac = r.get('mac') or ''
+        vendor = _nm_oui_vendor(mac)
+        ports = pc.get(ip)
+        is_gw = (ip == gateway)
+        is_self = (ip == myip)
+        dtype = 'router' if is_gw else _nm_guess_device_type(ports, vendor, '')
+        grp = _nm_dev_group(vendor, dtype, is_gw, is_self, mac)
+        if db is not None:
+            name = _nm_device_name(db, ip, mac)
+        elif vendor:
+            name = f'{vendor} ({ip.split(".")[-1]})'
+        else:
+            name = ip
+        online = bool(r.get('_live')) or (ip in (arp or {}))
+        devs.append({'ip': ip, 'mac': mac, 'vendor': vendor or '—', 'dtype': dtype,
+                     'group': grp, 'name': name, 'label': r.get('label'),
+                     'first_seen': r.get('first_seen'), 'last_seen': r.get('last_seen'),
+                     'online': online, 'ports': ports, 'is_gw': is_gw, 'is_self': is_self})
+    order = {'infra': 0, 'esp': 1, 'iot': 2, 'computer': 3, 'phone': 4, 'other': 5}
+
+    def _ipkey(ip):
+        try:
+            return tuple(int(x) for x in ip.split('.'))
+        except Exception:
+            return (0,)
+    devs.sort(key=lambda d: (order.get(d['group'], 9), _ipkey(d['ip'])))
+    return devs
+
+
+def _nm_dev_ip_ok(ip):
+    """True for a real unicast LAN host. Multicast (224-239), reserved (240+),
+    broadcast (.255), link-local (169.254) and 0.x are ARP/neighbour noise, not devices."""
+    try:
+        a, b, c, d = (int(x) for x in ip.split('.'))
+    except Exception:
+        return False
+    if a == 0 or a >= 224 or d == 255 or d == 0:
+        return False
+    if a == 169 and b == 254:
+        return False
+    if a == 127:
+        return False
+    return True
+
+
+def _nm_dev_layout(devs, rows=7):
+    """Assign isometric ground coords: infra across the top, then each group as a
+    compact block of columns (max *rows* per column) side by side. Mutates and
+    returns *devs*."""
+    import math
+    gy0, step, gap = 4.6, 1.1, 1.3
+    x = 1.1
+    for g in ('esp', 'iot', 'computer', 'phone', 'other'):
+        items = [d for d in devs if d['group'] == g]
+        if not items:
+            continue
+        for i, d in enumerate(items):
+            d['gx'] = x + (i // rows) * step
+            d['gy'] = gy0 + (i % rows) * step
+        x += math.ceil(len(items) / rows) * step + gap
+    width = max(x - gap, 6.0)
+    infra = [d for d in devs if d['group'] == 'infra']
+    n = max(len(infra) - 1, 1)
+    for i, d in enumerate(infra):
+        d['gx'] = 1.1 + (width - 1.1) * (i / n) if len(infra) > 1 else width / 2
+        d['gy'] = 2.2 + (0.25 if i % 2 else 0.0)
+        if d['is_gw']:
+            d['gx'], d['gy'] = max(width / 2, 3.0), 1.4
+    return devs
+
+
+def _nm_dev_iso_draw(fig, devs, sel_ip=None, gateway_ip=None, hidden=0):
+    """Render the isometric device map onto *fig*. Returns {ip: (x, y)} of each
+    block's top-centre in axes-data coords, for click hit-testing."""
+    from matplotlib.patches import Polygon, Rectangle
+    BG, INK, DIM = '#06101e', '#cfe3f5', '#6b8299'
+    fig.clear()
+    fig.set_facecolor(BG)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_facecolor(BG)
+    ax.axis('off')
+    if not devs:
+        ax.text(0.5, 0.5, 'Scanning the network…', transform=ax.transAxes,
+                color=DIM, ha='center', va='center', family='monospace', fontsize=12)
+        return {}
+    CX, CY, W, Dp, Hh = 0.866, 0.5, 0.82, 0.82, 0.72
+
+    def P(gx, gy, z):
+        return ((gx - gy) * CX, z - (gx + gy) * CY)
+
+    def mix(hx, a):
+        r, g, b = int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16)
+        return (r / 255 * a + 6 / 255 * (1 - a), g / 255 * a + 16 / 255 * (1 - a),
+                b / 255 * a + 30 / 255 * (1 - a))
+
+    gxs = [d['gx'] for d in devs]
+    gys = [d['gy'] for d in devs]
+    gx0, gx1 = min(gxs) - 1, max(gxs) + 2
+    gy0, gy1 = min(gys) - 1, max(gys) + 1.5
+    for gx in range(int(gx0), int(gx1) + 1):
+        a, b = P(gx, gy0, 0), P(gx, gy1, 0)
+        ax.plot([a[0], b[0]], [a[1], b[1]], color='#15364f', lw=0.6, zorder=0)
+    for gy in range(int(gy0), int(gy1) + 1):
+        a, b = P(gx0, gy, 0), P(gx1, gy, 0)
+        ax.plot([a[0], b[0]], [a[1], b[1]], color='#15364f', lw=0.6, zorder=0)
+
+    centers = {}
+    gw = next((d for d in devs if d['is_gw']), None)
+    gwc = P(gw['gx'] + W / 2, gw['gy'] + Dp / 2, Hh) if gw else None
+    if gwc:
+        for d in devs:
+            if d is gw:
+                continue
+            c = P(d['gx'] + W / 2, d['gy'] + Dp / 2, Hh)
+            col = _NM_DEVMAP_COL.get(d['group'], '#6b8299')
+            ax.plot([gwc[0], c[0]], [gwc[1], c[1]], color=col, lw=0.7,
+                    alpha=0.26 if d['online'] else 0.07, zorder=1)
+
+    for d in sorted(devs, key=lambda d: d['gx'] + d['gy']):
+        col = _NM_DEVMAP_COL.get(d['group'], '#6b8299')
+        a = 1.0 if d['online'] else 0.42
+        gx, gy = d['gx'], d['gy']
+        z = 10 + (gx + gy)
+        sel = (d['ip'] == sel_ip)
+        top = [P(gx, gy, Hh), P(gx + W, gy, Hh), P(gx + W, gy + Dp, Hh), P(gx, gy + Dp, Hh)]
+        right = [P(gx + W, gy, 0), P(gx + W, gy + Dp, 0), P(gx + W, gy + Dp, Hh), P(gx + W, gy, Hh)]
+        left = [P(gx, gy + Dp, 0), P(gx + W, gy + Dp, 0), P(gx + W, gy + Dp, Hh), P(gx, gy + Dp, Hh)]
+        ax.add_patch(Polygon(left, closed=True, fc=mix(col, 0.10), ec=mix(col, 0.4), lw=1, zorder=z, alpha=a))
+        ax.add_patch(Polygon(right, closed=True, fc=mix(col, 0.18), ec=mix(col, 0.5), lw=1, zorder=z, alpha=a))
+        ax.add_patch(Polygon(top, closed=True, fc=mix(col, 0.42 if sel else 0.30), ec=col,
+                             lw=2.6 if sel else 1.5, zorder=z + 0.1, alpha=a))
+        centers[d['ip']] = P(gx + W / 2, gy + Dp / 2, Hh)
+
+    for d in devs:
+        c = centers[d['ip']]
+        col = _NM_DEVMAP_COL.get(d['group'], '#6b8299')
+        a = 1.0 if d['online'] else 0.5
+        nm = d['name'] or d['ip']
+        if len(nm) > 16:
+            nm = nm[:15] + '…'
+        ax.text(c[0], c[1] + 0.40, nm, ha='center', va='bottom', color=col, fontsize=8,
+                family='monospace', fontweight='bold', zorder=999, alpha=a)
+        ax.text(c[0], c[1] + 0.22, '.' + d['ip'].split('.')[-1], ha='center', va='bottom',
+                color=INK, fontsize=8, family='monospace', zorder=999, alpha=a)
+
+    ax.text(0.012, 0.975, 'DEVICES ON THE NETWORK', transform=ax.transAxes, color='#39ff14',
+            fontsize=15, fontweight='bold', family='monospace', va='top')
+    online = sum(1 for d in devs if d['online'])
+    hid = ('  \u00b7  %d offline hidden' % hidden) if hidden else ''
+    ax.text(0.012, 0.94, f'{online} online{hid}', transform=ax.transAxes,
+            color=DIM, fontsize=10, family='monospace', va='top')
+    present = [g for g in ('infra', 'esp', 'iot', 'computer', 'phone', 'other')
+               if any(d['group'] == g for d in devs)]
+    for i, g in enumerate(present):
+        y = 0.90 - i * 0.03
+        ax.add_patch(Rectangle((0.013, y - 0.006), 0.012, 0.016, transform=ax.transAxes,
+                               fc=_NM_DEVMAP_COL[g], ec='none', zorder=20))
+        ax.text(0.03, y, _NM_DEVMAP_LABEL[g], transform=ax.transAxes, color=INK,
+                fontsize=9, family='monospace', va='center')
+    ax.autoscale()
+    ax.margins(0.06)
+    ax.set_aspect('equal', adjustable='datalim')
+    return centers
+
+
 # ── 5. Statistical anomaly scoring (no AI needed) ────────────────────────────
 
 _NM_ODD_PORTS = {
@@ -14547,52 +15704,205 @@ def _nm_open_quality(monitor):
                               f'over the last {win_var.get()}h')
     win_var.trace_add('write', _load_bw)
 
-    # ── Tab 3: Devices ───────────────────────────────────────────────────────
+    # ── Tab 3: Devices — live isometric LAN map ──────────────────────────────
+    from matplotlib.figure import Figure as _DevFigure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _DevCanvas
     t3 = tk.Frame(nb, bg=BG); nb.add(t3, text='  Devices  ')
-    dv = ttk.Treeview(t3, columns=('ip', 'mac', 'label', 'seen'),
-                      show='headings', height=20)
-    for c_, w_, t_ in (('ip', 150, 'IP'), ('mac', 180, 'MAC'),
-                       ('label', 280, 'Name'), ('seen', 170, 'Last seen')):
-        dv.heading(c_, text=t_); dv.column(c_, width=w_, anchor='w')
-    dv.pack(fill='both', expand=True, padx=10, pady=(10, 4))
+    dev_state = {'devs': [], 'centers': {}, 'sel': None, 'ports': {},
+                 'auto': True, 'gw': None, 'myip': None, 'busy': False}
+    try:
+        dev_state['gw'] = _nm_default_gateway()
+    except Exception:
+        pass
+    try:
+        _, dev_state['myip'] = _nm_local_subnet()
+    except Exception:
+        pass
 
-    def _load_dev():
-        dv.delete(*dv.get_children())
-        if db is None:
-            return
-        for d in db.list_devices():
-            dv.insert('', 'end', iid=d['ip'],
-                      values=(d['ip'], d['mac'] or '—',
-                              d['label'] or _nm_device_name(db, d['ip'], d['mac']),
-                              (d['last_seen'] or '')[:19].replace('T', ' ')))
+    dstat = tk.Label(t3, bg=BG, fg=DIM, font=(_NM_MONO, 8), anchor='w', text='Scanning…')
+    dstat.pack(side='bottom', fill='x', padx=12, pady=(0, 8))
+    dmain = tk.Frame(t3, bg=BG); dmain.pack(fill='both', expand=True)
 
-    def _rename():
-        sel = dv.selection()
-        if not sel or db is None:
+    dfig = _DevFigure(figsize=(8.2, 6.2), dpi=100, facecolor='#06101e')
+    dcanvas = _DevCanvas(dfig, master=dmain)
+    dcanvas.get_tk_widget().pack(side='left', fill='both', expand=True)
+
+    side = tk.Frame(dmain, bg='#0a1626', width=300); side.pack(side='right', fill='y')
+    side.pack_propagate(False)
+    tk.Label(side, text='DEVICE DETAILS', bg='#0a1626', fg='#38b8f0',
+             font=(_NM_MONO, 10, 'bold'), anchor='w').pack(fill='x', padx=12, pady=(12, 6))
+    dinfo = tk.Text(side, bg='#0a1626', fg='#cfe3f5', bd=0, height=16,
+                    font=(_NM_MONO, 9), wrap='word', highlightthickness=0)
+    dinfo.pack(fill='both', expand=True, padx=12, pady=(0, 6))
+    dinfo.insert('1.0', 'Click a device on the map to see everything about it.')
+    dinfo.config(state='disabled')
+
+    def _dev_set_info(text):
+        dinfo.config(state='normal'); dinfo.delete('1.0', 'end')
+        dinfo.insert('1.0', text); dinfo.config(state='disabled')
+
+    def _dev_show(ip):
+        d = next((x for x in dev_state['devs'] if x['ip'] == ip), None)
+        if not d:
             return
-        ip = sel[0]
-        cur = dv.item(ip, 'values')[2]
-        new = simpledialog.askstring('Rename device',
-                                     f'Friendly name for {ip}:',
+
+        dash = '—'
+
+        def _fmt(ts):
+            return (ts or dash)[:19].replace('T', ' ')
+        ports = d.get('ports')
+        plines = ('not scanned yet' if ports is None
+                  else (', '.join(str(p) for p in ports) if ports else 'none open'))
+        sep = '─' * 30
+        status = '● ONLINE' if d['online'] else '○ offline'
+        mac = d['mac'] or dash
+        grplabel = _NM_DEVMAP_LABEL.get(d['group'], '')
+        _dev_set_info(
+            f"{d['name']}\n{sep}\n"
+            f"IP       {d['ip']}\n"
+            f"MAC      {mac}\n"
+            f"Vendor   {d['vendor']}\n"
+            f"Type     {d['dtype']}\n"
+            f"Group    {grplabel}\n"
+            f"Status   {status}\n"
+            f"First    {_fmt(d['first_seen'])}\n"
+            f"Last     {_fmt(d['last_seen'])}\n"
+            f"Ports    {plines}\n")
+
+    def _dev_redraw():
+        try:
+            dev_state['centers'] = _nm_dev_iso_draw(dfig, dev_state['devs'],
+                                                    dev_state['sel'], dev_state['gw'])
+            dcanvas.draw_idle()
+        except Exception:
+            _exc('_dev_redraw')
+
+    def _dev_refresh(active_scan=False):
+        if dev_state['busy']:
+            return
+        dev_state['busy'] = True
+
+        def _work():
+            try:
+                if active_scan:
+                    _nm_scan_devices(db)
+                arp = _nm_arp_table()
+                if db is not None:
+                    ts = datetime.now().isoformat()
+                    for ip, mac in arp.items():
+                        try:
+                            db.upsert_device(ip, mac, ts)
+                        except Exception:
+                            pass
+                devs = _nm_dev_snapshot(db, arp=arp, gateway=dev_state['gw'],
+                                        myip=dev_state['myip'], port_cache=dev_state['ports'])
+
+                def _done():
+                    prev = {d['ip'] for d in dev_state['devs']}
+                    cur = {d['ip'] for d in devs}
+                    dev_state['devs'] = _nm_dev_layout(devs)
+                    if dev_state['sel'] and dev_state['sel'] not in cur:
+                        pass  # keep showing its last-known details even if it dropped off
+                    _dev_redraw()
+                    joined, left = cur - prev, prev - cur
+                    if prev and (joined or left):
+                        bits = []
+                        if joined:
+                            bits.append(f'+{len(joined)} joined')
+                        if left:
+                            bits.append(f'-{len(left)} left')
+                        dstat.config(text='  '.join(bits) + f"   ·   "
+                                     f"{sum(1 for d in devs if d['online'])} online / {len(devs)} known")
+                    else:
+                        dstat.config(text=f"{sum(1 for d in devs if d['online'])} online / "
+                                          f"{len(devs)} known  ·  auto-refresh every 5s")
+                    if dev_state['sel']:
+                        _dev_show(dev_state['sel'])
+                    dev_state['busy'] = False
+                win.after(0, _done)
+            except Exception:
+                _exc('_dev_refresh')
+                dev_state['busy'] = False
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _dev_tick():
+        if dev_state['auto']:
+            _dev_refresh(active_scan=False)
+        try:
+            win.after(5000, _dev_tick)
+        except Exception:
+            pass
+
+    def _dev_click(ev):
+        if ev.inaxes is None or ev.xdata is None:
+            return
+        best, bd = None, 1e9
+        for ip, (cx, cy) in dev_state['centers'].items():
+            dd = (cx - ev.xdata) ** 2 + (cy - ev.ydata) ** 2
+            if dd < bd:
+                bd, best = dd, ip
+        if best is None or bd > 1.3:
+            return
+        dev_state['sel'] = best
+        _dev_show(best)
+        _dev_redraw()
+    dfig.canvas.mpl_connect('button_press_event', _dev_click)
+
+    def _dev_scan_ports():
+        ip = dev_state['sel']
+        if not ip:
+            dstat.config(text='Click a device first, then Scan ports.')
+            return
+        dstat.config(text=f'Scanning ports on {ip}…')
+
+        def _work():
+            try:
+                ports = _nm_scan_ports(ip)
+            except Exception:
+                ports = []
+
+            def _done():
+                dev_state['ports'][ip] = ports
+                for d in dev_state['devs']:
+                    if d['ip'] == ip and not d['is_gw']:
+                        d['ports'] = ports
+                        d['dtype'] = _nm_guess_device_type(ports, d['vendor'], '')
+                        d['group'] = _nm_dev_group(d['vendor'], d['dtype'],
+                                                   d['is_gw'], d['is_self'], d['mac'])
+                dev_state['devs'] = _nm_dev_layout(dev_state['devs'])
+                _dev_show(ip)
+                _dev_redraw()
+                dstat.config(text=f'{ip}: {len(ports)} open port(s).')
+            win.after(0, _done)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _dev_rename():
+        ip = dev_state['sel']
+        if not ip or db is None:
+            dstat.config(text='Click a device first, then Rename.')
+            return
+        d = next((x for x in dev_state['devs'] if x['ip'] == ip), None)
+        cur = (d['label'] or d['name']) if d else ''
+        new = simpledialog.askstring('Rename device', f'Friendly name for {ip}:',
                                      initialvalue=cur, parent=win)
         if new:
             db.set_device_label(ip, new.strip())
             with _nm_dev_lock:
                 _nm_dev_cache.pop(ip, None)
-            _load_dev()
+            _dev_refresh(active_scan=False)
 
-    def _scan():
-        n = _nm_scan_devices(db)
-        _load_dev()
-        dstat.config(text=f'ARP scan found {n} device(s).')
+    def _dev_toggle_auto():
+        dev_state['auto'] = not dev_state['auto']
+        auto_btn.config(text=('⏸ Auto-refresh: ON' if dev_state['auto']
+                              else '▶ Auto-refresh: OFF'))
 
-    drow = tk.Frame(t3, bg=BG); drow.pack(fill='x', padx=10, pady=(0, 4))
-    ttk.Button(drow, text='⟳ Scan network', command=_scan).pack(side='left')
-    ttk.Button(drow, text='✎ Rename selected', command=_rename).pack(side='left', padx=6)
-    dstat = tk.Label(t3, bg=BG, fg=DIM, font=(_NM_MONO, 8), anchor='w',
-                     text='Names set here are used everywhere an IP is shown.')
-    dstat.pack(fill='x', padx=12, pady=(0, 8))
-    dv.bind('<Double-1>', lambda e: _rename())
+    dbtns = tk.Frame(side, bg='#0a1626'); dbtns.pack(fill='x', padx=12, pady=(0, 10))
+    ttk.Button(dbtns, text='✎ Rename', command=_dev_rename).pack(fill='x', pady=2)
+    ttk.Button(dbtns, text='⌗ Scan ports', command=_dev_scan_ports).pack(fill='x', pady=2)
+    ttk.Button(dbtns, text='⟳ Scan network now',
+               command=lambda: _dev_refresh(active_scan=True)).pack(fill='x', pady=2)
+    auto_btn = ttk.Button(dbtns, text='⏸ Auto-refresh: ON', command=_dev_toggle_auto)
+    auto_btn.pack(fill='x', pady=2)
 
     # ── Tab 4: Anomalies ─────────────────────────────────────────────────────
     t4 = tk.Frame(nb, bg=BG); nb.add(t4, text='  Anomalies  ')
@@ -14634,7 +15944,8 @@ def _nm_open_quality(monitor):
     arow = tk.Frame(t4, bg=BG); arow.pack(fill='x', padx=10, pady=(0, 4))
     ttk.Button(arow, text='⟳ Rescan', command=_load_anom).pack(side='left')
 
-    _load_bw(); _load_dev(); _load_anom()
+    _load_bw(); _load_anom()
+    _dev_refresh(active_scan=True); _dev_tick()
     return win
 
 
@@ -29102,6 +30413,13 @@ class UserGuideWindow:
             ('bullet', 'On your phone or another computer: open the Wi-Fi & Boards page from the phone dashboard menu (or go to /wifi on the dashboard address). It shows the same graphs, walking man, Activity, Signal map and Networks, with Away and Keep watching switches. Other devices can switch alerts on; switching them off from another device needs the "Let other devices switch alerts off too" tick on the PC.'),
             ('bullet', 'Phone alerts & automatic Away… (button under the tick boxes): free phone notifications through ntfy, with a picture of the movement graph, and Away that switches on when your phone leaves the home Wi-Fi and off when it comes back.'),
             ('bullet', 'Board honeypot: the receiver opens decoy ports (telnet/SSH/SMB/RDP/web) nothing legitimate uses and reports any connection as a likely scan or intrusion — into the Honeypot window and as a phone alert. It is part of the receiver firmware (on by default); re-flash the receiver once to add it. The board only records the source and the first bytes; it never answers a service or runs anything.'),
+            ('h2', 'Floor Detection (which floor moved)'),
+            ('bullet', 'With TWO receivers — one on each floor, both listening to the same transmitter — the app can tell which floor movement is on. One link alone cannot: a body on either floor disturbs it. Two links, one per floor, disturb differently depending on where the motion is, and the app compares them. Open it from the FLOOR button in the sidebar.'),
+            ('bullet', 'Setup: pick a receiver for each floor in the Floor Detection window and press Connect. A floor’s receiver can be on USB (choose its COM port) or on Wi-Fi (press "Find Wi-Fi boards" and choose its 192.168.x.x address). Both floors can be wireless — each is told apart by its board address — so neither board needs a cable to the PC. The board can be a Heltec ESP32-S3 (Wi-Fi LoRa 32 V3); the receiver firmware runs on it unchanged.'),
+            ('bullet', 'Calibrate once: (1) "Learn empty room" with the house still for 20 s, then (2) walk upstairs for 25 s and (3) walk downstairs for 25 s. The app learns how each floor splits the two links, because every house splits them differently.'),
+            ('bullet', 'After that the two floor plans show which floor moved (red frame, plus a red zone along that floor\'s board-to-board link once you have marked the Tx and Rx spots), the strip above them reads UPSTAIRS, DOWNSTAIRS, BOTH FLOORS or QUIET, and (if the tick is on) a phone alert names the floor that moved. Before calibration it still shows a best-guess floor, marked "uncalibrated".'),
+            ('bullet', 'Both receivers must be on the same 2.4 GHz channel as the transmitter (one transmitter can only sit on one channel). A USB receiver uses its set channel; a Wi-Fi receiver uses the channel of the router/disc it joins — if a floor reads "no data" while the other works, that is almost always a channel mismatch.'),
+            ('bullet', 'The Floor window shares the downstairs board with "Keep watching" and the CSI tab, so they can all run at the same time — you no longer have to disconnect one to use the other.'),
             ('h2', 'Networks tab'),
             ('bullet', 'Every access point in range with its maker (looked up from its address), channel, band and '
                        'security, and how far its signal has swung.'),
@@ -29207,6 +30525,15 @@ class UserGuideWindow:
         'whatsnew': [
             ('h1', 'What\'s New'),
             ('p',  'The recent changes in one place, newest first.'),
+            ('h2', 'Floor Detection now shows the floors, not just a word'),
+            ('bullet', 'The Floor window shows your Downstairs and Upstairs floor-plan heat maps side by side (the ones from the Wi-Fi Signal survey, router marker included). When movement is attributed to a floor, that floor\'s panel gets a thick red frame and a "MOVEMENT" banner, so you can see it from across the room.'),
+            ('bullet', 'Press "Downstairs Tx / Rx" and "Upstairs Tx / Rx" under the plans, then click where each board sits. After that, a red zone is drawn along the line between that floor\'s transmitter and receiver while it is disturbed. Be aware this is a rough plot: one transmitter-to-receiver link can say "something moved along this path", not exactly where on it. Without board marks the whole floor tints red instead.'),
+            ('h2', 'Devices: a live 3D map of everything on your network'),
+            ('bullet', 'The Devices tab (Monitor → Devices) is now a 3D isometric map instead of a plain list. Your router sits at the top with every device below it, colour-coded by what it is: EE gear (cyan), your ESP / NetSentinel boards (green), cameras and smart-home kit (purple), computers (amber) and phones (teal). It refreshes itself every few seconds, so a device that joins the network appears and one that leaves drops off — no button to press. Only devices online right now are shown (network noise like multicast addresses is filtered out); tick "Show offline / history" to also see everything the app has ever seen, faded.'),
+            ('bullet', 'Click any device for the full picture: IP, MAC, vendor, best-guess type, online status, when it was first and last seen, and — with "Scan ports" — its open ports. "Rename" gives it a friendly name used everywhere the app shows that address. The type is a best-effort guess from the MAC maker and open ports, never a claim of fact.'),
+            ('h2', 'Floor Detection: which floor moved'),
+            ('bullet', 'New FLOOR button in the sidebar. With a receiver on each floor (upstairs on USB, downstairs over Wi-Fi) listening to one transmitter, the app now tells which floor movement is on — something a single link cannot do. Calibrate once (learn the empty room, then walk each floor) and the big chip reads UPSTAIRS / DOWNSTAIRS / BOTH FLOORS / QUIET, with a phone alert that names the floor. The second receiver can be a Heltec ESP32-S3 board — the firmware runs on it unchanged.'),
+            ('bullet', 'The Wi-Fi receiver board is now read through a shared connection, so the Floor window, the CSI tab and background "Keep watching" can all use the same board at once instead of fighting over it — no more disconnecting one to use another. (An S3 board also shows a "Vanguard NetSentinel" status screen on its OLED.)'),
             ('h2', 'ESP32 boards: over Wi-Fi, in the background, in your alerts'),
             ('bullet', 'The receiver board can join your home Wi-Fi and stream to this PC (port list entry "wifi:4210"), so the boards can watch the living and dining rooms while you work upstairs. It connects reliably even if Windows blocks the board\'s announcements.'),
             ('bullet', 'Flash ESP32… button in the CSI tab: type your Wi-Fi name (capitals matter) and password, pick Receiver or Transmitter, press Flash — no files to edit. The password is only used to build that board and is not saved.'),
@@ -32229,15 +33556,185 @@ class MonitorWindow:
 
     def _build_devices_tab(self, nb):
         f = self._tab(nb, '  Devices  ')
-        bar = self._tk.Frame(f, bg=self.BG); bar.pack(fill='x', padx=8, pady=(8, 2))
+        tk = self._tk
+        from matplotlib.figure import Figure as _DevFigure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _DevCanvas
+        self._dev_sel = None
+        self._dev_devs = []
+        self._dev_centers = {}
+        self._dev_ports = {}
+        self._dev_gw = None
+        self._dev_myip = None
+        try:
+            self._dev_gw = _nm_default_gateway()
+        except Exception:
+            pass
+        try:
+            _, self._dev_myip = _nm_local_subnet()
+        except Exception:
+            pass
+
+        bar = tk.Frame(f, bg=self.BG); bar.pack(fill='x', padx=8, pady=(8, 2))
         self._dev_lbl = self._lbl(bar, '', self.TICK); self._dev_lbl.pack(side='left')
-        self._btn(bar, 'Rename selected\u2026', self._rename_device).pack(side='right')
-        tv = self._tree(f, ('', 'Name', 'Vendor', 'IP', 'MAC', 'Last seen'),
-                        (26, 200, 150, 130, 150, 100))
-        tv.tag_configure('on', foreground='#39ff14')
-        tv.tag_configure('off', foreground='#6a9ab8')
-        tv.bind('<Double-1>', lambda e: self._rename_device())
-        self._dev_tv = tv
+        self._dev_show_off = tk.BooleanVar(value=False)
+        self._dev_hidden = 0
+        self._dev_last_dv = []
+        tk.Checkbutton(bar, text='Show offline / history', variable=self._dev_show_off,
+                       command=lambda: self._dev_map_render(self._dev_last_dv),
+                       bg=self.BG, fg='#cfe3f5', selectcolor='#0d2235', activebackground=self.BG,
+                       activeforeground='#39ff14', bd=0, highlightthickness=0,
+                       font=(_NM_MONO, 9)).pack(side='right')
+
+        body = tk.Frame(f, bg=self.BG); body.pack(fill='both', expand=True)
+        self._dev_fig = _DevFigure(figsize=(8.0, 6.0), dpi=100, facecolor='#06101e')
+        self._dev_canvas = _DevCanvas(self._dev_fig, master=body)
+        self._dev_canvas.get_tk_widget().pack(side='left', fill='both', expand=True)
+        self._dev_fig.canvas.mpl_connect('button_press_event', self._dev_click)
+
+        side = tk.Frame(body, bg='#0a1626', width=290); side.pack(side='right', fill='y')
+        side.pack_propagate(False)
+        self._lbl(side, 'DEVICE DETAILS', '#38b8f0', (_NM_MONO, 10, 'bold')).pack(
+            fill='x', padx=12, pady=(12, 6))
+        self._dev_info = tk.Text(side, bg='#0a1626', fg='#cfe3f5', bd=0, height=15,
+                                 font=(_NM_MONO, 9), wrap='word', highlightthickness=0)
+        self._dev_info.pack(fill='both', expand=True, padx=12, pady=(0, 6))
+        self._dev_info.insert('1.0', 'Click a device on the map to see everything about it.')
+        self._dev_info.config(state='disabled')
+        btns = tk.Frame(side, bg='#0a1626'); btns.pack(fill='x', padx=12, pady=(0, 10))
+        self._btn(btns, '\u270e Rename', self._rename_device).pack(fill='x', pady=2)
+        self._btn(btns, '\u2317 Scan ports', self._dev_scan_ports, '#c084fc').pack(fill='x', pady=2)
+
+    def _dev_map_devs(self, dv):
+        """Adapt the store's device dicts into the shape the iso-map draws."""
+        gw, myip = self._dev_gw, self._dev_myip
+        pc = self._dev_ports
+        out = []
+        self._dev_hidden = 0
+        for d in dv:
+            ip = d.get('ip', '')
+            if not ip or not _nm_dev_ip_ok(ip):
+                continue
+            if not d.get('online') and not self._dev_show_off.get():
+                self._dev_hidden += 1
+                continue
+            mac = (d.get('mac') or '').lower()
+            vendor = d.get('vendor') or _nm_oui_vendor(mac) or ''
+            hostname = d.get('hostname') or ''
+            ports = pc.get(ip)
+            is_gw = (ip == gw)
+            is_self = (ip == myip)
+            dtype = 'router' if is_gw else _nm_guess_device_type(ports, vendor, hostname)
+            grp = _nm_dev_group(vendor, dtype, is_gw, is_self, mac)
+            name = d.get('name') or hostname or (
+                '%s (%s)' % (vendor, ip.split('.')[-1]) if vendor else ip)
+            out.append({'ip': ip, 'mac': mac, 'vendor': vendor or '\u2014', 'dtype': dtype,
+                        'group': grp, 'name': name, 'hostname': hostname, 'label': d.get('name'),
+                        'first_seen': d.get('first_seen'), 'last_seen': d.get('last_seen'),
+                        'online': bool(d.get('online')), 'ports': ports,
+                        'is_gw': is_gw, 'is_self': is_self})
+        order = {'infra': 0, 'esp': 1, 'iot': 2, 'computer': 3, 'phone': 4, 'other': 5}
+
+        def _ipkey(ip):
+            try:
+                return tuple(int(x) for x in ip.split('.'))
+            except Exception:
+                return (0,)
+        out.sort(key=lambda d: (order.get(d['group'], 9), _ipkey(d['ip'])))
+        return out
+
+    def _dev_map_render(self, dv):
+        """Rebuild and redraw the device map from the latest store list (called
+        on every Monitor refresh, so it tracks devices joining and leaving)."""
+        try:
+            self._dev_last_dv = dv
+            devs = _nm_dev_layout(self._dev_map_devs(dv))
+            self._dev_devs = devs
+            cur = {d['ip'] for d in devs}
+            self._dev_centers = _nm_dev_iso_draw(self._dev_fig, devs, self._dev_sel, self._dev_gw,
+                                                 hidden=self._dev_hidden)
+            self._dev_canvas.draw_idle()
+            if self._dev_sel and self._dev_sel in cur:
+                self._dev_show(self._dev_sel)
+        except Exception:
+            _exc('MonitorWindow._dev_map_render')
+
+    def _dev_click(self, ev):
+        if ev.inaxes is None or ev.xdata is None:
+            return
+        best, bd = None, 1e9
+        for ip, (cx, cy) in self._dev_centers.items():
+            dd = (cx - ev.xdata) ** 2 + (cy - ev.ydata) ** 2
+            if dd < bd:
+                bd, best = dd, ip
+        if best is None or bd > 1.3:
+            return
+        self._dev_sel = best
+        self._dev_show(best)
+        self._dev_centers = _nm_dev_iso_draw(self._dev_fig, self._dev_devs, self._dev_sel, self._dev_gw,
+                                             hidden=self._dev_hidden)
+        self._dev_canvas.draw_idle()
+
+    def _dev_show(self, ip):
+        d = next((x for x in self._dev_devs if x['ip'] == ip), None)
+        if not d:
+            return
+        dash = '\u2014'
+
+        def _fmt(ts):
+            s = str(ts or '')
+            return s[:19].replace('T', ' ') if s else dash
+        ports = d.get('ports')
+        plines = ('not scanned yet' if ports is None
+                  else (', '.join(str(p) for p in ports) if ports else 'none open'))
+        sep = '\u2500' * 28
+        status = '\u25cf ONLINE' if d['online'] else '\u25cb offline'
+        mac = d['mac'] or dash
+        grplabel = _NM_DEVMAP_LABEL.get(d['group'], '')
+        host = d.get('hostname') or dash
+        txt = ('%s\n%s\n'
+               'IP       %s\nMAC      %s\nVendor   %s\nHostname %s\n'
+               'Type     %s\nGroup    %s\nStatus   %s\nFirst    %s\nLast     %s\nPorts    %s\n'
+               % (d['name'], sep, d['ip'], mac, d['vendor'], host, d['dtype'], grplabel,
+                  status, _fmt(d.get('first_seen')), _fmt(d.get('last_seen')), plines))
+        self._dev_info.config(state='normal')
+        self._dev_info.delete('1.0', 'end')
+        self._dev_info.insert('1.0', txt)
+        self._dev_info.config(state='disabled')
+
+    def _dev_scan_ports(self):
+        ip = self._dev_sel
+        if not ip:
+            self._dev_lbl.config(text='Click a device on the map first, then Scan ports.')
+            return
+        self._dev_lbl.config(text='Scanning ports on %s\u2026' % ip)
+
+        def _work():
+            try:
+                ports = _nm_scan_ports(ip)
+            except Exception:
+                ports = []
+
+            def _done():
+                if self._closed:
+                    return
+                self._dev_ports[ip] = ports
+                for d in self._dev_devs:
+                    if d['ip'] == ip and not d['is_gw']:
+                        d['ports'] = ports
+                        d['dtype'] = _nm_guess_device_type(ports, d['vendor'], d.get('hostname') or '')
+                        d['group'] = _nm_dev_group(d['vendor'], d['dtype'], d['is_gw'],
+                                                   d['is_self'], d['mac'])
+                self._dev_devs = _nm_dev_layout(self._dev_devs)
+                self._dev_show(ip)
+                self._dev_centers = _nm_dev_iso_draw(self._dev_fig, self._dev_devs,
+                                                     self._dev_sel, self._dev_gw)
+                self._dev_canvas.draw_idle()
+                self._dev_lbl.config(text='%s: %d open port(s).' % (ip, len(ports)))
+            try:
+                self.root.after(0, _done)
+            except Exception:
+                pass
+        threading.Thread(target=_work, daemon=True).start()
 
     def _build_latency_tab(self, nb):
         f = self._tab(nb, '  Latency  ')
@@ -32330,11 +33827,14 @@ class MonitorWindow:
 
     def _rename_device(self):
         try:
-            sel = self._dev_tv.selection()
-            if not sel: return
-            ip = self._dev_tv.item(sel[0], 'values')[3]
+            ip = self._dev_sel
+            if not ip:
+                self._dev_lbl.config(text='Click a device on the map first, then Rename.')
+                return
             from tkinter import simpledialog
-            name = simpledialog.askstring('Rename device', 'Name for %s:' % ip, parent=self.root)
+            cur = next((d['label'] or d['name'] for d in self._dev_devs if d['ip'] == ip), '')
+            name = simpledialog.askstring('Rename device', 'Name for %s:' % ip,
+                                          initialvalue=cur or '', parent=self.root)
             if name is None: return
             st = _nm_store()
             if st: st.set_device_name(ip, name.strip())
@@ -32420,19 +33920,13 @@ class MonitorWindow:
                 tv.insert('', 'end', values=(hh, a['sev'].upper(), a['kind'], a['msg']),
                           tags=(a['sev'],))
         except Exception: _exc('MonitorWindow alerts')
-        # Devices
+        # Devices \u2014 live 3D map
         try:
             dv = st.list_devices() if st else []
-            on = sum(1 for d in dv if d.get('online'))
-            self._dev_lbl.config(text='%d online \u00b7 %d total' % (on, len(dv)))
-            tv = self._dev_tv; tv.delete(*tv.get_children())
-            for d in dv:
-                dot = '\u25cf'
-                tv.insert('', 'end', tags=('on' if d.get('online') else 'off',),
-                          values=(dot, d.get('name') or d.get('hostname') or d.get('vendor') or '',
-                                  d.get('vendor') or '', d.get('ip', ''),
-                                  d.get('mac') or '',
-                                  'online' if d.get('online') else self._ago(d.get('last_seen'))))
+            on = sum(1 for d in dv if d.get('online') and _nm_dev_ip_ok(d.get('ip', '')))
+            self._dev_lbl.config(text='%d online \u00b7 %d total  \u00b7  click a device for details'
+                                 % (on, len(dv)))
+            self._dev_map_render(dv)
         except Exception: _exc('MonitorWindow devices')
         # Latency
         try:
@@ -43671,7 +45165,7 @@ self.addEventListener('fetch',function(e){
                       '(known-bad IPs, ranges and countries seen) show along the top.'),
                 ('bullet', 'Alerts — geo, threat-intel, latency and new-device events with '
                            'severity (INFO / WARN / CRIT) and timestamps'),
-                ('bullet', 'Devices — inventory of hosts seen on the LAN'),
+                ('bullet', 'Devices — a live 3D map of hosts on the LAN; click one for full details'),
                 ('bullet', 'Latency / VDI / Analytics — per-area detail tabs'),
                 ('bullet', 'Notify — outbound alert (webhook / toast) configuration'),
             ],
@@ -46295,6 +47789,7 @@ class ModernWindow:
         btn('⎙', 'EVIDENCE', self._open_evidence,  '#39ff14')
         btn('☉', 'PI-HOLE', self._open_pihole, '#38f0a8')
         btn('≈', 'WI-FI',   self._open_wifi,   '#38b8f0')
+        btn('⌂', 'FLOOR',   self._open_floor,  '#7ee787')
         tk.Frame(sb, bg=self.PANEL2).pack(fill='both', expand=True)
         div()
         btn('⎙', 'REPORT',  self._open_report,   '#ff9f43')
@@ -47235,6 +48730,12 @@ class ModernWindow:
             _nm_open_evidence(self._monitor, parent=self.root)
         except Exception as ex:
             _m = str(ex); _exc('_open_evidence'); log.error(f'[evidence] {_m}')
+
+    def _open_floor(self):
+        try:
+            _nm_open_floor(self._monitor, parent=self.root)
+        except Exception as ex:
+            _m = str(ex); _exc('_open_floor'); log.error(f'[floor] {_m}')
 
     def _ensure_drop_logging(self):
         """Turn on firewall dropped-connection logging if the user wants it.

@@ -141,6 +141,16 @@ FunctionEnd
 Section "Vanguard Flow NetSentinel (monitor app)" SecMain
     SectionIn 1
     SetOutPath "$INSTDIR"
+    ; Close a running copy first: Windows will not let a running program be replaced, and an install
+    ; that silently kept the old SpeedtestMonitor.exe is exactly what happened from 14 Sep to 9 Oct.
+    DetailPrint "Closing ${APP_NAME} if it is running..."
+    nsExec::Exec 'taskkill /F /IM ${APP_EXE}'
+    Pop $0
+    nsExec::Exec 'taskkill /F /IM NetworkMonitorClient.exe'
+    Pop $0
+    nsExec::Exec 'taskkill /F /IM SpeedtestAgent.exe'
+    Pop $0
+    Sleep 1500
     File "dist\${APP_EXE}"
     File /nonfatal "bg.jpg"
     ; Ookla's speedtest CLI is deliberately NOT redistributed: its licence
