@@ -77,6 +77,9 @@ InstType "Client only"
 
 ; ── Modern UI look ───────────────────────────────────
 !define MUI_ABORTWARNING
+!if /FileExists "installer_bg.bmp"
+!define MUI_CUSTOMFUNCTION_GUIINIT NMGuiInit
+!endif
 !define MUI_HEADERIMAGE
 !define MUI_HEADERIMAGE_RIGHT
 !define MUI_COMPONENTSPAGE_SMALLDESC
@@ -126,6 +129,21 @@ InstType "Client only"
 !insertmacro MUI_LANGUAGE "English"
 
 ; ── Installer init ─────────────────────────────────────────
+; Full-screen artwork behind the installer window (installer_bg.bmp, pre-scaled 16:9 from the source picture).
+; Skipped quietly if the file is absent so the build never breaks on it.
+!if /FileExists "installer_bg.bmp"
+Function NMGuiInit
+    InitPluginsDir
+    File /oname=$PLUGINSDIR\installer_bg.bmp "installer_bg.bmp"
+    BgImage::SetBg /NOUNLOAD /FILLSCREEN $PLUGINSDIR\installer_bg.bmp
+    BgImage::Redraw /NOUNLOAD
+FunctionEnd
+
+Function .onGUIEnd
+    BgImage::Destroy
+FunctionEnd
+!endif
+
 Function .onInit
     ${IfNot} ${AtLeastWin10}
         MessageBox MB_ICONSTOP|MB_OK "Vanguard Flow NetSentinel requires Windows 10 or later."
