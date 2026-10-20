@@ -42,6 +42,7 @@
       "keys": [
         "hits",
         "running",
+        "source",
         "tarpit_active",
         "tarpit_enabled",
         "tarpit_seconds",
@@ -85,8 +86,8 @@
   },
   "static": {
     "/": {
-      "bytes": 30655,
-      "sha256": "6993a74bab24a4f005b53d51d0b67156df6850f8d0b6f374d9691841a488c000",
+      "bytes": 30843,
+      "sha256": "c553e8fd7984126ea4c6868b994140ecd6e6ea51a73d21bc0dc0952a3337acc4",
       "status": 200
     },
     "/3d": {
@@ -110,13 +111,13 @@
       "status": 200
     },
     "/guide": {
-      "bytes": 117082,
-      "sha256": "0ce856ed9703a987070e47efc8d0b107ef702c5e77dd5104005d0c630a2ad858",
+      "bytes": 153136,
+      "sha256": "b39c1037df8acb9eb472ee7cd1072510cbcdaf4ef1714dce56d8f03771191d74",
       "status": 200
     },
     "/honeypot": {
-      "bytes": 20306,
-      "sha256": "a7825e0d9b5979789649fc7a9587609af1763ae5dc5c45927e34abbd58a3dde1",
+      "bytes": 21627,
+      "sha256": "91ade2b8c6912a689fc06f5c87e4bc846449f60e747f17d88468f73f5dd7af3c",
       "status": 200
     },
     "/icon-192.png": {
@@ -127,6 +128,11 @@
     "/icon-512.png": {
       "bytes": 6435,
       "sha256": "92380ebe3f15db048cab4ed4461b2a302661f9d71023aa2f50267d0d24b40c2e",
+      "status": 200
+    },
+    "/livemap": {
+      "bytes": 14751,
+      "sha256": "b82ff56037206e66c312df68ed831c161e92ecf0c23aff1d6bbe92c1ad3e7878",
       "status": 200
     },
     "/manifest.webmanifest": {
@@ -175,8 +181,8 @@
       "status": 200
     },
     "/wifi": {
-      "bytes": 36085,
-      "sha256": "2bcb8f7bf7a6e0f12679dd0bd8b98ddcbfcd82218b6ce73b671e6835e1baf6ac",
+      "bytes": 36367,
+      "sha256": "33beaa4f2bcb7fcda8ca79106cea0d4daf398b427e0f949a6e98d5a4acce7930",
       "status": 200
     },
     "/world-map.jpg": {

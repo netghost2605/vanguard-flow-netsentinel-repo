@@ -3195,6 +3195,8 @@ def _nm_honeypot_autoblock_hook(rec, count):
         return
     if count < 2:
         return
+    if rec.get('masked') or _nm_hp_is_masked(rec.get('ip')):
+        return                      # a Docker gateway address: blocking it would cut Docker off, not the attacker
     try:
         ok, err = _nm_firewall_block(rec['ip'])
         if ok:
@@ -3225,14 +3227,12 @@ def _nm_honeypot_control(req):
                         if _nm_is_private_ip(ip)}
         except Exception:
             _exc_debug('hp control excl')
-        _NM_HONEYPOT = _NMHoneypot(on_hit=_nm_honeypot_autoblock_hook,
+        _NM_HONEYPOT = _nm_hp_make(on_hit=_nm_honeypot_autoblock_hook,
                                    exclude_ips=excl, db=_nm_store(),
                                    tarpit=_NM_HP_TARPIT['on'])
         bound = _NM_HONEYPOT.start()
         if bound == 0:
-            return {'ok': False, 'error':
-                    'No decoy ports could be bound. Ports below 1024 need '
-                    'Administrator or root.'}
+            return {'ok': False, 'error': _nm_hp_start_error(_NM_HONEYPOT)}
         return {'ok': True, 'msg': 'started on %d socket(s)' % bound,
                 'bound': bound}
 
@@ -3343,6 +3343,15 @@ def _nm_threat_feed(limit=200, include_firewall=False):
         if not ip or ip.startswith('127.'):
             return
         g = geo.get(ip) or {}
+        lan = False
+        if not g and _nm_is_private_ip(ip) and not _nm_hp_is_masked(ip):
+            # A visitor on this network has no place in the world of its own, so it is plotted on the home pin
+            # (and flagged lan) rather than silently left off the map. Docker's own gateway address is not a visitor.
+            hg = _nm_home_geo()
+            if hg:
+                g = {'lat': hg.get('lat'), 'lon': hg.get('lon'), 'city': 'Your network (LAN)', 'country': 'this network',
+                     'flag': '\U0001F3E0'}
+                lan = True
         cur = out.get(ip)
         # Keep the most severe classification seen for a given address.
         rank = {'info': 0, 'warn': 1, 'critical': 2}
@@ -3359,7 +3368,7 @@ def _nm_threat_feed(limit=200, include_firewall=False):
             'lat': g.get('lat'), 'lon': g.get('lon'),
             'country': g.get('country', ''), 'city': g.get('city', ''),
             'flag': g.get('flag', ''), 'isp': g.get('isp', ''),
-            'cc': g.get('countryCode', ''),
+            'cc': g.get('countryCode', ''), 'lan': lan,
         })
         rec['count'] = rec.get('count', 0) + 1
         if kind not in rec['kinds']:
@@ -3527,7 +3536,7 @@ class _NMHoneypot:
         self._tarpit_active = 0
         self._tarpit_seconds = 0.0
 
-    def _record(self, ip, port, first_bytes, force=False, proto='tcp'):
+    def _record(self, ip, port, first_bytes, force=False, proto='tcp', when=None, service=None, tool=None):
         import time
         # Only loopback is ever dropped outright - a machine cannot meaningfully
         # probe itself. Known/excluded hosts are RECORDED but flagged: a device
@@ -3538,13 +3547,15 @@ class _NMHoneypot:
             return
         known = ip in self._exclude
         rec = {'ip': ip, 'port': port, 'proto': proto,
-               'service': (_NM_HONEYPOT_UDP_PORTS.get(port) if proto == 'udp'
-                           else _NM_HONEYPOT_PORTS.get(port)) or str(port),
-               'time': time.time(),
+               'service': service or (_NM_HONEYPOT_UDP_PORTS.get(port) if proto == 'udp'
+                                      else _NM_HONEYPOT_PORTS.get(port)) or str(port),
+               'time': when or time.time(),
                'known': known,
-               'tool': _nm_hp_fingerprint(first_bytes),
+               'tool': tool if tool is not None else _nm_hp_fingerprint(first_bytes),
                'sample': first_bytes[:120].decode('latin-1', 'replace')
                          if first_bytes else ''}
+        if _nm_hp_is_masked(ip) or (getattr(self, 'MASK_PRIVATE', False) and _nm_is_private_ip(ip)):
+            rec['masked'] = True                  # a Docker/WSL gateway address, not the real visitor
         with self._lock:
             self._hits.append(rec)
             if len(self._hits) > self.MAX_HITS:
@@ -3822,6 +3833,1682 @@ class _NMHoneypot:
             except Exception:
                 _exc_debug('honeypot summary stats')
         return d
+
+
+# ── T-Pot as the honeypot ────────────────────────────────────────────────────
+# T-Pot (Deutsche Telekom Security, 20+ honeypots in Docker, see C:\tpotce-master) now does the catching; this app
+# no longer opens decoy ports of its own. T-Pot's Logstash writes every event into Elasticsearch, which T-Pot
+# publishes on this PC only (127.0.0.1:64298). We poll it every few seconds and file each event exactly like a
+# hit on the old decoy ports, so the Honeypot window, threat radar, alerts, phone alerts and auto-block all
+# keep working. The built-in decoys stay in the code as a fallback: set "source": "builtin" in honeypot_prefs.json.
+_NM_TPOT_ES = 'http://127.0.0.1:64298'
+_NM_TPOT_DIR = r'C:\tpotce-master'
+_NM_TPOT_SKIP = ('Suricata', 'P0f', 'Fatt', 'NGINX', 'Nginx')   # network-monitor events and T-Pot's own portal log (our own polling), not visitors
+_NM_TPOT_SKIP_EVENTS = ('cowrie.session.closed', 'cowrie.log.closed', 'cowrie.client.version', 'cowrie.client.kex',
+                        'cowrie.client.size', 'cowrie.session.params', 'cowrie.client.fingerprint',
+                        'cowrie.direct-tcpip.data')    # follow-up noise inside one connection
+_NM_TPOT_FIELDS = ['@timestamp', 'type', 'src_ip', 'dest_port', 'proto', 'protocol', 'transport', 'eventid',
+                   'event_type', 'username', 'password', 'input', 'url', 'request', 'msg', 'message', 'payload',
+                   'http', 'user_agent', 'signature']
+
+
+def _nm_hp_is_masked(ip):
+    """True for the private addresses Docker Desktop / WSL put on traffic they forward: T-Pot then sees the gateway,
+    not the real visitor, so such a source must never be firewall-blocked (that could cut Docker off)."""
+    try:
+        import ipaddress
+        a = ipaddress.ip_address(str(ip))
+        if a.version != 4:
+            return False
+        for net in ('172.16.0.0/12', '192.168.65.0/24', '192.168.127.0/24', '10.0.75.0/24', '198.18.0.0/15'):
+            if a in ipaddress.ip_network(net):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _nm_hp_prefs():
+    d = {'source': 'tpot', 'es': _NM_TPOT_ES, 'remote': False, 'host': ''}
+    try:
+        v = _nm_wifi_load('honeypot_prefs.json', {}, None)
+        if isinstance(v, dict):
+            if str(v.get('source', '')).lower() in ('tpot', 'builtin'):
+                d['source'] = str(v['source']).lower()
+            if str(v.get('es', '')).startswith('http://127.0.0.1') or str(v.get('es', '')).startswith('http://localhost'):
+                d['es'] = str(v['es']).rstrip('/')
+    except Exception:
+        _exc_debug('hp prefs')
+    e = os.environ.get('NM_HONEYPOT_SOURCE', '').strip().lower()
+    if e in ('tpot', 'builtin'):
+        d['source'] = e
+    try:
+        _r = _nm_tpot_remote_load()
+        if _r and d['source'] == 'tpot':
+            d['es'] = _nm_tpot_remote_base(_r) + '/es'
+            d['remote'] = True
+            d['host'] = _r['host']
+    except Exception:
+        _exc_debug('hp prefs remote')
+    return d
+
+
+# ── T-Pot running in a VM (or on another machine): read it through its portal ────────────────────────────────
+# Docker Desktop hides real visitor addresses; a Linux VM with a bridged network card does not. In that mode the
+# app reads Elasticsearch through T-Pot's own web portal (https://<vm>:64297/es/) with a web login made for the
+# app. The portal's certificate is self-signed, so its fingerprint is pinned when you connect and checked on every
+# request after that (a changed certificate is refused). The password is protected with Windows DPAPI (only this
+# Windows user can read it back), never shown again and never sent to a phone.
+_NM_TPOT_REMOTE_FILE = 'tpot_remote.json'
+_NM_TPOT_PORTAL_PORT = 64297
+
+
+def _nm_secret_protect(text):
+    """Text -> protected string. Windows: DPAPI bound to this user. Elsewhere: plain base64 (the file is mode 600)."""
+    import base64
+    raw = text.encode('utf-8')
+    if os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _Blob(ctypes.Structure):
+                _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_char))]
+            buf = ctypes.create_string_buffer(raw, len(raw))
+            bin_ = _Blob(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+            out = _Blob()
+            if ctypes.windll.crypt32.CryptProtectData(ctypes.byref(bin_), 'NetSentinel', None, None, None, 0,
+                                                      ctypes.byref(out)):
+                data = ctypes.string_at(out.pbData, out.cbData)
+                ctypes.windll.kernel32.LocalFree(out.pbData)
+                return 'dpapi:' + base64.b64encode(data).decode('ascii')
+        except Exception:
+            _exc_debug('dpapi protect')
+    return 'b64:' + base64.b64encode(raw).decode('ascii')
+
+
+def _nm_secret_unprotect(tok):
+    import base64
+    try:
+        kind, _, b = str(tok).partition(':')
+        raw = base64.b64decode(b)
+        if kind == 'b64':
+            return raw.decode('utf-8')
+        if kind == 'dpapi' and os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+
+            class _Blob(ctypes.Structure):
+                _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_char))]
+            buf = ctypes.create_string_buffer(raw, len(raw))
+            bin_ = _Blob(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+            out = _Blob()
+            if ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(bin_), None, None, None, None, 0, ctypes.byref(out)):
+                data = ctypes.string_at(out.pbData, out.cbData)
+                ctypes.windll.kernel32.LocalFree(out.pbData)
+                return data.decode('utf-8')
+    except Exception:
+        _exc_debug('secret unprotect')
+    return ''
+
+
+def _nm_tpot_host_ok(host):
+    """The portal must be on your own network: a private address or a short local name. Never a public host."""
+    h = str(host or '').strip().lower()
+    if not h or len(h) > 63 or not re.match(r'^[a-z0-9][a-z0-9.-]*$', h):
+        return False
+    if re.match(r'^\d+\.\d+\.\d+\.\d+$', h):
+        try:
+            import ipaddress
+            a = ipaddress.ip_address(h)
+            return a.is_private or a.is_loopback
+        except Exception:
+            return False
+    return '.' not in h or h.endswith(('.local', '.lan', '.home', '.localdomain'))
+
+
+def _nm_tpot_remote_load():
+    """The saved VM connection with its password, or None. Only used inside this process."""
+    try:
+        v = _nm_wifi_load(_NM_TPOT_REMOTE_FILE, {}, None)
+        if isinstance(v, dict) and v.get('host') and v.get('user') and v.get('pw'):
+            pw = _nm_secret_unprotect(v['pw'])
+            if pw and _nm_tpot_host_ok(v['host']):
+                return {'host': str(v['host']), 'port': int(v.get('port') or _NM_TPOT_PORTAL_PORT),
+                        'user': str(v['user']), 'password': pw, 'fp': str(v.get('fp') or '')}
+    except Exception:
+        _exc_debug('tpot remote load')
+    return None
+
+
+def _nm_tpot_remote_info():
+    """What the page may see: never the password or the fingerprint itself."""
+    r = _nm_tpot_remote_load()
+    if not r:
+        return {'configured': False}
+    return {'configured': True, 'host': r['host'], 'port': r['port'], 'user': r['user'], 'pinned': bool(r['fp'])}
+
+
+def _nm_tpot_remote_base(r=None):
+    r = r or _nm_tpot_remote_load()
+    return ('https://%s:%d' % (r['host'], r['port'])) if r else ''
+
+
+def _nm_tpot_fingerprint(host, port, timeout=6):
+    import socket as _s, ssl, hashlib
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with _s.create_connection((host, int(port)), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=None) as tls:
+            return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+
+
+def _nm_tpot_http(url, body=None, timeout=6):
+    """GET (body None) or POST JSON. Talks to the saved VM portal with its login and pinned certificate when the URL
+    belongs to it; any other URL (T-Pot in Docker on this PC) is plain http as before."""
+    import json as _j
+    r = _nm_tpot_remote_load()
+    if r and url.startswith(_nm_tpot_remote_base(r) + '/'):
+        import http.client, ssl, hashlib, base64
+        pu = urllib.parse.urlsplit(url)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection(r['host'], r['port'], timeout=timeout, context=ctx)
+        try:
+            conn.connect()
+            fp = hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest()
+            if r['fp'] and fp != r['fp']:
+                raise RuntimeError('the VM’s certificate changed since you connected (refusing to send the login). '
+                                   'If you reinstalled T-Pot, press Connect again.')
+            hdr = {'Authorization': 'Basic ' + base64.b64encode(('%s:%s' % (r['user'], r['password'])).encode('utf-8')).decode('ascii')}
+            data = None
+            if body is not None:
+                data = _j.dumps(body).encode('utf-8')
+                hdr['Content-Type'] = 'application/json'
+            conn.request('POST' if data is not None else 'GET', pu.path + (('?' + pu.query) if pu.query else ''), body=data, headers=hdr)
+            resp = conn.getresponse()
+            txt = resp.read().decode('utf-8', 'replace')
+            if resp.status == 401:
+                raise RuntimeError('the VM refused the web login (401). Check the user name and password.')
+            if resp.status >= 400:
+                raise RuntimeError('the VM answered HTTP %d' % resp.status)
+            return _j.loads(txt or '{}')
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    data = None if body is None else _j.dumps(body).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return _j.loads(resp.read().decode('utf-8', 'replace') or '{}')
+
+
+def _nm_tpot_remote_set(host, user, password, port=None, fingerprint=None, probe=None):
+    """Connect to T-Pot in a VM: check the address, pin the certificate, test the login, then save it."""
+    host = str(host or '').strip()
+    host = re.sub(r'^[A-Za-z]+://', '', host).split('/')[0].split('?')[0].strip()      # a pasted https://host:port/ is fine
+    if not host:
+        return {'ok': False, 'error': 'Enter the VM\u2019s address first (for example 192.168.1.146).'}
+    if ':' in host and host.count(':') == 1:
+        host, _, p = host.partition(':')
+        port = port or p
+    try:
+        port = int(port or _NM_TPOT_PORTAL_PORT)
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'The port must be a number.'}
+    user = str(user or '').strip()
+    password = str(password or '')
+    if not _nm_tpot_host_ok(host):
+        return {'ok': False, 'error': 'Use the VM’s address on your own network (for example 192.168.1.146). Public hosts are not allowed.'}
+    if not user or not password:
+        return {'ok': False, 'error': 'Enter the web user name and password you chose in the T-Pot installer.'}
+    if len(user) > 64 or len(password) > 200 or ':' in user:
+        return {'ok': False, 'error': 'That user name or password is not valid for the portal.'}
+    try:
+        fp = fingerprint or _nm_tpot_fingerprint(host, port)
+    except Exception as ex:
+        return {'ok': False, 'error': 'Cannot reach %s:%d (%s). Is the VM up and has the T-Pot install finished?' % (host, port, str(ex)[:60])}
+    # test with the candidate (saved first so the transport can use it; the old one is restored on failure)
+    old = _nm_wifi_load(_NM_TPOT_REMOTE_FILE, None, None)
+    rec = {'host': host, 'port': port, 'user': user, 'pw': _nm_secret_protect(password), 'fp': fp}
+    _nm_wifi_save(_NM_TPOT_REMOTE_FILE, rec, None)
+    try:
+        h = (probe or _nm_tpot_http)('https://%s:%d/es/_cluster/health' % (host, port), None)
+        if str(h.get('status') or '') not in ('green', 'yellow'):
+            raise RuntimeError('Elasticsearch in the VM reports "%s"; give T-Pot a few more minutes' % (h.get('status') or 'no status'))
+    except Exception as ex:
+        if old:
+            _nm_wifi_save(_NM_TPOT_REMOTE_FILE, old, None)
+        else:
+            _nm_tpot_remote_forget_file()
+        return {'ok': False, 'error': 'Connected, but: %s' % str(ex)[:160]}
+    try:
+        p = _nm_wifi_dir(None) / _NM_TPOT_REMOTE_FILE
+        if os.name != 'nt':
+            os.chmod(str(p), 0o600)
+        else:
+            _nm_tpot_run(['icacls', str(p), '/inheritance:r', '/grant:r', '%s:F' % os.environ.get('USERNAME', 'Users')], None, 10)
+    except Exception:
+        _exc_debug('tpot remote acl')
+    return {'ok': True, 'message': 'Connected to T-Pot at %s. Reading its events now.' % host}
+
+
+def _nm_tpot_remote_forget_file():
+    try:
+        p = _nm_wifi_dir(None) / _NM_TPOT_REMOTE_FILE
+        if p.exists():
+            p.unlink()
+    except Exception:
+        _exc_debug('tpot remote forget')
+
+
+# ── Deploy a T-Pot VM for another user (VMware Workstation or VirtualBox) ────────────────────────────────────
+# The installer carries the recipe, not a disk image (an image would hold somebody's logins, SSH keys and 160 GB of
+# disk). One button on the T-Pot page: find the hypervisor, download the Debian installer (checksum verified), make a
+# copy of it that installs itself with the answers typed in the dialog, create the VM with the settings that are known
+# to work, start it, wait while Debian and then T-Pot install themselves, and connect NetSentinel to the result.
+# The two logins are typed by the person deploying: the OS password is stored only as a hash on the VM, the web login
+# only in a root-only file that the VM deletes when T-Pot is installed. The copied installer disc is deleted at the end.
+_NM_VM_DEB_BASE = 'https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/'
+_NM_VM_STEPS = ['Check this PC', 'Get the Debian installer', 'Prepare the install disc', 'Create the virtual machine',
+                'Install Debian', 'Install T-Pot', 'Connect NetSentinel']
+_NM_VM_LOCK = threading.Lock()
+_NM_VM_JOB = {'job': None}
+_NM_VM_TZ = {'GMT Standard Time': 'Europe/London', 'Greenwich Standard Time': 'Atlantic/Reykjavik',
+             'W. Europe Standard Time': 'Europe/Berlin', 'Romance Standard Time': 'Europe/Paris',
+             'Central Europe Standard Time': 'Europe/Budapest', 'Central European Standard Time': 'Europe/Warsaw',
+             'Eastern Standard Time': 'America/New_York', 'Central Standard Time': 'America/Chicago',
+             'Mountain Standard Time': 'America/Denver', 'Pacific Standard Time': 'America/Los_Angeles',
+             'AUS Eastern Standard Time': 'Australia/Sydney', 'UTC': 'UTC'}
+_NM_VM_KB = {0x0809: 'gb', 0x0409: 'us', 0x0407: 'de', 0x040c: 'fr', 0x0c0a: 'es', 0x0410: 'it', 0x0c09: 'us', 0x1009: 'us'}
+
+
+def _nm_vm_find_tools(env=None, exists=None):
+    """Hypervisors on this PC: [{'kind': 'vmware'|'virtualbox', 'name', 'path', 'extra'}]. Nothing is started."""
+    env = os.environ if env is None else env
+    exists = exists or os.path.isfile
+    out = []
+    pf = [env.get('ProgramFiles(x86)', ''), env.get('ProgramFiles', ''), env.get('ProgramW6432', '')]
+    seen = set()
+    for base in pf:
+        if not base:
+            continue
+        for sub, nm in (('VMware\\VMware Workstation', 'VMware Workstation'), ('VMware\\VMware Player', 'VMware Player')):
+            vr = base + '\\' + sub + '\\vmrun.exe'
+            if vr in seen:
+                continue
+            seen.add(vr)
+            if exists(vr):
+                out.append({'kind': 'vmware', 'name': nm, 'path': vr,
+                            'extra': base + '\\' + sub + '\\vmware-vdiskmanager.exe'})
+        vb = base + '\\Oracle\\VirtualBox\\VBoxManage.exe'
+        if vb not in seen:
+            seen.add(vb)
+            if exists(vb):
+                out.append({'kind': 'virtualbox', 'name': 'VirtualBox', 'path': vb, 'extra': ''})
+    if env.get('VBOX_MSI_INSTALL_PATH'):
+        vb = env['VBOX_MSI_INSTALL_PATH'].rstrip('\\') + '\\VBoxManage.exe'
+        if vb not in seen and exists(vb):
+            out.append({'kind': 'virtualbox', 'name': 'VirtualBox', 'path': vb, 'extra': ''})
+    if os.name != 'nt':
+        import shutil as _sh
+        vr = _sh.which('vmrun')
+        if vr:
+            out.append({'kind': 'vmware', 'name': 'VMware Workstation', 'path': vr,
+                        'extra': _sh.which('vmware-vdiskmanager') or ''})
+        vb = _sh.which('VBoxManage')
+        if vb:
+            out.append({'kind': 'virtualbox', 'name': 'VirtualBox', 'path': vb, 'extra': ''})
+    return out
+
+
+def _nm_vm_host(path=None):
+    """RAM (MB), CPU threads and free disk (GB) of this PC."""
+    import shutil as _sh
+    d = {'ram_mb': 0, 'cpus': os.cpu_count() or 2, 'free_gb': 0}
+    try:
+        if os.name == 'nt':
+            import ctypes
+
+            class _MS(ctypes.Structure):
+                _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                            ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
+                            ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
+                            ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
+                            ('sullAvailExtendedVirtual', ctypes.c_ulonglong)]
+            ms = _MS()
+            ms.dwLength = ctypes.sizeof(_MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
+            d['ram_mb'] = int(ms.ullTotalPhys // (1024 * 1024))
+        else:
+            for ln in open('/proc/meminfo'):
+                if ln.startswith('MemTotal:'):
+                    d['ram_mb'] = int(ln.split()[1]) // 1024
+                    break
+    except Exception:
+        _exc_debug('vm host ram')
+    try:
+        p = path or os.path.expanduser('~')
+        while p and not os.path.exists(p):
+            np_ = os.path.dirname(p)
+            if np_ == p:
+                break
+            p = np_
+        d['free_gb'] = int(_sh.disk_usage(p).free // (1024 ** 3))
+    except Exception:
+        _exc_debug('vm host disk')
+    return d
+
+
+def _nm_vm_locale_guess():
+    """A sensible time zone and keyboard layout for the preseed (the person can change both)."""
+    tz, kb = 'UTC', 'us'
+    try:
+        if os.name == 'nt':
+            import ctypes
+            rc, out = _nm_tpot_run(['tzutil', '/g'], None, 6)
+            if rc == 0:
+                tz = _NM_VM_TZ.get(out.strip(), 'UTC')
+            kb = _NM_VM_KB.get(ctypes.windll.user32.GetKeyboardLayout(0) & 0xFFFF, 'us')
+    except Exception:
+        _exc_debug('vm locale')
+    return tz, kb
+
+
+def _nm_vm_defaults(host=None, base_dir=None):
+    host = host or _nm_vm_host(base_dir)
+    ram = int(max(8192, min(16384, (host['ram_mb'] // 2) // 1024 * 1024)))
+    tz, kb = _nm_vm_locale_guess()
+    base = base_dir or os.path.join(os.path.expanduser('~'), 'NetSentinel-TPot')
+    return {'dir': base, 'ram_mb': ram, 'cpus': int(max(2, min(4, host['cpus'] // 2))), 'disk_gb': 128,
+            'tz': tz, 'kb': kb, 'os_user': 'tpotadmin', 'web_user': 'tpotweb'}
+
+
+_NM_VM_USER_RE = re.compile(r'^[a-z][a-z0-9_-]{1,30}$')
+_NM_VM_WEBPW_RE = re.compile(r'^[A-Za-z0-9._@#%+=-]{8,64}$')
+
+
+def _nm_vm_validate(req, host, tools):
+    """Clean the form. Returns (clean, error). Passwords are only checked here, never logged or echoed."""
+    r = req or {}
+    kind = str(r.get('hypervisor') or '').strip().lower()
+    tool = next((t for t in tools if t['kind'] == kind), None) if kind else (tools[0] if tools else None)
+    if tool is None:
+        return None, ('No VMware Workstation or VirtualBox found on this PC. Install one of them first (both are free '
+                      'for personal use), then press Check this PC again.')
+    c = {'tool': tool}
+    c['dir'] = str(r.get('dir') or '').strip().strip('"')
+    if not c['dir'] or len(c['dir']) > 200:
+        return None, 'Choose a folder for the virtual machine.'
+    if os.path.isdir(c['dir']) and os.listdir(c['dir']):
+        return None, 'That folder is not empty. Choose a new folder so nothing is overwritten.'
+    for k, lo, hi, nm in (('ram_mb', 4096, 65536, 'Memory'), ('cpus', 1, 32, 'Processors'), ('disk_gb', 40, 2048, 'Disk size')):
+        try:
+            c[k] = int(r.get(k))
+        except (TypeError, ValueError):
+            return None, '%s must be a number.' % nm
+        if not lo <= c[k] <= hi:
+            return None, '%s must be between %d and %d.' % (nm, lo, hi)
+    if c['ram_mb'] < 8192:
+        return None, 'T-Pot needs at least 8 GB (8192 MB) of memory for the VM.'
+    if host.get('ram_mb') and c['ram_mb'] > host['ram_mb'] - 4096:
+        return None, 'That leaves Windows less than 4 GB. This PC has %d MB; give the VM less.' % host['ram_mb']
+    if host.get('free_gb') and host['free_gb'] < 40:
+        return None, 'Only %d GB is free on that drive; the VM needs at least 40 GB to start (it grows as T-Pot stores data).' % host['free_gb']
+    c['os_user'] = str(r.get('os_user') or '').strip()
+    c['web_user'] = str(r.get('web_user') or '').strip()
+    if not _NM_VM_USER_RE.match(c['os_user']) or c['os_user'] in ('root', 'admin', 'administrator'):
+        return None, 'The VM user name must be 2 to 31 lower-case letters, digits, - or _, starting with a letter (not root or admin).'
+    if not _NM_VM_USER_RE.match(c['web_user']):
+        return None, 'The portal user name must be 2 to 31 lower-case letters, digits, - or _, starting with a letter.'
+    pw = str(r.get('os_pw') or '')
+    if len(pw) < 8 or len(pw) > 120 or '\n' in pw or '\r' in pw or '\x00' in pw:
+        return None, 'The VM password needs at least 8 characters.'
+    c['os_pw'] = pw
+    wp = str(r.get('web_pw') or '')
+    if not _NM_VM_WEBPW_RE.match(wp):
+        return None, 'The portal password needs 8 to 64 characters from: letters, digits and . _ - @ # % + = (no spaces or quotes).'
+    if wp == pw:
+        return None, 'Use a different password for the portal than for the VM.'
+    c['web_pw'] = wp
+    tz = str(r.get('tz') or 'UTC').strip()
+    kb = str(r.get('kb') or 'us').strip().lower()
+    if not re.match(r'^[A-Za-z_]+(/[A-Za-z0-9_+-]+){0,2}$', tz) or tz.upper().startswith(('..', '/')):
+        return None, 'That time zone is not valid. Use a name like Europe/London.'
+    if not re.match(r'^[a-z]{2}(-[a-z0-9]+)?$', kb):
+        return None, 'That keyboard layout is not valid. Use a code like gb or us.'
+    c['tz'], c['kb'] = tz, kb
+    c['show'] = bool(r.get('show', True))
+    return c, ''
+
+
+def _nm_sha512_crypt(password, salt=None, rounds=5000):
+    """glibc/Drepper SHA-512 crypt ($6$): what the Debian installer wants for a hashed password. Python 3.13 dropped
+    the crypt module, and no other package is wanted for ten lines of hashing."""
+    import hashlib, os as _os
+    B64 = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+    if salt is None:
+        salt = ''.join(B64[b & 63] for b in _os.urandom(16))
+    salt = salt[:16]
+    pw = password.encode('utf-8')
+    sb = salt.encode('ascii')
+    H = hashlib.sha512
+    b = H(pw + sb + pw).digest()
+    a_in = pw + sb
+    n = len(pw)
+    while n > 64:
+        a_in += b
+        n -= 64
+    a_in += b[:n]
+    n = len(pw)
+    while n:
+        a_in += b if n & 1 else pw
+        n >>= 1
+    a = H(a_in).digest()
+    dp = H(pw * len(pw)).digest()
+    p = (dp * (len(pw) // 64 + 1))[:len(pw)]
+    ds = H(sb * (16 + a[0])).digest()
+    s = (ds * (len(sb) // 64 + 1))[:len(sb)]
+    c = a
+    for i in range(rounds):
+        x = b''
+        x += p if i & 1 else c
+        if i % 3:
+            x += s
+        if i % 7:
+            x += p
+        x += c if i & 1 else p
+        c = H(x).digest()
+
+    def b64_from_24(b2, b1, b0, n_):
+        w = (b2 << 16) | (b1 << 8) | b0
+        o = ''
+        for _ in range(n_):
+            o += B64[w & 63]
+            w >>= 6
+        return o
+    idx = [(0, 21, 42), (22, 43, 1), (44, 2, 23), (3, 24, 45), (25, 46, 4), (47, 5, 26), (6, 27, 48), (28, 49, 7),
+           (50, 8, 29), (9, 30, 51), (31, 52, 10), (53, 11, 32), (12, 33, 54), (34, 55, 13), (56, 14, 35),
+           (15, 36, 57), (37, 58, 16), (59, 17, 38), (18, 39, 60), (40, 61, 19), (62, 20, 41)]
+    out = ''.join(b64_from_24(c[x], c[y], c[z], 4) for x, y, z in idx) + b64_from_24(0, 0, c[63], 2)
+    return '$6$' + (('rounds=%d$' % rounds) if rounds != 5000 else '') + salt + '$' + out
+
+
+def _nm_iso_entries(f):
+    """Every file and folder of an ISO 9660 image: {ISO path (upper case, no ;1): {'lba','size','rr'}}.
+    'rr' is the Rock Ridge (real) file name, which is what Linux shows under /cdrom."""
+    import struct
+    SS = 2048
+    f.seek(16 * SS)
+    d = f.read(SS)
+    if d[1:6] != b'CD001' or d[0] != 1:
+        raise ValueError('not an ISO 9660 image')
+    root = d[156:190]
+    r_lba = struct.unpack('<I', root[2:6])[0]
+    r_len = struct.unpack('<I', root[10:14])[0]
+    out = {}
+
+    def rr_name(rec):
+        nl = rec[32]
+        i = 33 + nl
+        if nl % 2 == 0:
+            i += 1
+        name = b''
+        while i + 4 <= len(rec):
+            sig, ln = rec[i:i + 2], rec[i + 2]
+            if ln < 4:
+                break
+            if sig == b'NM' and ln >= 5:
+                name += rec[i + 5:i + ln]
+            i += ln
+        return name.decode('latin-1') if name else ''
+
+    def walk(lba, size, path):
+        f.seek(lba * SS)
+        buf = f.read(size)
+        i = 0
+        while i < len(buf):
+            ln = buf[i]
+            if ln == 0:
+                i = (i // SS + 1) * SS
+                continue
+            rec = buf[i:i + ln]
+            e_lba = struct.unpack('<I', rec[2:6])[0]
+            e_len = struct.unpack('<I', rec[10:14])[0]
+            nl = rec[32]
+            name = rec[33:33 + nl]
+            if name not in (b'\x00', b'\x01'):
+                nm = name.decode('latin-1').split(';')[0].upper()
+                full = path + '/' + nm
+                out[full] = {'lba': e_lba, 'size': e_len, 'rr': rr_name(rec), 'dir': bool(rec[25] & 2)}
+                if rec[25] & 2:
+                    walk(e_lba, e_len, full)
+            i += ln
+    walk(r_lba, r_len, '')
+    return out
+
+
+def _nm_iso_patch_same_size(path, edits):
+    """Overwrite files of an ISO image in place with text that is no longer than the file was. The rest is padded
+    with blank lines, so the file keeps its size and no directory record (ISO 9660 or Joliet) has to change.
+    edits: {'/README.TXT': b'...'}. Raises if a file is missing or the text does not fit."""
+    with open(path, 'r+b') as f:
+        ents = _nm_iso_entries(f)
+        for p, data in edits.items():
+            e = ents.get(p.upper())
+            if not e or e['dir']:
+                raise ValueError('%s is not on the disc image' % p)
+            if len(data) > e['size']:
+                raise ValueError('%s: %d bytes do not fit in %d' % (p, len(data), e['size']))
+            f.seek(e['lba'] * 2048)
+            f.write(data + b'\n' * (e['size'] - len(data)))
+    return True
+
+
+_NM_VM_FIRSTBOOT = r'''#!/bin/bash
+# NetSentinel: installs T-Pot on the first boot of this VM, once. Log: /var/log/tpot-firstboot.log
+exec >>/var/log/tpot-firstboot.log 2>&1
+DONE=/var/lib/tpot-firstboot.done
+[ -f "$DONE" ] && exit 0
+. /root/.tpot-deploy
+echo "== $(date) first boot: installing T-Pot for $TPOT_USER"
+echo "$TPOT_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-tpot-install
+chmod 440 /etc/sudoers.d/90-tpot-install
+for i in $(seq 1 120); do getent hosts github.com >/dev/null && break; sleep 5; done
+rm -rf "/home/$TPOT_USER/tpotce"
+sudo -u "$TPOT_USER" -H env WEB_USER="$WEB_USER" WEB_PW="$WEB_PW" bash -c 'cd ~ && git clone https://github.com/telekom-security/tpotce && cd tpotce && ./install.sh -s -t h -u "$WEB_USER" -p "$WEB_PW"'
+RC=$?
+rm -f /etc/sudoers.d/90-tpot-install
+if [ "$RC" -eq 0 ]; then
+  touch "$DONE"
+  shred -u /root/.tpot-deploy
+  systemctl disable tpot-firstboot.service
+  echo "== $(date) T-Pot installed, restarting"
+  systemctl reboot
+else
+  echo "== $(date) install failed (exit $RC); it will try again on the next start"
+fi
+exit 0
+'''
+
+
+def _nm_vm_preseed(c, hashed=None):
+    """The Debian installer's answer file. Everything the installer would ask is answered here."""
+    hashed = hashed or _nm_sha512_crypt(c['os_pw'])
+    unit = ['[Unit]', 'Description=T-Pot first boot install', 'After=network-online.target',
+            'Wants=network-online.target', '', '[Service]', 'Type=oneshot',
+            'ExecStart=/usr/local/sbin/tpot-firstboot.sh', 'TimeoutStartSec=0', '', '[Install]',
+            'WantedBy=multi-user.target']
+    q = lambda xs: ' '.join("'%s'" % x for x in xs)
+    late = ('cp /cdrom/%(sh)s /target/usr/local/sbin/tpot-firstboot.sh ; '
+            'chmod 755 /target/usr/local/sbin/tpot-firstboot.sh ; '
+            "printf '%%s\\n' %(unit)s > /target/etc/systemd/system/tpot-firstboot.service ; "
+            "printf '%%s\\n' %(env)s > /target/root/.tpot-deploy ; "
+            'chmod 600 /target/root/.tpot-deploy ; '
+            'in-target systemctl enable tpot-firstboot.service') % {
+        'sh': c['_sh_name'], 'unit': q(unit),
+        'env': q(['TPOT_USER=' + c['os_user'], 'WEB_USER=' + c['web_user'], 'WEB_PW=' + c['web_pw']])}
+    lines = [
+        '# NetSentinel: unattended Debian install for a T-Pot VM',
+        'd-i debian-installer/locale string en_US.UTF-8',
+        'd-i keyboard-configuration/xkb-keymap select %s' % c['kb'],
+        'd-i netcfg/choose_interface select auto',
+        'd-i netcfg/dhcp_timeout string 60',
+        'd-i netcfg/get_hostname string tpot',
+        'd-i netcfg/get_domain string local',
+        'd-i netcfg/hostname string tpot',
+        'd-i hw-detect/load_firmware boolean false',
+        'd-i mirror/country string manual',
+        'd-i mirror/protocol string http',
+        'd-i mirror/http/hostname string deb.debian.org',
+        'd-i mirror/http/directory string /debian',
+        'd-i mirror/http/proxy string',
+        'd-i passwd/root-login boolean false',
+        'd-i passwd/make-user boolean true',
+        'd-i passwd/user-fullname string T-Pot admin',
+        'd-i passwd/username string %s' % c['os_user'],
+        'd-i passwd/user-password-crypted password %s' % hashed,
+        'd-i clock-setup/utc boolean true',
+        'd-i clock-setup/ntp boolean true',
+        'd-i time/zone string %s' % c['tz'],
+        'd-i partman-auto/method string regular',
+        'd-i partman-auto/choose_recipe select atomic',
+        'd-i partman-lvm/device_remove_lvm boolean true',
+        'd-i partman-md/device_remove_md boolean true',
+        'd-i partman-partitioning/confirm_write_new_label boolean true',
+        'd-i partman/choose_partition select finish',
+        'd-i partman/confirm boolean true',
+        'd-i partman/confirm_nooverwrite boolean true',
+        'd-i apt-setup/cdrom/set-first boolean false',
+        'd-i apt-setup/use_mirror boolean true',
+        'd-i base-installer/install-recommends boolean false',
+        'tasksel tasksel/first multiselect ssh-server',
+        'd-i pkgsel/include string sudo git curl ca-certificates iproute2',
+        'd-i pkgsel/upgrade select none',
+        'popularity-contest popularity-contest/participate boolean false',
+        'd-i grub-installer/only_debian boolean true',
+        'd-i grub-installer/bootdev string default',
+        'd-i cdrom-detect/eject boolean false',
+        'd-i preseed/late_command string ' + late,
+        'd-i finish-install/reboot_in_progress note',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
+def _nm_vm_boot_cfg(preseed_rr):
+    """isolinux.cfg that boots the installer straight into the unattended install (no menu, no key press)."""
+    return ('default a\ntimeout 1\nlabel a\nkernel /install.amd/vmlinuz\n'
+            'append auto=true priority=critical file=/cdrom/%s initrd=/install.amd/initrd.gz\n' % preseed_rr).encode('ascii')
+
+
+def _nm_vm_prepare_iso(src, dst, c, hashed=None):
+    """Copy the verified Debian netinst ISO and make the copy install by itself. Returns nothing; raises on any problem
+    (for instance a Debian image laid out differently from the one this was written for)."""
+    import shutil as _sh
+    with open(src, 'rb') as f:
+        ents = _nm_iso_entries(f)
+    need = ['/ISOLINUX/ISOLINUX.CFG', '/README.TXT', '/README.HTM']
+    for n in need:
+        if n not in ents:
+            raise ValueError('This Debian image has a different layout (%s is missing); it cannot be prepared.' % n)
+    pre_rr = ents['/README.TXT']['rr'] or 'README.txt'
+    sh_rr = ents['/README.HTM']['rr'] or 'README.html'
+    c = dict(c)
+    c['_sh_name'] = sh_rr
+    pre = _nm_vm_preseed(c, hashed).encode('utf-8')
+    sh = _NM_VM_FIRSTBOOT.encode('utf-8')
+    cfg = _nm_vm_boot_cfg(pre_rr)
+    for p, data in (('/ISOLINUX/ISOLINUX.CFG', cfg), ('/README.TXT', pre), ('/README.HTM', sh)):
+        if len(data) > ents[p]['size']:
+            raise ValueError('%s is too small (%d bytes) for what has to go in it (%d bytes)' % (p, ents[p]['size'], len(data)))
+    _sh.copyfile(src, dst)
+    try:
+        _nm_iso_patch_same_size(dst, {'/ISOLINUX/ISOLINUX.CFG': cfg, '/README.TXT': pre, '/README.HTM': sh})
+    except Exception:
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        raise
+
+
+def _nm_vm_mac(kind, rnd=None):
+    import random
+    r = rnd or random.SystemRandom()
+    if kind == 'virtualbox':
+        return '08:00:27:%02x:%02x:%02x' % (r.randrange(256), r.randrange(256), r.randrange(256))
+    return '00:50:56:%02x:%02x:%02x' % (r.randrange(0x40), r.randrange(256), r.randrange(256))   # VMware's static range
+
+
+def _nm_vm_vmx(c, iso, mac):
+    """The .vmx that is known to start on Workstation 17/25: BIOS, SCSI disk, SATA CD, bridged e1000 with explicit PCIe
+    root ports (without them VMware cannot place the network card)."""
+    L = ['.encoding = "UTF-8"', 'config.version = "8"', 'virtualHW.version = "21"',
+         'displayName = "T-Pot honeypot (NetSentinel)"', 'guestOS = "debian12-64"',
+         'memsize = "%d"' % c['ram_mb'], 'numvcpus = "%d"' % c['cpus'], 'cpuid.coresPerSocket = "%d"' % c['cpus'],
+         'firmware = "bios"',
+         'scsi0.present = "TRUE"', 'scsi0.virtualDev = "lsilogic"', 'scsi0:0.present = "TRUE"',
+         'scsi0:0.fileName = "tpot.vmdk"',
+         'sata0.present = "TRUE"', 'sata0:1.present = "TRUE"', 'sata0:1.deviceType = "cdrom-image"',
+         'sata0:1.fileName = "%s"' % iso.replace('\\', '\\\\'), 'sata0:1.startConnected = "TRUE"',
+         'bios.bootOrder = "hdd,cdrom"',            # empty disk falls through to the CD; afterwards the disk wins
+         'ethernet0.present = "TRUE"', 'ethernet0.connectionType = "bridged"', 'ethernet0.virtualDev = "e1000"',
+         'ethernet0.addressType = "static"', 'ethernet0.address = "%s"' % mac.upper(), 'ethernet0.startConnected = "TRUE"',
+         'pciBridge0.present = "TRUE"']
+    for i in (4, 5, 6, 7):
+        L += ['pciBridge%d.present = "TRUE"' % i, 'pciBridge%d.virtualDev = "pcieRootPort"' % i, 'pciBridge%d.functions = "8"' % i]
+    L += ['usb.present = "FALSE"', 'sound.present = "FALSE"', 'floppy0.present = "FALSE"', 'mks.enable3d = "FALSE"',
+          'tools.syncTime = "TRUE"',
+          'isolation.tools.copy.disable = "TRUE"', 'isolation.tools.paste.disable = "TRUE"',
+          'isolation.tools.dnd.disable = "TRUE"', 'isolation.tools.hgfs.disable = "TRUE"',
+          'sharedFolder.maxNum = "0"', 'hgfs.mapRootShare = "FALSE"', 'hgfs.linkRootShare = "FALSE"']
+    return '\n'.join(L) + '\n'
+
+
+def _nm_vm_vmware_plan(c, vmx, vmdk, iso, mac, show=True):
+    """Commands (argument lists) that create and start the VM in VMware."""
+    tool = c['tool']
+    vdm = tool.get('extra') or 'vmware-vdiskmanager'
+    return {'create_disk': [vdm, '-c', '-s', '%dGB' % c['disk_gb'], '-a', 'lsilogic', '-t', '0', vmdk],
+            'start': [tool['path'], '-T', 'ws' if 'Workstation' in tool['name'] else 'player', 'start', vmx,
+                      'gui' if show else 'nogui'],
+            'list': [tool['path'], '-T', 'ws' if 'Workstation' in tool['name'] else 'player', 'list'],
+            'running_text': vmx}
+
+
+def _nm_vm_vbox_plan(c, name, iso, mac, adapter):
+    """Commands (argument lists) that create and start the VM in VirtualBox."""
+    vb = c['tool']['path']
+    base = c['dir']
+    vdi = os.path.join(base, name, name + '.vdi')
+    cmds = [[vb, 'createvm', '--name', name, '--ostype', 'Debian_64', '--register', '--basefolder', base],
+            [vb, 'modifyvm', name, '--memory', str(c['ram_mb']), '--cpus', str(c['cpus']), '--nic1', 'bridged',
+             '--bridgeadapter1', adapter, '--nictype1', '82540EM', '--macaddress1', mac.replace(':', '').upper(),
+             '--cableconnected1', 'on', '--boot1', 'disk', '--boot2', 'dvd', '--boot3', 'none', '--boot4', 'none',
+             '--audio-driver', 'none', '--usb', 'off', '--clipboard-mode', 'disabled', '--drag-and-drop', 'disabled',
+             '--graphicscontroller', 'vmsvga', '--vram', '16', '--rtcuseutc', 'on', '--firmware', 'bios'],
+            [vb, 'createmedium', 'disk', '--filename', vdi, '--size', str(c['disk_gb'] * 1024), '--format', 'VDI'],
+            [vb, 'storagectl', name, '--name', 'SATA', '--add', 'sata', '--controller', 'IntelAhci'],
+            [vb, 'storageattach', name, '--storagectl', 'SATA', '--port', '0', '--device', '0', '--type', 'hdd', '--medium', vdi],
+            [vb, 'storageattach', name, '--storagectl', 'SATA', '--port', '1', '--device', '0', '--type', 'dvddrive', '--medium', iso]]
+    return {'create': cmds,
+            'start': [vb, 'startvm', name, '--type', 'gui' if c.get('show', True) else 'headless'],
+            'state': [vb, 'showvminfo', name, '--machinereadable'],
+            'eject': [vb, 'storageattach', name, '--storagectl', 'SATA', '--port', '1', '--device', '0', '--type', 'dvddrive', '--medium', 'emptydrive']}
+
+
+def _nm_vbox_bridge_adapter(run):
+    """The up, physical adapter VirtualBox can bridge to: the first 'Up' entry that is not a virtual one."""
+    rc, out = run(None)
+    if rc != 0:
+        return ''
+    cur = {}
+    best = ''
+    for ln in out.splitlines() + ['']:
+        if not ln.strip():
+            if cur.get('Name') and cur.get('Status', '').lower() == 'up':
+                nm = cur['Name']
+                bad = any(w in nm.lower() for w in ('virtual', 'vmware', 'hyper-v', 'vethernet', 'loopback', 'tap', 'docker', 'wsl'))
+                if not bad and not best:
+                    best = nm
+            cur = {}
+            continue
+        k, _, v = ln.partition(':')
+        cur[k.strip()] = v.strip()
+    return best
+
+
+def _nm_vm_iso_lookup(fetch=None, head=None):
+    """Which Debian installer is current: file name, SHA-256, URL and size. Reads Debian's small SHA256SUMS file."""
+    import urllib.request
+    if fetch is None:
+        def fetch(url):
+            req = urllib.request.Request(url, headers={'User-Agent': 'NetSentinel'})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.read().decode('utf-8', 'replace')
+    txt = fetch(_NM_VM_DEB_BASE + 'SHA256SUMS')
+    best = None
+    for ln in txt.splitlines():
+        m = re.match(r'^([0-9a-f]{64})\s+\*?(debian-(\d+(?:\.\d+)*)-amd64-netinst\.iso)\s*$', ln.strip())
+        if m:
+            ver = tuple(int(x) for x in m.group(3).split('.'))
+            if best is None or ver > best[0]:
+                best = (ver, m.group(1), m.group(2))
+    if not best:
+        raise RuntimeError('Debian’s checksum list has no netinst installer for amd64 (the site layout may have changed).')
+    size = 0
+    try:
+        if head is None:
+            def head(url):
+                req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'NetSentinel'})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    return int(r.headers.get('Content-Length') or 0)
+        size = head(_NM_VM_DEB_BASE + best[2])
+    except Exception:
+        size = 0
+    return {'name': best[2], 'sha256': best[1], 'url': _NM_VM_DEB_BASE + best[2], 'size': size}
+
+
+def _nm_vm_download(url, dest, sha256, progress=None, cancel=None):
+    """Download to dest.part, check the SHA-256, then rename. Raises if the checksum is wrong (the file is deleted)."""
+    import urllib.request, hashlib
+    part = dest + '.part'
+    h = hashlib.sha256()
+    req = urllib.request.Request(url, headers={'User-Agent': 'NetSentinel'})
+    done = 0
+    with urllib.request.urlopen(req, timeout=30) as r, open(part, 'wb') as f:
+        total = int(r.headers.get('Content-Length') or 0)
+        while True:
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError('cancelled')
+            b = r.read(1024 * 1024)
+            if not b:
+                break
+            f.write(b)
+            h.update(b)
+            done += len(b)
+            if progress:
+                progress(done, total)
+    if h.hexdigest() != sha256:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise RuntimeError('The downloaded installer does not match Debian’s checksum, so it was deleted. Try again.')
+    os.replace(part, dest)
+    return done
+
+
+def _nm_vm_tcp_open(ip, port, timeout=2.0):
+    import socket as _s
+    try:
+        c = _s.create_connection((ip, port), timeout=timeout)
+        c.close()
+        return True
+    except Exception:
+        return False
+
+
+class _NMVmDeploy:
+    """One deployment run. A background thread walks the steps; status() is what the page polls (no secrets in it)."""
+    DEBIAN_TIMEOUT_S = 60 * 60
+    TPOT_TIMEOUT_S = 150 * 60
+    CONNECT_TIMEOUT_S = 25 * 60
+
+    def __init__(self, clean, deps=None, stop_after=None):
+        import threading
+        self.c = clean
+        self.d = deps or {}
+        self.stop_after = stop_after
+        self.state = 'running'
+        self.step = 0
+        self.msg = 'Starting'
+        self.pct = None
+        self.log = []
+        self.error = ''
+        self.ip = ''
+        self.mac = ''
+        self.cancel = threading.Event()
+        self.thread = None
+        self.vmx = ''
+        self.vm_name = 'tpot'
+        self.started = time.time()
+        self.paths = {}
+        self.plan = {}
+        self.web_pw_kept = clean.get('web_pw', '')
+
+    # ── plumbing ──
+    def _dep(self, k, default):
+        return self.d.get(k) or default
+
+    def _say(self, m, pct=None):
+        self.msg = m
+        self.pct = pct
+        if not self.log or self.log[-1][1] != m:
+            self.log.append([time.time(), m])
+            del self.log[:-80]
+        log.info('[tpot-vm] %s', m)
+
+    def _sleep(self, s):
+        self._dep('sleep', time.sleep)(s)
+
+    def _check_cancel(self):
+        if self.cancel.is_set():
+            raise RuntimeError('cancelled')
+
+    def status(self):
+        return {'state': self.state, 'step': self.step, 'steps': _NM_VM_STEPS, 'msg': self.msg, 'pct': self.pct,
+                'log': [[round(t), m] for t, m in self.log[-12:]], 'error': self.error, 'ip': self.ip,
+                'dir': self.c.get('dir', ''), 'hypervisor': self.c['tool']['name'], 'elapsed': int(time.time() - self.started)}
+
+    def start(self):
+        import threading
+        self.thread = threading.Thread(target=self._main, daemon=True, name='nm-tpot-vm')
+        self.thread.start()
+
+    def _main(self):
+        try:
+            self._run_steps()
+        except RuntimeError as ex:
+            if str(ex) == 'cancelled':
+                self.state = 'cancelled'
+                self._say('Cancelled. Nothing was deleted: the virtual machine (if it was created) is in %s.' % self.c['dir'])
+            else:
+                self.state = 'error'
+                self.error = str(ex)[:400]
+                self._say('Stopped: ' + self.error)
+        except Exception as ex:
+            _exc('tpot vm deploy')
+            self.state = 'error'
+            self.error = 'Unexpected problem: %s' % str(ex)[:300]
+            self._say('Stopped: ' + self.error)
+        finally:
+            self.c.pop('os_pw', None)
+            self.c.pop('web_pw', None)
+            self.web_pw_kept = ''
+
+    # ── hypervisor helpers ──
+    def _run(self, args, timeout=120):
+        return self._dep('run', _nm_tpot_run)(args, None, timeout)
+
+    def _spawn(self, args):
+        sp = self.d.get('spawn')
+        if sp:
+            return sp(args)
+        import subprocess
+        kw = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'stdin': subprocess.DEVNULL}
+        if os.name == 'nt':
+            kw['creationflags'] = 0x08000000 | 0x00000008        # no console window, detached
+        return subprocess.Popen(args, **kw)
+
+    def _vm_running(self):
+        t = self.c['tool']
+        if t['kind'] == 'vmware':
+            rc, out = self._run(self.plan['list'], 20)
+            return rc == 0 and os.path.normcase(self.vmx) in os.path.normcase(out)
+        rc, out = self._run(self.plan['state'], 20)
+        return rc == 0 and 'VMState="running"' in out
+
+    # ── the steps ──
+    def _run_steps(self):
+        c = self.c
+        self.step = 0
+        self._say('Checking this PC')
+        base = c['dir']
+        os.makedirs(base, exist_ok=True)
+        host = self._dep('host', _nm_vm_host)(base)
+        if host.get('free_gb') and host['free_gb'] < 40:
+            raise RuntimeError('Only %d GB is free where the VM goes; it needs at least 40 GB.' % host['free_gb'])
+        self._check_cancel()
+
+        self.step = 1
+        self._say('Looking up the current Debian installer')
+        iso = self._dep('lookup', _nm_vm_iso_lookup)()
+        orig = os.path.join(base, iso['name'])
+        self.paths['orig'] = orig
+        mb = ('%d MB' % (iso['size'] // (1024 * 1024))) if iso.get('size') else 'about 800 MB'
+
+        def prog(done, total):
+            self._check_cancel()
+            self._say('Downloading %s (%s) from cdimage.debian.org: %d MB' % (iso['name'], mb, done // (1024 * 1024)),
+                      (100.0 * done / total) if total else None)
+        self._dep('download', _nm_vm_download)(iso['url'], orig, iso['sha256'], prog, self.cancel)
+        self._say('Installer downloaded and its checksum matches Debian’s')
+        self._check_cancel()
+
+        self.step = 2
+        self._say('Making the install disc install by itself with your answers')
+        patched = os.path.join(base, 'tpot-install.iso')
+        self.paths['patched'] = patched
+        self._dep('prepare', _nm_vm_prepare_iso)(orig, patched, c)
+        self._check_cancel()
+
+        self.step = 3
+        t = c['tool']
+        self.mac = _nm_vm_mac(t['kind'])
+        if t['kind'] == 'vmware':
+            vmdir = os.path.join(base, 'tpot')
+            os.makedirs(vmdir, exist_ok=True)
+            self.vmx = os.path.join(vmdir, 'tpot.vmx')
+            vmdk = os.path.join(vmdir, 'tpot.vmdk')
+            with open(self.vmx, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(_nm_vm_vmx(c, patched, self.mac))
+            self.plan = _nm_vm_vmware_plan(c, self.vmx, vmdk, patched, self.mac, c.get('show', True))
+            self._say('Creating the virtual disk (%d GB, grows only as it fills)' % c['disk_gb'])
+            rc, out = self._run(self.plan['create_disk'], 180)
+            if rc != 0:
+                raise RuntimeError('VMware could not create the disk: %s' % out.strip()[-200:])
+        else:
+            adapter = c.get('adapter') or _nm_vbox_bridge_adapter(lambda _x: self._run([t['path'], 'list', 'bridgedifs'], 30))
+            if not adapter:
+                raise RuntimeError('VirtualBox found no network adapter to bridge to. Check that this PC is connected to the network.')
+            self.plan = _nm_vm_vbox_plan(c, self.vm_name, patched, self.mac, adapter)
+            self._say('Creating the VirtualBox machine')
+            for cmd in self.plan['create']:
+                rc, out = self._run(cmd, 180)
+                if rc != 0:
+                    raise RuntimeError('VirtualBox: %s' % out.strip()[-240:])
+        self._check_cancel()
+        self._say('Starting the virtual machine (a window opens; you can leave it alone)')
+        self._spawn(self.plan['start'])
+        for _ in range(12):
+            self._sleep(5)
+            if self._vm_running():
+                break
+        else:
+            raise RuntimeError('The virtual machine did not start. Open it in %s to see why: %s' % (t['name'], self.vmx or self.vm_name))
+        if self.stop_after == 'vm':
+            self.state = 'done'
+            self._say('Stopped after creating the VM (test)')
+            return
+
+        self.step = 4
+        self._say('Debian is installing itself (about 10 to 20 minutes). Finding the VM on your network')
+        ip = self._wait_for(self._debian_up, self.DEBIAN_TIMEOUT_S, 'Debian did not finish installing in an hour. Open the VM window to see where it stopped.')
+        self.ip = ip
+        if self.stop_after == 'debian':
+            self.state = 'done'
+            self._say('Debian is installed and answering at %s (test stop)' % ip)
+            return
+
+        self.step = 5
+        self._say('Debian is installed (%s). T-Pot is installing: it downloads about 3 GB of containers, 20 to 60 minutes' % ip)
+        self._wait_for(self._tpot_up, self.TPOT_TIMEOUT_S, 'T-Pot did not come up in 2.5 hours. In the VM, read /var/log/tpot-firstboot.log.')
+
+        self.step = 6
+        self._say('T-Pot is up at %s. Connecting NetSentinel (its database needs a few minutes)' % self.ip)
+        okmsg = self._wait_for(self._connect, self.CONNECT_TIMEOUT_S, 'T-Pot is running but NetSentinel could not log in. Enter the address and portal login on the T-Pot page.')
+        self._cleanup_disc()
+        self.state = 'done'
+        self.step = len(_NM_VM_STEPS)
+        self._say('Done. %s Reserve %s for MAC %s on your router so it keeps this address.' % (okmsg, self.ip, self.mac.upper()))
+
+    def _wait_for(self, fn, timeout, why):
+        t0 = time.time()
+        gone = 0
+        while True:
+            self._check_cancel()
+            r = fn()
+            if r:
+                return r
+            if not self._vm_running():
+                gone += 1
+                if gone >= 4:
+                    raise RuntimeError('The virtual machine is no longer running. Start it again from %s, or deploy again.' % self.c['tool']['name'])
+            else:
+                gone = 0
+            if time.time() - t0 > timeout:
+                raise RuntimeError(why)
+            self._sleep(15)
+
+    def _find_ip(self):
+        sweep = self._dep('sweep', _nm_arp_sweep)
+        m = sweep() or {}
+        return m.get(self.mac.lower(), '')
+
+    def _debian_up(self):
+        if not self.ip:
+            self.ip = self._find_ip()
+            if not self.ip:
+                return None
+            self._say('Debian is installing itself; the VM is at %s' % self.ip)
+        if self._dep('probe', _nm_vm_tcp_open)(self.ip, 22):
+            return self.ip
+        return None
+
+    def _tpot_up(self):
+        probe = self._dep('probe', _nm_vm_tcp_open)
+        if probe(self.ip, 64297) and probe(self.ip, 64295):
+            return True
+        ip = self._find_ip()                                  # it may have a new address after the reboot
+        if ip and ip != self.ip:
+            self.ip = ip
+        return False
+
+    def _connect(self):
+        r = self._dep('remote_set', _nm_tpot_remote_set)(self.ip, self.c['web_user'], self.web_pw_kept)
+        if r.get('ok'):
+            return r.get('message') or 'Connected.'
+        self._say('T-Pot is still starting (%s)' % (r.get('error') or '')[:90])
+        return None
+
+    def _cleanup_disc(self):
+        """Take the install disc out of the VM and delete the copies: the patched one holds the setup answers."""
+        t = self.c['tool']
+        try:
+            if t['kind'] == 'virtualbox':
+                self._run(self.plan['eject'] + ['--forceunmount'], 30)
+            else:
+                self._run([t['path'], '-T', 'ws' if 'Workstation' in t['name'] else 'player',
+                           'disconnectNamedDevice', self.vmx, 'sata0:1'], 30)
+        except Exception:
+            _exc_debug('vm eject')
+        left = []
+        for k in ('patched', 'orig'):
+            p = self.paths.get(k)
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    left.append(p)
+        if left:
+            self._say('Could not delete %s yet (the VM still holds it). Delete it after shutting the VM down: it contains your setup answers.' % ', '.join(left))
+        return left
+
+
+def _nm_vm_status():
+    j = _NM_VM_JOB['job']
+    if j is None:
+        return {'state': 'idle', 'steps': _NM_VM_STEPS}
+    return j.status()
+
+
+def _nm_vm_api(req, local=True, deps=None, stop_after=None):
+    """check / start / cancel the VM deployment. Loopback only: it starts programs and takes passwords."""
+    if not local:
+        return {'ok': False, 'error': 'Deploying a VM is only allowed from this PC.'}
+    deps = deps or {}
+    action = str((req or {}).get('action') or '').lower()
+    if action == 'check':
+        tools = deps.get('tools') or _nm_vm_find_tools()
+        base = None
+        host = (deps.get('host') or _nm_vm_host)(base)
+        d = _nm_vm_defaults(host)
+        out = {'ok': True, 'tools': [{'kind': t['kind'], 'name': t['name']} for t in tools], 'host': host,
+               'defaults': d, 'iso': {}}
+        try:
+            out['iso'] = (deps.get('lookup') or _nm_vm_iso_lookup)()
+            out['iso'].pop('sha256', None)
+        except Exception as ex:
+            out['iso'] = {'error': 'Could not reach cdimage.debian.org (%s)' % str(ex)[:80]}
+        out['job'] = _nm_vm_status()
+        return out
+    if action == 'cancel':
+        j = _NM_VM_JOB['job']
+        if j is not None and j.state == 'running':
+            j.cancel.set()
+        return {'ok': True}
+    if action == 'start':
+        with _NM_VM_LOCK:
+            j = _NM_VM_JOB['job']
+            if j is not None and j.state == 'running':
+                return {'ok': False, 'error': 'A deployment is already running.'}
+            if not (req or {}).get('consent'):
+                return {'ok': False, 'error': 'Tick the box to agree to the downloads first.'}
+            tools = deps.get('tools') or _nm_vm_find_tools()
+            base = str((req or {}).get('dir') or '').strip().strip('"') or None
+            host = (deps.get('host') or _nm_vm_host)(base)
+            clean, err = _nm_vm_validate(req, host, tools)
+            if clean is None:
+                return {'ok': False, 'error': err}
+            j = _NMVmDeploy(clean, deps=deps.get('job_deps'), stop_after=stop_after)
+            _NM_VM_JOB['job'] = j
+            j.start()
+        return {'ok': True, 'message': 'Deploying. You can leave this page; progress stays here.'}
+    return {'ok': False, 'error': 'Unknown action.'}
+
+
+class _NMTpotHoneypot(_NMHoneypot):
+    """The honeypot window's data source when T-Pot does the catching. Same interface as _NMHoneypot (start, stop,
+    hits, summary, _record, _running ...), but nothing is bound on this PC: a thread asks T-Pot's Elasticsearch for
+    new events and files each as a hit."""
+    POLL_S = 5.0
+    PAGE = 500
+    MASK_PRIVATE = True     # Docker Desktop shows every visitor as one of its own private gateways: never auto-block those
+    BACKFILL_S = 3600.0
+
+    def __init__(self, on_hit=None, exclude_ips=None, db=None, es_url=None, fetch=None,
+                 cursor_load=None, cursor_save=None, tarpit=False):
+        super().__init__(ports=[], on_hit=on_hit, exclude_ips=exclude_ips, db=db, udp_ports=[], tarpit=False)
+        import threading
+        self._es = (es_url or _NM_TPOT_ES).rstrip('/')
+        self._fetch = fetch or self._http
+        self._cursor_load = cursor_load or (lambda: (_nm_wifi_load('tpot_cursor.json', {}, None) or {}).get('ts'))
+        self._cursor_save = cursor_save or (lambda ts: _nm_wifi_save('tpot_cursor.json', {'ts': ts}, None))
+        self._stop_ev = threading.Event()
+        self._thread = None
+        self._ids = []
+        self._idset = set()
+        self._types = {}
+        self.error = ''
+        self.connected = False
+        self._ts = None
+
+    # ── transport ──
+    def _http(self, url, body=None):
+        return _nm_tpot_http(url, body)
+
+    @staticmethod
+    def _iso(t):
+        import datetime as _d
+        return _d.datetime.fromtimestamp(t, _d.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    @staticmethod
+    def _epoch(s):
+        import datetime as _d
+        try:
+            return _d.datetime.strptime(s.replace('Z', '+0000')[:23] + '+0000', '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
+        except Exception:
+            try:
+                return _d.datetime.strptime(s[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=_d.timezone.utc).timestamp()
+            except Exception:
+                return None
+
+    # ── mapping one T-Pot event to a hit ──
+    @staticmethod
+    def _sample(src):
+        def g(k):
+            v = src.get(k)
+            if isinstance(v, (dict, list)):
+                return ''
+            return str(v) if v not in (None, '') else ''
+        if g('input'):
+            return g('input')
+        if g('username') or g('password'):
+            return '%s:%s' % (g('username'), g('password'))
+        h = src.get('http')
+        if isinstance(h, dict):
+            u = h.get('url') or h.get('hostname') or ''
+            m = h.get('http_method') or ''
+            if u:
+                return ('%s %s' % (m, u)).strip()
+        for k in ('url', 'request', 'signature', 'msg', 'payload', 'message'):
+            if g(k):
+                return g(k)
+        return ''
+
+    def _ingest(self, doc):
+        src = doc.get('_source') or {}
+        ip = str(src.get('src_ip') or '').strip()
+        if ip.startswith('::ffff:'):
+            ip = ip[7:]
+        if not ip:
+            return False
+        typ = str(src.get('type') or 'T-Pot')
+        try:
+            port = int(src.get('dest_port') or 0)
+        except (TypeError, ValueError):
+            port = 0
+        pr = str(src.get('proto') or src.get('protocol') or src.get('transport') or 'tcp').lower()
+        proto = 'udp' if 'udp' in pr else 'tcp'
+        when = self._epoch(str(src.get('@timestamp') or '')) or None
+        what = str(src.get('eventid') or src.get('event_type') or '')
+        what = what.replace('cowrie.', '').replace('.', ' ')
+        self._types[typ] = self._types.get(typ, 0) + 1
+        self._record(ip, port, self._sample(src).encode('utf-8', 'replace'), force=True, proto=proto,
+                     when=when, service=typ, tool=what)
+        return True
+
+    def _query(self, since_iso):
+        return {'size': self.PAGE, 'sort': [{'@timestamp': 'asc'}], '_source': _NM_TPOT_FIELDS,
+                'query': {'bool': {'filter': [{'range': {'@timestamp': {'gte': since_iso}}},
+                                              {'exists': {'field': 'src_ip'}}],
+                                   'must_not': [{'terms': {'type.keyword': list(_NM_TPOT_SKIP)}},
+                                                {'terms': {'eventid.keyword': list(_NM_TPOT_SKIP_EVENTS)}}]}}}
+
+    def poll(self):
+        """One round: fetch everything newer than the cursor and file it. Returns how many hits were filed."""
+        import time as _t
+        if self._ts is None:
+            cur = None
+            try:
+                cur = self._cursor_load()
+            except Exception:
+                cur = None
+            self._ts = float(cur) if cur else _t.time() - self.BACKFILL_S
+        n = 0
+        for _page in range(8):
+            res = self._fetch(self._es + '/logstash-*/_search', self._query(self._iso(self._ts)))
+            hits = ((res or {}).get('hits') or {}).get('hits') or []
+            newest = self._ts
+            fresh = 0
+            for d in hits:
+                i = d.get('_id')
+                t = self._epoch(str((d.get('_source') or {}).get('@timestamp') or ''))
+                if t is not None and t > newest:
+                    newest = t
+                if i in self._idset:
+                    continue
+                self._idset.add(i)
+                self._ids.append(i)
+                if len(self._ids) > 6000:
+                    for old in self._ids[:2000]:
+                        self._idset.discard(old)
+                    del self._ids[:2000]
+                if self._ingest(d):
+                    n += 1
+                fresh += 1
+            moved = newest > self._ts
+            self._ts = newest
+            if len(hits) < self.PAGE or (not moved and not fresh):
+                break
+        try:
+            self._cursor_save(self._ts)
+        except Exception:
+            _exc_debug('tpot cursor save')
+        self.connected = True
+        self.error = ''
+        return n
+
+    def _run(self):
+        while self._running and not self._stop_ev.is_set():
+            try:
+                self.poll()
+            except Exception as ex:
+                self.connected = False
+                self.error = 'T-Pot is not answering at %s (%s)' % (self._es, str(ex)[:80])
+            self._stop_ev.wait(self.POLL_S)
+
+    def start(self):
+        import threading, time as _t
+        if self._running:
+            return 0
+        try:
+            self._fetch(self._es + '/_cluster/health', None)
+        except Exception as ex:
+            self.connected = False
+            if self._es.startswith('https://'):
+                self.error = ('T-Pot in the VM is not answering (%s). Check that the VM is running and the address and '
+                              'login on the T-Pot page are right. (%s)' % (self._es.split('/es')[0], str(ex)[:90]))
+            else:
+                self.error = ('T-Pot is not running (nothing answers at %s). Start it with tpot_start.ps1 in %s, give it '
+                              'a minute or two to come up, then press START again. (%s)'
+                              % (self._es, _NM_TPOT_DIR, str(ex)[:70]))
+            return 0
+        self._running = True
+        self._started_at = _t.time()
+        self._stop_ev.clear()
+        self.error = ''
+        self.connected = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name='nm-tpot-feed')
+        self._thread.start()
+        log.info('[honeypot] reading attacks from T-Pot at %s', self._es)
+        return 1
+
+    def stop(self):
+        self._running = False
+        self._stop_ev.set()
+        log.info('[honeypot] stopped (T-Pot keeps running)')
+
+    def summary(self):
+        d = super().summary()
+        d.update({'source': 'tpot', 'es': self._es, 'connected': self.connected, 'error': self.error,
+                  'types': dict(self._types), 'bound': 1 if self._running else 0,
+                  'remote': self._es.startswith('https://'),
+                  'tarpit_enabled': False})
+        return d
+
+
+def _nm_hp_make(on_hit=None, exclude_ips=None, db=None, tarpit=True):
+    """The honeypot object for Start: T-Pot by default, the old built-in decoy ports if honeypot_prefs.json says so."""
+    pr = _nm_hp_prefs()
+    if pr['source'] == 'builtin':
+        return _NMHoneypot(on_hit=on_hit, exclude_ips=exclude_ips, db=db, tarpit=tarpit)
+    return _NMTpotHoneypot(on_hit=on_hit, exclude_ips=exclude_ips, db=db, es_url=pr['es'])
+
+
+def _nm_hp_start_error(hp):
+    return (getattr(hp, 'error', '') or 'No decoy ports could be bound. Ports below 1024 need Administrator or root.')
+
+# ── T-Pot window: status, statistics and control (the data behind the /tpot page) ────────────────────────────
+_NM_TPOT_CACHE = {}
+_NM_TPOT_USER_STOP = {'v': False}
+_NM_TPOT_LINKS = [('Portal (login)', 'https://127.0.0.1:64297/'), ('Kibana dashboards', 'https://127.0.0.1:64297/kibana/'),
+                  ('Live attack map', 'https://127.0.0.1:64297/map/')]    # everything goes through the portal's login
+
+
+def _nm_tpot_dir():
+    d = _NM_TPOT_DIR
+    try:
+        v = _nm_wifi_load('honeypot_prefs.json', {}, None)
+        if isinstance(v, dict) and isinstance(v.get('dir'), str) and v['dir'].strip():
+            d = v['dir'].strip()
+    except Exception:
+        pass
+    return d
+
+
+def _nm_tpot_run(args, cwd=None, timeout=15):
+    """Run a command with no console window; (returncode, stdout). Never raises."""
+    import subprocess
+    try:
+        kw = {}
+        if os.name == 'nt':
+            kw['creationflags'] = 0x08000000        # CREATE_NO_WINDOW
+        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout, **kw)
+        return p.returncode, (p.stdout or '')
+    except Exception as ex:
+        return 1, str(ex)
+
+
+def _nm_tpot_es(es, path, body=None, fetch=None):
+    if fetch is not None:
+        return fetch(es.rstrip('/') + path, body)
+    return _nm_tpot_http(es.rstrip('/') + path, body)
+
+
+def _nm_tpot_names(tdir):
+    """The container names T-Pot's compose file defines."""
+    try:
+        txt = open(os.path.join(tdir, 'docker-compose.yml'), encoding='utf-8', errors='replace').read()
+        return sorted(set(re.findall(r'^\s*container_name:\s*([A-Za-z0-9_.-]+)', txt, re.M)))
+    except Exception:
+        return []
+
+
+def _nm_tpot_status(es=None, fetch=None, run=None, tdir=None):
+    """Is T-Pot up? Docker, containers, Elasticsearch, events stored, web login set."""
+    es = es or _nm_hp_prefs()['es']
+    if es.startswith('https://'):                   # T-Pot in a VM: only Elasticsearch can be asked
+        d = {'dir': '', 'installed': True, 'docker': False, 'containers': [], 'expected': 0, 'running': 0, 'es': '',
+             'events': 0, 'login_set': True, 'remote': True, 'host': es.split('//', 1)[1].split('/', 1)[0].split(':')[0],
+             'error': ''}
+        try:
+            h = _nm_tpot_es(es, '/_cluster/health', None, fetch)
+            d['es'] = str(h.get('status') or '')
+            c = _nm_tpot_es(es, '/logstash-*/_count', None, fetch)
+            d['events'] = int(c.get('count') or 0)
+        except Exception as ex:
+            d['es'] = ''
+            d['error'] = str(ex)[:160]
+        d['state'] = 'running' if d['es'] in ('green', 'yellow') else 'unreachable'
+        return d
+    tdir = tdir or _nm_tpot_dir()
+    run = run or _nm_tpot_run
+    d = {'dir': tdir, 'installed': os.path.isfile(os.path.join(tdir, 'docker-compose.yml')), 'docker': False,
+         'containers': [], 'expected': 0, 'running': 0, 'es': '', 'events': 0, 'login_set': False, 'remote': False}
+    try:
+        for ln in open(os.path.join(tdir, '.env'), encoding='utf-8', errors='replace'):
+            if ln.startswith('WEB_USER=') and len(ln.strip()) > len('WEB_USER='):
+                d['login_set'] = True
+    except Exception:
+        pass
+    names = _nm_tpot_names(tdir)
+    d['expected'] = len(names)
+    rc, out = run(['docker', 'ps', '-a', '--format', '{{.Names}}|{{.Status}}'], None, 12)
+    if rc == 0:
+        d['docker'] = True
+        for ln in out.splitlines():
+            if '|' not in ln:
+                continue
+            n, st = ln.split('|', 1)
+            if names and n not in names:
+                continue
+            up = st.startswith('Up')
+            d['containers'].append({'name': n, 'status': st, 'up': up})
+            d['running'] += 1 if up else 0
+        d['containers'].sort(key=lambda c: (c['up'], c['name']))
+    try:
+        h = _nm_tpot_es(es, '/_cluster/health', None, fetch)
+        d['es'] = str(h.get('status') or '')
+        c = _nm_tpot_es(es, '/logstash-*/_count', None, fetch)
+        d['events'] = int(c.get('count') or 0)
+    except Exception:
+        d['es'] = ''
+    if not d['docker']:
+        d['state'] = 'docker_off'
+    elif d['es'] in ('green', 'yellow') and d['expected'] and d['running'] >= max(1, int(d['expected'] * 0.8)):
+        d['state'] = 'running'
+    elif d['running'] > 0:
+        d['state'] = 'starting'
+    else:
+        d['state'] = 'stopped'
+    return d
+
+
+def _nm_tpot_stats(es=None, fetch=None, hours=24):
+    """Counts for the charts, from Elasticsearch aggregations over the last `hours` hours."""
+    es = es or _nm_hp_prefs()['es']
+    skip = [{'terms': {'type.keyword': list(_NM_TPOT_SKIP)}}, {'terms': {'eventid.keyword': list(_NM_TPOT_SKIP_EVENTS)}}]
+    aggs = {'types': {'terms': {'field': 'type.keyword', 'size': 12}},
+            'ports': {'terms': {'field': 'dest_port', 'size': 10}},
+            'hist': {'date_histogram': {'field': '@timestamp', 'fixed_interval': '1h', 'min_doc_count': 0,
+                                        'extended_bounds': {'min': 'now-%dh' % hours, 'max': 'now'}}},
+            'users': {'terms': {'field': 'username.keyword', 'size': 8}},
+            'pws': {'terms': {'field': 'password.keyword', 'size': 8}},
+            'cmds': {'terms': {'field': 'input.keyword', 'size': 8}},
+            'urls': {'terms': {'field': 'http.url.keyword', 'size': 8}}}
+
+    def body(a):
+        return {'size': 0, 'track_total_hits': True,
+                'query': {'bool': {'filter': [{'range': {'@timestamp': {'gte': 'now-%dh' % hours}}},
+                                              {'exists': {'field': 'src_ip'}}], 'must_not': skip}},
+                'aggs': a}
+    res = {}
+    try:
+        res = _nm_tpot_es(es, '/logstash-*/_search', body(aggs), fetch)
+    except Exception:
+        res = {}
+        for k, v in aggs.items():              # one odd field must not blank the whole page
+            try:
+                r = _nm_tpot_es(es, '/logstash-*/_search', body({k: v}), fetch)
+                res.setdefault('aggregations', {}).update(r.get('aggregations') or {})
+                res['hits'] = r.get('hits') or res.get('hits')
+            except Exception:
+                pass
+    ag = res.get('aggregations') or {}
+
+    def top(k):
+        return [[str(b.get('key_as_string') or b.get('key')), int(b.get('doc_count') or 0)]
+                for b in (ag.get(k) or {}).get('buckets', [])]
+    tot = ((res.get('hits') or {}).get('total') or {})
+    total = int(tot.get('value') or 0) if isinstance(tot, dict) else int(tot or 0)
+    return {'hours': hours, 'total': total, 'types': top('types'), 'ports': top('ports'), 'users': top('users'),
+            'pws': top('pws'), 'cmds': top('cmds'), 'urls': top('urls'),
+            'hist': [[(b.get('key') or 0) / 1000.0, int(b.get('doc_count') or 0)]
+                     for b in (ag.get('hist') or {}).get('buckets', [])]}
+
+
+def _nm_tpot_recent(es=None, fetch=None, n=60):
+    """The newest events, newest first, ready for the live feed."""
+    es = es or _nm_hp_prefs()['es']
+    skip = [{'terms': {'type.keyword': list(_NM_TPOT_SKIP)}}, {'terms': {'eventid.keyword': list(_NM_TPOT_SKIP_EVENTS)}}]
+    b = {'size': int(n), 'sort': [{'@timestamp': 'desc'}], '_source': _NM_TPOT_FIELDS,
+         'query': {'bool': {'filter': [{'exists': {'field': 'src_ip'}}], 'must_not': skip}}}
+    out = []
+    try:
+        res = _nm_tpot_es(es, '/logstash-*/_search', b, fetch)
+    except Exception:
+        return out
+    for d in ((res.get('hits') or {}).get('hits') or []):
+        s = d.get('_source') or {}
+        ip = str(s.get('src_ip') or '')
+        if ip.startswith('::ffff:'):
+            ip = ip[7:]
+        try:
+            port = int(s.get('dest_port') or 0)
+        except (TypeError, ValueError):
+            port = 0
+        what = str(s.get('eventid') or s.get('event_type') or '').replace('cowrie.', '').replace('.', ' ')
+        out.append({'time': _NMTpotHoneypot._epoch(str(s.get('@timestamp') or '')) or 0, 'type': str(s.get('type') or ''),
+                    'port': port, 'what': what, 'sample': _NMTpotHoneypot._sample(s)[:140], 'ip': ip,
+                    'masked': _nm_hp_is_masked(ip) or _nm_is_private_ip(ip)})
+    return out
+
+
+def _nm_tpot_snapshot(force=False):
+    """Everything the /tpot page shows, cached for a few seconds so several viewers do not hammer docker/ES."""
+    import time as _t
+    now = _t.time()
+    c = _NM_TPOT_CACHE.get('snap')
+    if c and not force and now - c[0] < 4.0:
+        return c[1]
+    pr = _nm_hp_prefs()
+    st = _nm_tpot_status(pr['es'])
+    _links = _NM_TPOT_LINKS
+    if pr.get('remote'):
+        _b = _nm_tpot_remote_base()
+        _links = [('Portal (login)', _b + '/'), ('Kibana dashboards', _b + '/kibana/'), ('Live attack map', _b + '/map/')]
+    snap = {'ok': True, 'source': pr['source'], 'status': st, 'links': [{'name': n, 'url': u} for n, u in _links],
+            'remote': _nm_tpot_remote_info()}
+    if st.get('es'):
+        snap['stats'] = _nm_tpot_stats(pr['es'])
+        snap['recent'] = _nm_tpot_recent(pr['es'])
+    hp = _nm_honeypot()
+    snap['feed'] = ({'running': bool(hp._running), 'connected': bool(getattr(hp, 'connected', False)),
+                     'error': getattr(hp, 'error', ''), 'filed': len(hp.hits(5000))} if hp is not None else
+                    {'running': False, 'connected': False, 'error': '', 'filed': 0})
+    snap['now'] = now
+    _NM_TPOT_CACHE['snap'] = (now, snap)
+    return snap
+
+
+def _nm_tpot_control(req, local=True, run=None, probe=None):
+    """start / stop T-Pot (docker compose in its folder). Local-only: these start and stop containers on this PC."""
+    action = str((req or {}).get('action') or '').lower()
+    if not local:
+        return {'ok': False, 'error': 'Control is only allowed from this PC.'}
+    if action in ('remote_set', 'remote_clear'):
+        global _NM_HONEYPOT
+        if action == 'remote_set':
+            res = _nm_tpot_remote_set((req or {}).get('host'), (req or {}).get('user'), (req or {}).get('password'),
+                                      probe=probe)
+        else:
+            _nm_tpot_remote_forget_file()
+            res = {'ok': True, 'message': 'Back to T-Pot in Docker on this PC.'}
+        if res.get('ok'):
+            _NM_TPOT_USER_STOP['v'] = False
+            _hp = _nm_honeypot()
+            if _hp is not None:
+                try:
+                    _hp.stop()
+                except Exception:
+                    _exc_debug('tpot remote swap')
+            _NM_HONEYPOT = None                 # the next autofeed round reads from the new place
+            _NM_TPOT_CACHE.pop('snap', None)
+        return res
+    if _nm_hp_prefs().get('remote'):
+        return {'ok': False, 'error': 'T-Pot runs in the VM now: start and stop it there (or press Use Docker on this PC).'}
+    run = run or _nm_tpot_run
+    tdir = _nm_tpot_dir()
+    if not os.path.isfile(os.path.join(tdir, 'docker-compose.yml')):
+        return {'ok': False, 'error': 'T-Pot is not set up in %s.' % tdir}
+    if action == 'start':
+        _NM_TPOT_USER_STOP['v'] = False
+        script = os.path.join(tdir, 'tpot_start.ps1')
+        if os.name != 'nt' or not os.path.isfile(script):
+            return {'ok': False, 'error': 'Start it from a terminal in %s: docker compose up -d' % tdir}
+        import subprocess
+        try:
+            subprocess.Popen(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], cwd=tdir,
+                             creationflags=0x08000000, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as ex:
+            return {'ok': False, 'error': 'Could not start it: %s' % ex}
+        _NM_TPOT_CACHE.pop('snap', None)
+        return {'ok': True, 'message': 'Starting T-Pot (Docker Desktop first if needed). It is ready in one to three minutes.'}
+    if action == 'stop':
+        _NM_TPOT_USER_STOP['v'] = True
+        hp = _nm_honeypot()
+        if hp is not None and hp._running:
+            hp.stop()
+        rc, out = run(['docker', 'compose', 'stop'], tdir, 120)
+        _NM_TPOT_CACHE.pop('snap', None)
+        return {'ok': rc == 0, 'message': 'T-Pot stopped.' if rc == 0 else '', 'error': '' if rc == 0 else out[-200:]}
+    return {'ok': False, 'error': 'Unknown action.'}
+
+
+def _nm_tpot_autofeed_tick():
+    """Keep the T-Pot feed running without pressing START: alerts and phone alerts need it. Returns what happened."""
+    global _NM_HONEYPOT
+    if _nm_hp_prefs()['source'] != 'tpot' or _NM_TPOT_USER_STOP['v']:
+        return 'off'
+    hp = _nm_honeypot()
+    if hp is not None and hp._running:
+        return 'running'
+    try:
+        excl = set()
+        ea = _active_ea()
+        if ea is not None:
+            excl = {ip for ip in getattr(ea, '_nodes', {}) if _nm_is_private_ip(ip)}
+        _hp = _nm_hp_make(on_hit=_nm_honeypot_autoblock_hook, exclude_ips=excl, db=_nm_store(), tarpit=False)
+        if _hp.start():
+            _NM_HONEYPOT = _hp
+            return 'started'
+    except Exception:
+        _exc_debug('tpot autofeed')
+    return 'waiting'
+
+
+def _nm_tpot_autofeed_start():
+    import threading
+    if os.environ.get('NM_WIFI_TEST') or _NM_TPOT_CACHE.get('autofeed'):
+        return
+    _NM_TPOT_CACHE['autofeed'] = True
+
+    def loop():
+        import time as _t
+        _t.sleep(20)
+        while True:
+            try:
+                _nm_tpot_autofeed_tick()
+            except Exception:
+                _exc_debug('tpot autofeed loop')
+            _t.sleep(30)
+    threading.Thread(target=loop, daemon=True, name='nm-tpot-autofeed').start()
+
 
 
 _NM_HONEYPOT = None
@@ -7079,7 +8766,7 @@ def _nm_wifi_autostart(monitor):
     """At app launch: if the user left 'keep watching in the background' on, start."""
     try:
         _wp = _nm_wifi_load('wifi_prefs.json', {})
-        if (_wp.get('background') or _wp.get('csi_bg') or _nm_mac_norm(_wp.get('phone_mac'))) and _NM_IS_WIN:
+        if (_wp.get('background') or _wp.get('csi_bg') or _wp.get('floor_bg') or _nm_mac_norm(_wp.get('phone_mac'))) and _NM_IS_WIN:
             _nm_wifi_get_watcher(monitor).start()
     except Exception:
         _exc('_nm_wifi_autostart')
@@ -7089,6 +8776,9 @@ class _NMWifiWatcher:
     PREF_DEFAULTS = {'background': False, 'away': False, 'auto_away_min': 0,
                      'scan_s': 12, 'alert_away': True,
                      'csi_bg': False, 'csi_port': '', 'csi_baud': 921600,
+                     'floor_bg': False,         # keep the two-floor detector running with the Floor window closed (weekly history)
+                     'lidar_on': False, 'lidar_alert': 'away',    # LD14P lidars: listen for them; alert on a person: 'away' | 'always' | 'off'
+                     'night_alarm': True, 'night_from': '01:00', 'night_to': '03:00', 'night_sens': 'normal', 'night_min': 2,
                      'web_control': False,      # True: the browser/phone page may also switch things OFF from other devices
                      'phone_mac': '', 'phone_name': '', 'phone_away_min': 10, 'phone_notify': True,
                      'alert_image': True}       # attach a picture of the movement graph to phone alerts
@@ -7164,11 +8854,25 @@ class _NMWifiWatcher:
         self.csi_moves = []
         self.csi_hist = deque(maxlen=900)       # (t, level, threshold, moving, rssi) once a second, for the Live tab
         self._csi_src = None
+        self._batt_memo = {}               # last time each low-battery alert was raised (see _nm_batt_alert)
         self._csi_an = None
         self._csi_paused = False
         self._csi_last_data = 0.0
         self._csi_flagged = False
         self._csi_retry_t = 0.0
+        self.floor_hist = None                  # the shared weekly floor history (see floor_history)
+        self.floor_tracker = None               # background floor recorder, when 'floor_bg' is on
+        self.floor_source_factory = None        # tests inject: factory(selection, analyzer, clock) -> source
+        self.night = _NMNightAlarm(self)        # klaxon for sustained movement in the night window
+        self.lidar = None                       # the LD14P lidar hub (see lidar_hub), made on demand
+        self.csi_tab = None                     # {'an', 'src'} while the CSI tab owns a real board (the web page reads it)
+        self.floor_win = None                   # {'det', 'loc', 'src'} while the Floor window is connected
+        self.csi_cal_after = {}                 # feed -> time a web-started calibration begins
+        self._csi_web_t = 0.0                   # last time the /csi page asked for data
+        self._csi_hdb = None                    # csi_history.db, shared by the web page and the background recorder
+        self._csi_sess = None
+        self._csi_rec_t = 0.0
+        self._csi_prune_t = 0.0
         self._cmin = None
         # your phone (automatic Away)
         self.phone = None                       # _NMPhonePresence for prefs['phone_mac'], made on demand
@@ -7194,6 +8898,62 @@ class _NMWifiWatcher:
             with self.lock:
                 self.phone = None
                 self._phone_home = None
+        if key == 'floor_bg':
+            self.floor_track_apply()
+        if key == 'lidar_on':
+            self.lidar_apply()
+
+    # ── LD14P lidars ─────────────────────────────────────────────────────────────────────────────────
+    def lidar_hub(self, create=True):
+        with self.lock:
+            if self.lidar is None and create:
+                self.lidar = _NMLidarHub(self, state_dir=self.state_dir, threads=self._threads_on)
+            return self.lidar
+
+    def lidar_apply(self):
+        """Start or stop listening for the lidar boards so it matches the 'lidar_on' setting (the demo keeps it running)."""
+        want = bool(self.prefs.get('lidar_on')) and (self._threads_on or self.lidar is not None)
+        hub = self.lidar_hub(create=want)
+        if hub is None:
+            return
+        if want:
+            hub.start()
+        elif not hub.demo_on:
+            hub.stop()
+
+    # ── floor history: the Floor window's week of "which floor moved, and where" ───────────────
+    def floor_history(self):
+        """The one shared _NMFloorHistory, loaded from disk the first time it is asked for."""
+        with self.lock:
+            if self.floor_hist is None:
+                self.floor_hist = _nm_floor_hist_open(self.state_dir)
+            return self.floor_hist
+
+    def floor_track_apply(self):
+        """Start or stop the background floor recorder so it matches the 'floor_bg' setting."""
+        want = bool(self.prefs.get('floor_bg')) and self._threads_on
+        with self.lock:
+            trk = self.floor_tracker
+        if want:
+            if trk is None:
+                trk = _NMFloorTracker(self.state_dir, self.floor_history(), source_factory=self.floor_source_factory)
+                trk.note = self.night.note
+                if self.floor_win is not None:
+                    trk.pause()                      # the Floor window has the boards right now
+                with self.lock:
+                    self.floor_tracker = trk
+            trk.start()
+        elif trk is not None:
+            self.floor_track_stop()
+
+    def floor_track_stop(self):
+        with self.lock:
+            trk, self.floor_tracker = self.floor_tracker, None
+        if trk is not None:
+            try:
+                trk.stop()
+            except Exception:
+                _exc_debug('floor track stop')
 
     # ── your phone: automatic Away ─────────────────────────────────────────
     def _phone_obj(self):
@@ -7300,6 +9060,9 @@ class _NMWifiWatcher:
                          'ROGUE': 'Wi-Fi: suspicious network', 'PHONE': 'Away mode',
                          'HONEYPOT': 'Honeypot: someone is probing your network',
                          'FLOORMOVE': 'Movement detected — which floor',
+                         'NIGHTALARM': 'NIGHT ALARM: movement in the house',
+                         'LIDAR': 'Lidar: someone is in the house',
+                         'BATTERY': 'Board battery low',
                          'ESP32': 'ESP32 receiver'}.get(kind, 'Wi-Fi alert')
                 threading.Thread(target=self._safe_alert, args=(title, detail, sev, kind), daemon=True).start()
         return ev
@@ -7476,6 +9239,7 @@ class _NMWifiWatcher:
     def _csi_halt_source(self):
         with self.lock:
             src, self._csi_src = self._csi_src, None
+        self._csi_end_session(time.time())
         if src is not None:
             try:
                 src.stop()
@@ -7538,6 +9302,7 @@ class _NMWifiWatcher:
         with self.lock:
             self.csi_state.update(t=t, moving=moving, rate=float(snap.get('rate') or 0.0), owner=src)
             self.csi_hist.append((t, snap.get('turb'), snap.get('thr'), moving, snap.get('rssi')))
+        self.night.note('board', t, moving)
 
     def csi_sample(self, t, snap, src='tab'):
         """One reading a second from the boards: snap = analyzer snapshot (moving, ready, rate ...)."""
@@ -7560,6 +9325,7 @@ class _NMWifiWatcher:
                 self.csi_move_start = t
             elif not moving and self.csi_move_start is not None:
                 self._csi_end_move(t)
+        self.night.note('board', t, moving)
         if back:
             self.event('ESP32', 'The ESP32 receiver is sending data again.')
         if starting:
@@ -7608,13 +9374,23 @@ class _NMWifiWatcher:
                 self.csi_start()
             self.csi_gap(now)
             return
+        try:
+            _nm_batt_alert(self, 'Board', getattr(src, 'battery', None), self._batt_memo, now)
+        except Exception:
+            _exc_debug('csi battery check')
         with src.lock:
             fresh = bool(an.t) and now - an.t[-1] <= 1.5
             snap = an.snapshot(now) if fresh else None
         if snap is not None:
             self.csi_sample(now, snap, 'bg')
+            try:
+                self._csi_record(now, an, src)
+            except Exception:
+                _exc_debug('csi bg record')
         else:
             self.csi_gap(now)
+        if an is not None and now - self._csi_web_t > 20.0:
+            an.want_breath = False                          # nobody is looking at the breathing curve
 
     def _csi_loop(self):
         while not self.stop_ev.wait(1.0):
@@ -7641,6 +9417,82 @@ class _NMWifiWatcher:
             return f'{port} · not running yet'
         return f'{port} · waiting for data…'
 
+    # ── what the /csi web page reads ──────────────────────────────────────────
+    def csi_hist_db(self):
+        """The board's recorded history (csi_history.db), opened the first time anything asks for it."""
+        with self.lock:
+            if self._csi_hdb is None:
+                try:
+                    self._csi_hdb = _NMCsiHistory(_nm_wifi_dir(self.state_dir) / 'csi_history.db')
+                except Exception:
+                    _exc_debug('csi history open (watcher)')
+                    return None
+            return self._csi_hdb
+
+    def csi_web_touch(self):
+        """The /csi page is open: switch the breathing analysis on for the background board (it is off to save CPU)."""
+        self._csi_web_t = time.time()
+        an = self._csi_an
+        if an is not None:
+            an.want_breath = True
+
+    def floor_feed(self):
+        """(detector, locator, {floor: source}, owner) for whatever is reading the two floor links right now:
+        the Floor window when it is connected, else the background recorder. None when neither is."""
+        fw = self.floor_win
+        if fw is not None:
+            return fw['det'], fw['loc'], fw['src'], 'window'
+        trk = self.floor_tracker
+        if trk is not None and trk.running():
+            det, loc = trk.det, trk.loc
+            with trk._lock:
+                srcs = dict(trk.src)
+            if det is not None and loc is not None and srcs.get('up') is not None and srcs.get('down') is not None:
+                return det, loc, srcs, 'background'
+        return None
+
+    def csi_web(self):
+        w = getattr(self, '_csi_web_obj', None)
+        if w is None:
+            w = self._csi_web_obj = _NMCsiWeb(self)
+        return w
+
+    def _csi_end_session(self, t):
+        h, sess = self._csi_hdb, self._csi_sess
+        self._csi_sess = None
+        if h is not None and sess is not None:
+            try:
+                h.end_session(sess, t)
+            except Exception:
+                _exc_debug('csi bg end session')
+
+    def _csi_record(self, now, an, src):
+        """Keep the board's week of history filling while the CSI tab is closed (the tab records by itself when open)."""
+        if self.csi_tab is not None or not (self._threads_on or self.state_dir):
+            return
+        if now - self._csi_rec_t < 0.95:
+            return
+        h = self.csi_hist_db()
+        if h is None:
+            return
+        with src.lock:
+            if not an.t or now - an.t[-1] > 1.5:
+                return
+            snap = an.snapshot(now)
+            bands = an.activity_now(now, 8)
+            prof = ref = None
+            if an.n_sc and len(an.X) > 10 and an.valid is not None:
+                prof = np.where(an.valid, np.asarray(list(an.X)[-50:]).mean(axis=0), np.nan)
+            if an.empty is not None and an.valid is not None:
+                ref = np.where(an.valid, an.empty['mean'], np.nan)
+        if self._csi_sess is None:
+            self._csi_sess = h.start_session(now, 'live', 'background')
+        self._csi_rec_t = now
+        h.add(now, self._csi_sess, snap, bands, prof, ref)
+        if now - self._csi_prune_t > 3600.0:
+            self._csi_prune_t = now
+            h.prune(now)
+
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self):
         import threading
@@ -7663,6 +9515,8 @@ class _NMWifiWatcher:
                 threading.Thread(target=fn, daemon=True, name=nm).start()
             if self.csi_wanted():
                 self.csi_start()
+            self.floor_track_apply()
+            self.lidar_apply()
 
     def stop(self):
         self.stop_ev.set()
@@ -7672,6 +9526,23 @@ class _NMWifiWatcher:
         except Exception:
             _exc_debug('wifi watcher stop')
         self.csi_stop()
+        self.floor_track_stop()
+        try:
+            if self.lidar is not None:
+                self.lidar.stop()
+        except Exception:
+            _exc_debug('lidar stop')
+        try:
+            if self._csi_hdb is not None:
+                self._csi_hdb.close()
+                self._csi_hdb = None
+        except Exception:
+            _exc_debug('csi history close (watcher)')
+        try:
+            if self.floor_hist is not None:
+                _nm_floor_hist_save(self.floor_hist, self.state_dir, force=True)
+        except Exception:
+            _exc_debug('floor history final save')
         with self.lock:
             self._flush_minute()
         self._started = False
@@ -7977,7 +9848,7 @@ class _NMWifiWatcher:
             findings = [{'sev': f['sev'], 'text': f['text']} for f in self.findings]
             advice = list(self.advice or [])[:6]
             prefs = {k: self.prefs.get(k) for k in ('away', 'auto_away_min', 'background', 'csi_bg', 'csi_port',
-                                                     'alert_away', 'web_control')}
+                                                     'floor_bg', 'night_alarm', 'alert_away', 'web_control')}
         csi_live = bool(cs.get('owner')) and now - cs.get('t', 0.0) <= 3.5
         return {'ok': True, 'running': self._started, 'mode': self.mode, 'now': now, 'chip': chip, 'tone': tone,
                 'link': lk, 'errors': errs, 'link_hist': dec(link_hist), 'stds': dec(stds), 'thr': thr, 'moves': moves,
@@ -7985,7 +9856,7 @@ class _NMWifiWatcher:
                 'csi': {'wanted': self.csi_wanted(), 'live': csi_live, 'owner': cs.get('owner', ''),
                         'moving': bool(csi_live and (self.csi_move_start is not None or cs.get('moving'))),
                         'rate': float(cs.get('rate') or 0.0), 'rssi': last_rssi, 'status': self.csi_status_text()},
-                'csi_hist': dec(csi_hist, 300), 'csi_moves': csi_moves,
+                'csi_hist': dec(csi_hist, 300), 'csi_moves': csi_moves, 'night': self.night.status(),
                 'away': self.is_away(), 'at_pc': self.at_pc(), 'events': events, 'aps': aps, 'health': health,
                 'findings': findings, 'advice': advice, 'prefs': prefs, 'phone': self.phone_info()}
 
@@ -7993,7 +9864,7 @@ class _NMWifiWatcher:
         """One switch from the browser/phone page. Arming (turning something on) is allowed from any device on the
         network; switching things OFF, or changing who may, needs the PC itself unless 'web_control' is on, because the
         dashboard has no login and a stranger on the Wi-Fi must not be able to silence the alarm. -> (ok, message)"""
-        if key not in ('away', 'auto_away_min', 'background', 'csi_bg', 'web_control'):
+        if key not in ('away', 'auto_away_min', 'background', 'csi_bg', 'floor_bg', 'night_alarm', 'web_control', 'lidar_on'):
             return False, 'Unknown setting.'
         value = bool(value)
         if key == 'web_control' and not local:
@@ -8004,7 +9875,12 @@ class _NMWifiWatcher:
         if key == 'csi_bg' and value and not self.prefs.get('csi_port'):
             return False, 'Choose the receiver in the CSI tab on the PC first, then tick Keep watching with this board.'
         self.set_pref(key, (10 if value else 0) if key == 'auto_away_min' else value)
-        if key in ('background', 'csi_bg') and value and not self._started:
+        if key == 'floor_bg' and value and not _nm_wifi_load('floor_prefs.json', {}, self.state_dir):
+            self.set_pref(key, True)
+            if not self._started:
+                self.start()
+            return True, 'Saved. Open the Floor window on the PC and connect once, so it knows which receivers to use.'
+        if key in ('background', 'csi_bg', 'floor_bg', 'lidar_on') and value and not self._started:
             self.start()
         if key == 'csi_bg':
             if value:
@@ -8421,6 +10297,54 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
              fg=D['text2'], font=(_NM_MONO, 8)).pack(side='left')
     _ttk.Button(opts2, text='Phone alerts & automatic Away…',
                 command=lambda: _nm_phone_dialog(win, D, W_)).pack(side='right')
+
+    # LD14P lidars
+    opts4 = tk.Frame(win, bg=D['bg'])
+    opts4.pack(fill='x', padx=14, pady=(0, 4))
+    lidar_v = tk.BooleanVar(value=bool(W_.prefs.get('lidar_on')))
+    _ttk.Checkbutton(opts4, text='Listen for LD14P lidars (room map, people, intruder alerts)', variable=lidar_v,
+                     command=lambda: W_.set_pref('lidar_on', bool(lidar_v.get()))).pack(side='left', padx=(0, 10))
+    _ttk.Button(opts4, text='Lidar\u2026', command=lambda: _nm_open_lidar(monitor, parent=win, watcher=W_)).pack(side='left')
+
+    # night alarm: a klaxon on sustained movement in a night window
+    opts3 = tk.Frame(win, bg=D['bg'])
+    opts3.pack(fill='x', padx=14, pady=(0, 4))
+    night_v = tk.BooleanVar(value=bool(W_.prefs.get('night_alarm', True)))
+    nfrom_v = tk.StringVar(value=str(W_.prefs.get('night_from') or '01:00'))
+    nto_v = tk.StringVar(value=str(W_.prefs.get('night_to') or '03:00'))
+    _NSENS = {'Low (hard to trip)': 'low', 'Normal': 'normal', 'High (trips easily)': 'high'}
+    nsens_v = tk.StringVar(value={v: k for k, v in _NSENS.items()}.get(str(W_.prefs.get('night_sens') or 'normal'), 'Normal'))
+    nmsg_v = tk.StringVar(value='')
+    _ttk.Checkbutton(opts3, text='Night alarm: sound a klaxon on sustained movement between', variable=night_v,
+                     command=lambda: W_.set_pref('night_alarm', bool(night_v.get()))).pack(side='left', padx=(0, 6))
+
+    def _night_time(var, key, default):
+        v = W_.night.parse_hm(var.get(), None)
+        if v is None:
+            var.set(str(W_.prefs.get(key) or default))
+            nmsg_v.set('Times are written 24-hour, like 01:00.')
+            return
+        txt = '%02d:%02d' % (v // 60, v % 60)
+        var.set(txt)
+        W_.set_pref(key, txt)
+        nmsg_v.set('')
+    nfrom_e = _ttk.Entry(opts3, textvariable=nfrom_v, width=6)
+    nfrom_e.pack(side='left')
+    tk.Label(opts3, text='and', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8)).pack(side='left', padx=4)
+    nto_e = _ttk.Entry(opts3, textvariable=nto_v, width=6)
+    nto_e.pack(side='left', padx=(0, 8))
+    for _e, _v, _k, _d in ((nfrom_e, nfrom_v, 'night_from', '01:00'), (nto_e, nto_v, 'night_to', '03:00')):
+        _e.bind('<FocusOut>', lambda e, v=_v, k=_k, d=_d: _night_time(v, k, d))
+        _e.bind('<Return>', lambda e, v=_v, k=_k, d=_d: _night_time(v, k, d))
+    nsens_cb = _ttk.Combobox(opts3, textvariable=nsens_v, width=18, state='readonly', values=list(_NSENS))
+    nsens_cb.pack(side='left', padx=(0, 8))
+    nsens_cb.bind('<<ComboboxSelected>>', lambda e: W_.set_pref('night_sens', _NSENS.get(nsens_v.get(), 'normal')))
+    _ttk.Button(opts3, text='Test klaxon',
+                command=lambda: nmsg_v.set('Playing for 3 s.' if W_.night.test() else 'No sound could be played.')
+                ).pack(side='left', padx=(0, 6))
+    _ttk.Button(opts3, text='Silence', command=lambda: nmsg_v.set(
+        'Klaxon silenced.' if W_.night.silence('user') else 'It is not sounding.')).pack(side='left', padx=(0, 8))
+    tk.Label(opts3, textvariable=nmsg_v, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8)).pack(side='left')
 
     def _copy_raw():
         txt = ('--- netsh wlan show interfaces ---\n' + W_.raw_link + '\n\n--- netsh wlan show networks mode=bssid ---\n'
@@ -9401,7 +11325,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 csi_ctl['close']()
             except Exception:
                 _exc_debug('csi close')
-            if not (W_.prefs.get('background') or W_.prefs.get('csi_bg') or _nm_mac_norm(W_.prefs.get('phone_mac'))):
+            if not (W_.prefs.get('background') or W_.prefs.get('csi_bg') or W_.prefs.get('floor_bg') or _nm_mac_norm(W_.prefs.get('phone_mac'))):
                 W_.stop()
     win.bind('<Destroy>', _on_destroy, add='+')
     _nm_wifi_ttk(win, D)
@@ -9521,155 +11445,346 @@ def _nm_csi_parse_line(line):
 
 # <<FW_FLASH_BEGIN>>  (generated section: the ESP32 firmware sources travel inside the app so the CSI tab can flash a board)
 _NM_FW_BLOB = (
-    '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'
+    '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'
 )
 
 
@@ -9698,7 +11813,7 @@ def _nm_fw_build_root():
     return base
 
 
-def _nm_fw_clean(role, ssid, password, bssid, channel):
+def _nm_fw_clean(role, ssid, password, bssid, channel, src_id=1):
     """Validate the dialog's values. Returns (clean dict, error text). error == '' means fine."""
     try:
         ch = int(str(channel).strip())
@@ -9706,7 +11821,13 @@ def _nm_fw_clean(role, ssid, password, bssid, channel):
         return None, 'The Wi-Fi channel must be a number from 1 to 13.'
     if not 1 <= ch <= 13:
         return None, 'The Wi-Fi channel must be a number from 1 to 13 (2.4 GHz).'
-    out = {'channel': ch, 'ssid': '', 'password': '', 'bssid': ''}
+    try:
+        sid = int(str(src_id).strip(), 0)
+    except Exception:
+        sid = 0
+    if not 1 <= sid <= 254:
+        return None, 'The floor number must be 1 to 254 (1 = downstairs, 2 = upstairs).'
+    out = {'channel': ch, 'ssid': '', 'password': '', 'bssid': '', 'src_id': sid}
     if role == 'recv':
         ssid = str(ssid)
         password = str(password)
@@ -9771,11 +11892,14 @@ def _nm_fw_write_project(root, role, clean):
         patch(cfg, r'(#define\s+CSI_WIFI_SSID\s+)"[^"\n]*"', '"' + esc(clean['ssid']) + '"')
         patch(cfg, r'(#define\s+CSI_WIFI_PASSWORD\s+)"[^"\n]*"', '"' + esc(clean['password']) + '"')
         patch(cfg, r'(#define\s+CSI_WIFI_BSSID\s+)"[^"\n]*"', '"' + clean['bssid'] + '"')
+        patch(cfg, r'(#define\s+CSI_SRC_ID\s+)0x[0-9a-fA-F]+', '0x%02X' % int(clean.get('src_id', 1)))
     else:
         patch('main/main.c', r'(#define\s+CSI_CHANNEL\s+)\d+', str(clean['channel']))
-    old = os.path.join(d, 'sdkconfig.esp32dev')       # a stale one would make PlatformIO ignore sdkconfig.defaults
-    if os.path.exists(old):
-        os.remove(old)
+        patch('main/main.c', r'(#define\s+CSI_SRC_ID\s+)0x[0-9a-fA-F]+', '0x%02X' % int(clean.get('src_id', 1)))
+    for env in _NM_FW_ENVS.values():                    # a stale one would make PlatformIO ignore sdkconfig.defaults
+        old = os.path.join(d, 'sdkconfig.' + env)
+        if os.path.exists(old):
+            os.remove(old)
     return d
 
 
@@ -9793,8 +11917,60 @@ def _nm_fw_blank_secrets(d):
         _exc_debug('fw blank secrets')
 
 
-def _nm_fw_flash(role, port, clean, log, pio=None, root=None, cancel=None):
-    """Build and flash. log(line) gets progress text (the password is masked). Returns (ok, message)."""
+# The two boards the firmware builds for: a classic ESP32 dev board, and the Heltec WiFi LoRa 32 V3 (ESP32-S3,
+# the one with the little OLED screen and the battery connector).
+_NM_FW_ENVS = {'esp32': 'esp32dev', 'esp32s3': 'heltec_wifi_lora_32_V3'}
+_NM_FW_BOARD_NAMES = {'esp32dev': 'a classic ESP32', 'heltec_wifi_lora_32_V3': 'an ESP32-S3 (Heltec WiFi LoRa 32 V3)'}
+
+
+def _nm_fw_chip_kind(text):
+    """What chip does esptool's output say? 'esp32', 'esp32s3', 'other' (a chip this firmware is not built for) or ''
+    (could not tell). Reads 'Chip is ESP32-S3 (QFN56)...', 'Detecting chip type... ESP32-S3' and the upload error
+    'This chip is ESP32-S3, not ESP32'."""
+    m = (re.search(r'This chip is (E\w*(?:-\w+)*)', text or '') or re.search(r'Chip is (E\w*(?:-\w+)*)', text or '')
+         or re.search(r'Detecting chip type\.*\s*(E\w*(?:-\w+)*)', text or ''))
+    if not m:
+        return ''
+    name = m.group(1).upper()
+    if name.startswith('ESP32-S3'):
+        return 'esp32s3'
+    if name.startswith('ESP32') and not re.match(r'ESP32-(S2|C\d|H\d|P4|E\d)', name):
+        return 'esp32'
+    return 'other'
+
+
+def _nm_fw_find_esptool(pio=''):
+    """(python, esptool.py) from PlatformIO's own folders, or None."""
+    homes = [os.path.join(os.path.expanduser('~'), '.platformio')]
+    if pio:
+        homes.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(pio))))
+    for h in homes:
+        for py in (os.path.join(h, 'penv', 'Scripts', 'python.exe'), os.path.join(h, 'penv', 'bin', 'python')):
+            tool = os.path.join(h, 'packages', 'tool-esptoolpy', 'esptool.py')
+            if os.path.isfile(py) and os.path.isfile(tool):
+                return py, tool
+    return None
+
+
+def _nm_fw_detect_chip(port, tool=None, timeout=40):
+    """Ask the board on `port` what chip it is. Returns (kind, esptool output); kind is '' when it did not answer."""
+    import subprocess as _sp
+    tool = tool or _nm_fw_find_esptool(_nm_fw_find_pio())
+    if not tool:
+        return '', 'esptool was not found'
+    try:
+        r = _sp.run([tool[0], tool[1], '--port', port, '--baud', '115200', 'chip_id'], stdout=_sp.PIPE,
+                    stderr=_sp.STDOUT, stdin=_sp.DEVNULL, text=True, encoding='utf-8', errors='replace',
+                    timeout=timeout, creationflags=_nm_flags())
+        out = r.stdout or ''
+    except Exception as e:
+        return '', str(e)
+    return _nm_fw_chip_kind(out), out
+
+
+def _nm_fw_flash(role, port, clean, log, pio=None, root=None, cancel=None, detect=None):
+    """Build and flash. log(line) gets progress text (the password is masked). Returns (ok, message).
+    The chip on the port is read first: a classic ESP32 and an ESP32-S3 (the Heltec V3) need different builds."""
     import subprocess as _sp
     pio = pio or _nm_fw_find_pio()
     if not pio:
@@ -9805,42 +11981,78 @@ def _nm_fw_flash(role, port, clean, log, pio=None, root=None, cancel=None):
 
     def mask(s):
         return s.replace(secret, '********') if len(secret) >= 4 else s
+    # which board is it?
+    env = clean.get('env') or ''
+    guessed = False
+    if not env:
+        kind, info = '', ''
+        try:
+            kind, info = (detect or _nm_fw_detect_chip)(port)
+        except Exception:
+            _exc_debug('fw detect chip')
+        if kind == 'other':
+            m = re.search(r'Chip is ([^\r\n]+)', info or '')
+            return False, ('This board is ' + (m.group(1).strip() if m else 'a chip') + ', which this firmware is not '
+                           'built for. It supports the classic ESP32 and the ESP32-S3 (Heltec WiFi LoRa 32 V3).')
+        env = _NM_FW_ENVS.get(kind, '')
+        if env:
+            log(f'Board on {port}: {_NM_FW_BOARD_NAMES[env]}. Using the {env} build.')
+        else:
+            env, guessed = 'esp32dev', True
+            log(f'Could not read the chip type on {port} (hold the BOOT button if it keeps failing); trying the '
+                'classic ESP32 build, and switching to the ESP32-S3 build if the board turns out to be one.')
     try:
         d = _nm_fw_write_project(root, role, clean)
     except Exception as e:
         return False, f'Could not prepare the firmware: {e}'
     log(f'Building in {d}')
     log('First build can take a few minutes; later ones are quicker.')
-    cmd = [pio, 'run', '-d', d, '-t', 'upload', '--upload-port', port]
-    tail, ok = [], False
+    text, ok = '', False
     try:
-        p = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, stdin=_sp.DEVNULL, text=True, encoding='utf-8',
-                      errors='replace', creationflags=_nm_flags())
-        for ln in p.stdout:
-            ln = mask(ln.rstrip())
-            if ln:
-                log(ln)
-                tail.append(ln)
-                tail = tail[-40:]
-            if cancel is not None and cancel():
-                p.kill()
+        for _attempt in range(2):
+            cmd = [pio, 'run', '-d', d, '-e', env, '-t', 'upload', '--upload-port', port]
+            tail = []
+            try:
+                p = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.STDOUT, stdin=_sp.DEVNULL, text=True, encoding='utf-8',
+                              errors='replace', creationflags=_nm_flags())
+                for ln in p.stdout:
+                    ln = mask(ln.rstrip())
+                    if ln:
+                        log(ln)
+                        tail.append(ln)
+                        tail = tail[-40:]
+                    if cancel is not None and cancel():
+                        p.kill()
+                        break
+                rc = p.wait()
+                ok = rc == 0
+            except Exception as e:
+                return False, f'Could not run PlatformIO: {e}'
+            text = '\n'.join(tail)
+            if ok:
                 break
-        rc = p.wait()
-        ok = rc == 0
-    except Exception as e:
-        return False, f'Could not run PlatformIO: {e}'
+            # the board said what it really is: use the other build and go again
+            said = _nm_fw_chip_kind(text) if re.search(r'This chip is', text) else ''
+            other = _NM_FW_ENVS.get(said, '')
+            if other and other != env and (guessed or not clean.get('env')) and not (cancel is not None and cancel()):
+                log(f'The board says it is {_NM_FW_BOARD_NAMES[other]}: building for that instead.')
+                env, guessed = other, False
+                continue
+            break
     finally:
         _nm_fw_blank_secrets(d)
     if ok:
         return True, 'Flashed.'
-    text = '\n'.join(tail)
     if 'Failed to connect' in text or 'Wrong boot mode' in text:
-        return False, ('The board did not answer. Hold its BOOT button, press Flash again, and let go when the '
-                       'text says "Writing". Also check that only this one board is plugged in and the cable '
-                       'carries data.')
+        return False, ('The board did not answer. Hold its BOOT button (on the Heltec: hold PRG, tap RST, let go of PRG), '
+                       'press Flash again, and let go when the text says "Writing". Also check that only this one board '
+                       'is plugged in and the cable carries data.')
     if 'could not open port' in text.lower() or 'PermissionError' in text or 'Access is denied' in text:
         return False, 'The serial port is busy or missing. Close anything using it (the CSI tab disconnects itself) and try again.'
     return False, 'The build or upload failed; the lines above say why.'
+
+
+_NM_FW_FLOORS = ('1 — Downstairs', '2 — Upstairs')
 
 
 def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, run_flash=None):
@@ -9852,7 +12064,7 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
     win.title('Flash an ESP32 board')
     win.configure(bg=D['bg'])
     win.transient(parent)
-    win.geometry('720x640')
+    win.geometry('720x690')
     S = {'dead': False, 'aps': [], 'busy': False}
     list_ports = list_ports or _nm_csi_list_ports
     scan = scan or (lambda: (_nm_wifi_scan('aps').get('aps') or []))
@@ -9873,6 +12085,7 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
                        activebackground=D['bg'], activeforeground=D['text'], font=(_NM_MONO, 10)).pack(
             side='left', padx=(0, 14))
     ssid_var, pw_var, ch_var, bs_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value='11'), tk.StringVar()
+    floor_var = tk.StringVar(value=_NM_FW_FLOORS[0])
     caps_var, show_var, port_var, seen_var = tk.BooleanVar(value=True), tk.BooleanVar(value=False), tk.StringVar(), tk.StringVar()
     lbl(2, 'Wi-Fi name (SSID):')
     ssid_e = _ttk.Entry(win, textvariable=ssid_var, width=34)
@@ -9901,9 +12114,10 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
     lbl(7, 'Router/extender (BSSID, optional):')
     bs_e = _ttk.Entry(win, textvariable=bs_var, width=22)
     bs_e.grid(row=7, column=1, sticky='w', pady=3)
-    tk.Label(win, text='Both boards must use the same channel. The board joins the router or extender it hears best '
-                       'WHERE IT SITS, which may differ from the one this PC hears: pin it with the BSSID if you '
-                       'have extenders. When you flash the transmitter, give it the same channel.',
+    tk.Label(win, text='The channel no longer has to match: the transmitter finds the receiver by itself. The board joins the '
+                       'router or extender it hears best WHERE IT SITS, which may differ from the one this PC hears: pin it '
+                       'with the BSSID if you have extenders. The app reads the chip on the USB port and uses the right '
+                       'build (classic ESP32 or the ESP32-S3 Heltec V3 with the screen and battery gauge).',
              bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), wraplength=680, justify='left').grid(
         row=8, column=0, columnspan=3, sticky='w', padx=14, pady=(0, 4))
     lbl(9, 'Board (USB port):')
@@ -9911,11 +12125,18 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
     port_cb.grid(row=9, column=1, sticky='w', pady=3)
     ref_btn = _ttk.Button(win, text='Refresh')
     ref_btn.grid(row=9, column=2, sticky='w', padx=4)
-    out = tk.Text(win, height=12, bg='#0b1220', fg=D['text'], font=(_NM_MONO, 8), wrap='word', relief='flat')
-    out.grid(row=10, column=0, columnspan=3, sticky='nsew', padx=14, pady=(6, 4))
-    win.rowconfigure(10, weight=1)
+    lbl(10, 'Floor (transmitter number):')
+    floor_cb = _ttk.Combobox(win, textvariable=floor_var, state='readonly', width=34, values=list(_NM_FW_FLOORS))
+    floor_cb.grid(row=10, column=1, sticky='w', pady=3)
+    tk.Label(win, text='Flash this floor\'s receiver and its transmitter with the SAME number: a receiver only listens to '
+                       'the transmitter with its number, so two floors do not mix.',
+             bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), wraplength=680, justify='left').grid(
+        row=11, column=0, columnspan=3, sticky='w', padx=14, pady=(0, 2))
+    out = tk.Text(win, height=11, bg='#0b1220', fg=D['text'], font=(_NM_MONO, 8), wrap='word', relief='flat')
+    out.grid(row=12, column=0, columnspan=3, sticky='nsew', padx=14, pady=(6, 4))
+    win.rowconfigure(12, weight=1)
     bf = tk.Frame(win, bg=D['bg'])
-    bf.grid(row=11, column=0, columnspan=3, sticky='e', padx=14, pady=(2, 10))
+    bf.grid(row=13, column=0, columnspan=3, sticky='e', padx=14, pady=(2, 10))
     flash_btn = _ttk.Button(bf, text='Flash')
     flash_btn.pack(side='left', padx=4)
     close_btn = _ttk.Button(bf, text='Close', command=win.destroy)
@@ -10014,9 +12235,10 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
         say(('DONE: ' if ok else 'FAILED: ') + msg)
         if ok and role == 'recv':
             say('Unplug it and power it from a phone charger anywhere in range. In the CSI tab choose "wifi:4210" '
-                f"and press Connect. The transmitter must be on channel {clean['channel']} too.")
+                f"and press Connect. Its transmitter is number {clean['src_id']}; the transmitter finds its channel by itself.")
         elif ok:
-            say('Unplug it and power it from a charger or the USB port. It starts sending straight away.')
+            say(f"Unplug it and power it from a charger or the USB port. It starts looking for receiver {clean['src_id']} "
+                'straight away and sends once it finds it.')
 
     def _flash():
         if S['busy']:
@@ -10028,7 +12250,7 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
         note = ''
         if role == 'recv':
             ssid, note = _nm_fw_match_ssid(ssid, S['aps'])
-        clean, err = _nm_fw_clean(role, ssid, pw_var.get(), bs_var.get(), ch_var.get())
+        clean, err = _nm_fw_clean(role, ssid, pw_var.get(), bs_var.get(), ch_var.get(), (floor_var.get().split() or ['1'])[0])
         if err:
             say('Check the form: ' + err)
             return
@@ -10043,7 +12265,8 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
             say(f"Wi-Fi name that will be written: {clean['ssid']}")
         S['busy'] = True
         flash_btn.configure(state='disabled')
-        say(f"Flashing the {'receiver' if role == 'recv' else 'transmitter'} on {port}, channel {clean['channel']}...")
+        say(f"Flashing the {'receiver' if role == 'recv' else 'transmitter'} on {port}, number {clean['src_id']} "
+            f"({floor_var.get().split(' ', 1)[-1].strip()})...")
 
         def work():
             try:
@@ -10069,7 +12292,7 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
     _refresh()
     _scan()
     ssid_e.focus_set()
-    return {'win': win, 'say': say, 'flash': _flash, 'vars': {'role': role_var, 'ssid': ssid_var, 'pw': pw_var, 'ch': ch_var,
+    return {'win': win, 'say': say, 'flash': _flash, 'vars': {'role': role_var, 'ssid': ssid_var, 'pw': pw_var, 'ch': ch_var, 'floor': floor_var,
             'bssid': bs_var, 'caps': caps_var, 'port': port_var, 'seen': seen_var}, 'out': out, 'S': S,
             'fill_ports': _fill_ports, 'fill_aps': _fill_aps, 'flash_btn': flash_btn, 'seen_cb': seen_cb,
             'ssid_e': ssid_e, 'picked': _picked}
@@ -10738,6 +12961,91 @@ _NM_CSI_UDP_PORT = 4210            # the receiver board sends here when it joins
 _NM_CSI_UDP_TOKEN = 'wifi'          # port-box entry: "wifi:4210 — receiver board over Wi-Fi"
 
 
+_NM_IP_MAC_CACHE = {}
+
+
+def _nm_ip_to_mac(ip):
+    """The hardware (MAC) address behind a LAN IP, as 'aa:bb:cc:dd:ee:ff', or None when it cannot be found.
+    A board's IP can change when the router hands out a new lease; its MAC never does, so this is how a Wi-Fi
+    receiver is recognised again under a new address. Windows asks the network card (SendARP); Linux reads
+    the neighbour table. Answers are cached for two minutes (a miss for ten seconds)."""
+    ip = str(ip or '').strip()
+    if not re.fullmatch(r'\d{1,3}(\.\d{1,3}){3}', ip):
+        return None
+    now = time.time()
+    hit = _NM_IP_MAC_CACHE.get(ip)
+    if hit and now - hit[1] < (120.0 if hit[0] else 10.0):
+        return hit[0]
+    mac = None
+    try:
+        if os.name == 'nt':
+            import ctypes
+            import socket as _sk
+            buf = ctypes.create_string_buffer(8)
+            ln = ctypes.c_ulong(6)
+            dest = int.from_bytes(_sk.inet_aton(ip), 'little')
+            if ctypes.windll.iphlpapi.SendARP(dest, 0, buf, ctypes.byref(ln)) == 0:
+                mac = ':'.join('%02x' % b for b in buf.raw[:6])
+        else:
+            with open('/proc/net/arp', encoding='utf-8') as f:
+                for ln in f.read().splitlines()[1:]:
+                    c = ln.split()
+                    if len(c) >= 4 and c[0] == ip and c[3] != '00:00:00:00:00:00':
+                        mac = c[3].lower()
+    except Exception:
+        mac = None
+    if mac in ('00:00:00:00:00:00', 'ff:ff:ff:ff:ff:ff'):
+        mac = None
+    _NM_IP_MAC_CACHE[ip] = (mac, now)
+    return mac
+
+
+def _nm_pick_ip(sel):
+    """The 192.168.x.x in a Wi-Fi receiver pick ('wifi 192.168.1.9'), else None (a COM port or a plain 'wifi:4210')."""
+    sel = str(sel or '')
+    if not sel.strip().lower().startswith('wifi'):
+        return None
+    m = re.search(r'\d{1,3}(?:\.\d{1,3}){3}', sel)
+    return m.group(0) if m else None
+
+
+def _nm_floor_macs_apply(src, fl, prefs):
+    """Give a freshly made floor source the hardware address saved for its receiver (only when the saved
+    address was learned for the very same IP the pick names)."""
+    try:
+        ip = _nm_pick_ip(prefs.get(fl))
+        mac = prefs.get(fl + '_mac')
+        if src is not None and ip and mac and prefs.get(fl + '_mac_ip') == ip:
+            src.board_mac = str(mac).lower()
+    except Exception:
+        _exc_debug('floor macs apply')
+
+
+def _nm_floor_follow_sync(srcs, prefs):
+    """Bring the saved receiver picks in line with what the live sources learned: the receiver's hardware address,
+    and a new IP when a source followed its board to a different address. Edits prefs in place; True if anything
+    changed (the caller saves it and shows the new pick)."""
+    changed = False
+    for fl in ('up', 'down'):
+        s = (srcs or {}).get(fl)
+        ip = getattr(s, 'board_ip', None)
+        if s is None or not ip:
+            continue
+        cur = str(prefs.get(fl) or '')
+        was = getattr(s, 'followed', None)
+        if was and _nm_pick_ip(cur) == was[0]:
+            prefs[fl] = re.sub(r'\d{1,3}(?:\.\d{1,3}){3}', ip, cur, count=1)
+            prefs[fl + '_mac_ip'] = ip
+            s.followed = None
+            changed = True
+        mac = getattr(s, 'board_mac', None)
+        if mac and _nm_pick_ip(prefs.get(fl)) == ip and (prefs.get(fl + '_mac') != mac or prefs.get(fl + '_mac_ip') != ip):
+            prefs[fl + '_mac'] = mac
+            prefs[fl + '_mac_ip'] = ip
+            changed = True
+    return changed
+
+
 class _NMCsiUdpBroker:
     """One shared UDP socket per port. The Wi-Fi receiver board streams CSI to this PC on a UDP port; more
     than one part of the app may want that same board at once (the CSI tab, the background "Keep watching"
@@ -10894,8 +13202,12 @@ class _NMCsiSource:
         self.udp_port = udp_port
         self.on_honeypot = on_honeypot          # callback(dict) when the board reports a honeypot hit
         self.board_ip = board_ip                # if set, only take datagrams from this board (two Wi-Fi boards, one port)
+        self.board_mac = None                   # that board's hardware address: lets us find it again if its IP changes
+        self.followed = None                    # (old ip, new ip) after this source followed its board to a new address
+        self._mac_try = -1e9
         self.board = None                       # last 'CSI_BOARD' announcement (Wi-Fi mode)
-        self.discover = None                    # Wi-Fi mode: where to broadcast 'CSI_SUBSCRIBE'; None = the whole LAN
+        self.battery = {}                       # 'rx' / 'tx' -> {'mv','pct','t','id'} from the board's CSI_BATT lines
+        self.discover = None                   # Wi-Fi mode: where to broadcast 'CSI_SUBSCRIBE'; None = the whole LAN
         self.sock = None
         self.serial_cls = serial_cls or _NMSerial
         self.clock = clock or time.time
@@ -10935,6 +13247,9 @@ class _NMCsiSource:
     def feed_line(self, line, t=None):
         t = self.clock() if t is None else t
         self.lines += 1
+        if line.startswith('CSI_BATT,'):
+            self._batt_line(line, t)
+            return
         p = _nm_csi_parse_line(line)
         if p is None:
             if 'CSI_DATA' in line:
@@ -10947,6 +13262,25 @@ class _NMCsiSource:
         self.macs[p['mac']] = self.macs.get(p['mac'], 0) + 1
         with self.lock:
             self.an.add(t, p['amp'], p['rssi'])
+
+    def _batt_line(self, line, t):
+        """'CSI_BATT,<rx|tx>,<transmitter id>,<millivolts>,<percent, -1 = no battery>': a Heltec V3 receiver reports
+        its own battery ('rx') and the one its transmitter sends in every packet ('tx'). Anything malformed or
+        out of range is ignored."""
+        f = line.strip().split(',')
+        if len(f) < 5:
+            return
+        role = f[1].strip().lower()
+        if role not in ('rx', 'tx'):
+            return
+        try:
+            mv = int(f[3])
+            pct = int(f[4])
+        except ValueError:
+            return
+        if not (0 <= mv <= 6000) or not (-1 <= pct <= 100):
+            return
+        self.battery[role] = {'mv': mv, 'pct': (pct if pct >= 0 else None), 't': t, 'id': f[2].strip()[:4]}
 
     def _run_sim(self):
         t0 = self.clock()
@@ -10995,13 +13329,37 @@ class _NMCsiSource:
         except (IndexError, ValueError):
             pass
 
+    FOLLOW_QUIET_S = 5.0
+
+    def _maybe_follow(self, data, addr, now):
+        """A board announced itself from another address while the one we are pinned to has gone quiet: if that
+        newcomer has the hardware address we learned for our receiver, the router gave it a new IP, so follow it.
+        Returns True when we moved (the datagram is then handled as ours)."""
+        if not self.board_mac or self.sim is not None or b'CSI_BOARD,' not in data:
+            return False
+        if now - self.t_last_byte < self.FOLLOW_QUIET_S:
+            return False
+        if _nm_ip_to_mac(addr[0]) != self.board_mac:
+            return False
+        old, self.board_ip = self.board_ip, addr[0]
+        self.board = None
+        self.followed = (old, addr[0])
+        self.log.append((now, 'receiver moved from %s to %s (same hardware address %s)' % (old, addr[0], self.board_mac)))
+        return True
+
     def _udp_consume(self, data, addr, now):
         """Handle one datagram's lines (called by the shared _NMCsiUdpBroker for every subscriber, so the
         CSI tab, the background watcher and the Floor-detection window can all read the one board at once).
         When board_ip is set (two Wi-Fi boards sharing the one port -- e.g. a receiver on each floor) we take
         only the datagrams from that board, so the two floors' links stay separate."""
         if self.board_ip and addr and addr[0] != self.board_ip:
-            return
+            if not self._maybe_follow(data, addr, now):
+                return
+        elif self.board_ip and addr and self.board_mac is None and now - self._mac_try >= 20.0:
+            self._mac_try = now                   # learn the receiver's hardware address while it is talking to us
+            m = _nm_ip_to_mac(self.board_ip)
+            if m:
+                self.board_mac = m
         self.bytes += len(data)
         self.t_last_byte = now
         for ln in data.decode('utf-8', 'replace').splitlines():
@@ -11072,6 +13430,12 @@ class _NMCsiSource:
             return ''
         if self.udp_port:
             b = self.board
+            if b is None and self.board_ip:
+                return (f'Nothing has come from the receiver at {self.board_ip}. Either it is off or out of Wi-Fi range, '
+                        'or the router gave it a new address: press "Find Wi-Fi boards" and pick it again. '
+                        + ('This app already knows its hardware address, so it will follow it by itself if it re-appears.'
+                           if self.board_mac else 'Once it has been seen working, this app remembers its hardware '
+                           'address and follows it if the address changes.'))
             if b is None:
                 return (f'Listening on UDP port {self.udp_port}, but no receiver board has announced itself. Check: '
                         'the board is powered and flashed with csi_recv with your Wi-Fi name and password in '
@@ -11279,6 +13643,10 @@ class _NMCsiHistory:
             rows = self.db.execute('SELECT t, turb, thr, mu, score, flags, dev, bpm, rssi, rate, bands, sess '
                                    'FROM csi_hist WHERE t >= ? AND t <= ? ORDER BY t', (t0, t1)).fetchall()
         n = len(rows)
+        if any(r[11] not in self.kinds for r in rows):       # sessions written by another connection (the CSI tab)
+            with self.lock:
+                for (i, k) in self.db.execute('SELECT id, kind FROM csi_sessions'):
+                    self.kinds[i] = k
         nan = float('nan')
         g = lambda i: np.asarray([(r[i] if r[i] is not None else nan) for r in rows], float)
         bands = np.full((n, self.BANDS), np.nan)
@@ -11814,6 +14182,327 @@ class _NMFloorDetector:
                              'frames': (self.live.get(f) or {}).get('frames')} for f in self.FLOORS}}
 
 
+class _NMSpotLocator:
+    """Say WHERE in the house movement is, not just which floor, by recognising places you taught it.
+
+    One transmitter-to-receiver link per floor cannot place a person along its own path, but the SHAPE of the
+    disturbance across the 64 Wi-Fi channels (and how steady it is) depends on where the body is standing,
+    because that changes which reflected paths get blocked. So the app learns a fingerprint for each place you
+    show it: you name a spot, click it on the plan and stand or walk about there for ~15 s; the app stores the
+    average disturbance shape of BOTH links (how far each channel's level has moved from the empty room, and how
+    much each is flickering) over many 2-second windows. Live, while movement is detected, the current
+    2-second fingerprint is compared with every taught spot on the floor that moved and the closest one wins,
+    provided it is close enough to count (a person somewhere you never taught reads "somewhere else").
+    A few recent answers are voted over so the dot does not jump about.
+
+    It is a nearest-fingerprint match, not triangulation: it can only answer with places you taught it, and the
+    accuracy depends on the house. After each teach it checks itself honestly: it trains on the first half of every
+    spot's capture, tests on the second half (and the other way round) and reports how often it got the spot right.
+    This class is pure logic (no Tk); the Floor window feeds it once per tick.
+    """
+    MIN_SAMPLES = 12            # fingerprints needed for a spot to count
+    MAX_SAMPLES = 36            # kept per spot
+    WIN_S = 2.0                 # length of the window one fingerprint is taken from
+    SAMPLE_GAP = 0.4            # seconds between fingerprints while teaching
+    VOTES = 7                   # live answers voted over
+    HOLD_S = 8.0                # how long the last place stays shown after the movement stops
+
+    def __init__(self, clock=None):
+        from collections import deque
+        self.clock = clock or time.time
+        self.spots = []         # {'name','floor','x','y','samples':[[...]]}
+        self._learn = None
+        self._last_sample_t = -1e9
+        self._recent = deque(maxlen=self.VOTES)
+        self.last = None        # {'name','floor','x','y','conf','t'} while a place is being shown
+        self._model = None
+
+    # ── fingerprints ──────────────────────────────────────────────────────
+    @classmethod
+    def link_features(cls, an, t):
+        """One link's fingerprint: per channel, how far the recent average level is from the empty room, then how
+        much each channel flickers. None until the empty room is learned and there are enough recent frames."""
+        try:
+            if an is None or an.empty is None:
+                return None
+            X = an._window(t, cls.WIN_S)
+            if X is None or X.shape[0] < 20:
+                return None
+            e = np.asarray(an.empty['mean'], float)
+            if len(e) != X.shape[1]:
+                return None
+            valid = an.valid if an.valid is not None and len(an.valid) == len(e) else np.ones(len(e), bool)
+            mean = X.mean(axis=0)
+            ne = float(np.linalg.norm(e[valid])) + 1e-9
+            f1 = np.where(valid, (mean - e) / ne * np.sqrt(max(1, int(valid.sum()))), 0.0)
+            f2 = np.where(valid, X.std(axis=0) / np.maximum(mean, 1e-6), 0.0)
+            return np.concatenate([f1, f2])
+        except Exception:
+            _exc_debug('locator link features')
+            return None
+
+    def features(self, det, t):
+        """Both links' fingerprints joined, or None if either link has no usable window."""
+        fu = self.link_features(det.an.get('up'), t)
+        fd = self.link_features(det.an.get('down'), t)
+        if fu is None or fd is None or len(fu) != len(fd):
+            return None
+        return np.concatenate([fu, fd])
+
+    # ── teaching ──────────────────────────────────────────────────────────
+    def start_learn(self, name, floor, x, y, dur=15.0):
+        name = (name or '').strip()[:24]
+        if not name:
+            raise ValueError('a spot needs a name')
+        if floor not in ('up', 'down'):
+            raise ValueError('floor must be "up" or "down"')
+        self._learn = {'name': name, 'floor': floor, 'x': float(x), 'y': float(y), 't0': self.clock(),
+                       'dur': float(dur), 'samples': []}
+        self._last_sample_t = -1e9
+
+    def learning(self):
+        return self._learn is not None
+
+    def learn_info(self):
+        c = self._learn
+        if not c:
+            return None
+        el = self.clock() - c['t0']
+        return {'name': c['name'], 'floor': c['floor'], 'left': max(0.0, c['dur'] - el),
+                'progress': max(0.0, min(1.0, el / c['dur'])), 'n': len(c['samples'])}
+
+    def cancel_learn(self):
+        self._learn = None
+
+    def feed(self, feat, t):
+        """Call every tick with the current fingerprint (or None). While teaching it records one every
+        SAMPLE_GAP s; returns (ok, message) once the capture finishes, else None."""
+        c = self._learn
+        if c is None:
+            return None
+        if feat is not None and t - self._last_sample_t >= self.SAMPLE_GAP:
+            self._last_sample_t = t
+            c['samples'].append([round(float(v), 4) for v in feat])
+        if t - c['t0'] >= c['dur']:
+            return self._finish_learn()
+        return None
+
+    def _finish_learn(self):
+        c, self._learn = self._learn, None
+        S = c['samples']
+        if len(S) < self.MIN_SAMPLES:
+            return False, ('Only %d readings were captured for "%s" (it needs %d). Check both links are streaming and '
+                           'the empty room has been learned, then teach it again.' % (len(S), c['name'], self.MIN_SAMPLES))
+        if len(S) > self.MAX_SAMPLES:
+            step = len(S) / float(self.MAX_SAMPLES)
+            S = [S[int(i * step)] for i in range(self.MAX_SAMPLES)]
+        spot = {'name': c['name'], 'floor': c['floor'], 'x': round(c['x'], 2), 'y': round(c['y'], 2), 'samples': S}
+        for i, s in enumerate(self.spots):
+            if s['name'].lower() == c['name'].lower() and s['floor'] == c['floor']:
+                self.spots[i] = spot
+                break
+        else:
+            self.spots.append(spot)
+        self._model = None
+        self._recent.clear()
+        return True, 'Learned "%s" from %d readings. %s' % (c['name'], len(S), self.self_check_text())
+
+    def delete(self, name, floor=None):
+        n0 = len(self.spots)
+        self.spots = [s for s in self.spots if not (s['name'].lower() == (name or '').lower()
+                                                    and (floor is None or s['floor'] == floor))]
+        self._model = None
+        self._recent.clear()
+        self.last = None
+        return len(self.spots) != n0
+
+    def clear(self):
+        self.spots = []
+        self._model = None
+        self._recent.clear()
+        self.last = None
+
+    def usable(self):
+        return [s for s in self.spots if len(s.get('samples') or []) >= self.MIN_SAMPLES]
+
+    # ── persistence ───────────────────────────────────────────────────────
+    def to_json(self):
+        return {'version': 1, 'spots': self.spots}
+
+    def load(self, data):
+        spots = []
+        try:
+            for s in (data or {}).get('spots', []) if isinstance(data, dict) else []:
+                name = str(s.get('name') or '')[:24]
+                fl = s.get('floor')
+                smp = [list(map(float, r)) for r in (s.get('samples') or [])]
+                if not name or fl not in ('up', 'down') or not smp or len({len(r) for r in smp}) != 1:
+                    continue
+                spots.append({'name': name, 'floor': fl, 'x': float(s.get('x', 0.0)), 'y': float(s.get('y', 0.0)),
+                              'samples': smp[:self.MAX_SAMPLES]})
+        except (TypeError, ValueError, AttributeError):
+            spots = []
+        self.spots = spots
+        self._model = None
+
+    # ── matching ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _build(spots):
+        """Per-spot centroid + a shared per-feature scale (the typical spread INSIDE a spot, so noisy features count
+        less) + how far each spot's own readings usually sit from its centroid (to reject strangers)."""
+        arrs = [np.asarray(s['samples'], float) for s in spots]
+        D = arrs[0].shape[1]
+        if any(a.shape[1] != D for a in arrs):
+            return None
+        cents = [a.mean(axis=0) for a in arrs]
+        dev = np.concatenate([a - c for a, c in zip(arrs, cents)], axis=0)
+        sd = dev.std(axis=0)
+        scale = sd + 0.25 * float(sd.mean()) + 1e-6
+        spread = []
+        for a, c in zip(arrs, cents):
+            d = np.sqrt(np.mean(((a - c) / scale) ** 2, axis=1))
+            spread.append(float(np.median(d)))
+        return {'cents': cents, 'scale': scale, 'spread': spread, 'D': D}
+
+    def _get_model(self):
+        if self._model is None:
+            sp = self.usable()
+            self._model = {'spots': sp, 'm': self._build(sp)} if len(sp) >= 1 else {'spots': [], 'm': None}
+        return self._model
+
+    @staticmethod
+    def _rank(model, feat, idx):
+        """[(distance, spot index)] for the candidate spots, nearest first."""
+        m = model['m']
+        out = []
+        for i in idx:
+            d = float(np.sqrt(np.mean(((feat - m['cents'][i]) / m['scale']) ** 2)))
+            out.append((d, i))
+        out.sort()
+        return out
+
+    def classify(self, feat, floors=('up', 'down')):
+        """The best-matching taught spot among those on `floors` -> {'name','floor','x','y','conf'} or None
+        (no spots there, or the reading looks like none of them)."""
+        if feat is None:
+            return None
+        model = self._get_model()
+        m = model['m']
+        if m is None or len(feat) != m['D']:
+            return None
+        sp = model['spots']
+        idx = [i for i, s in enumerate(sp) if s['floor'] in floors]
+        if not idx:
+            return None
+        rk = self._rank(model, np.asarray(feat, float), idx)
+        d1, i1 = rk[0]
+        out_thr = max(2.2 * m['spread'][i1], 1.0)         # farther than this from the spot's own readings: a stranger
+        if d1 > out_thr:
+            return None
+        if len(rk) > 1:
+            d2 = rk[1][0]
+            conf = max(0.0, min(1.0, 1.0 - d1 / max(d2, 1e-9)))
+        else:
+            conf = max(0.0, min(1.0, 1.0 - d1 / out_thr))
+        s = sp[i1]
+        return {'name': s['name'], 'floor': s['floor'], 'x': s['x'], 'y': s['y'], 'conf': conf}
+
+    def update(self, feat, floor):
+        """Live: classify the current fingerprint among the spots on the floor that moved ('both' = all) and
+        vote over the last few answers. Returns the place being shown (or None)."""
+        t = self.clock()
+        floors = ('up', 'down') if floor in (None, 'both') else (floor,)
+        r = self.classify(feat, floors)
+        self._recent.append(r['name'] + '|' + r['floor'] if r else '')
+        votes = {}
+        for v in self._recent:
+            if v:
+                votes[v] = votes.get(v, 0) + 1
+        if not votes:                          # moving, but nothing taught matches: do not keep showing an old place
+            self.last = None
+            return None
+        if votes:
+            best = max(votes, key=votes.get)
+            if votes[best] >= max(2, (len(self._recent) + 1) // 2 - 1) or (r and len(self._recent) < 3):
+                nm, fl = best.rsplit('|', 1)
+                for s in self.spots:
+                    if s['name'] == nm and s['floor'] == fl:
+                        conf = r['conf'] if r and r['name'] == nm else 0.0
+                        self.last = {'name': nm, 'floor': fl, 'x': s['x'], 'y': s['y'], 'conf': conf, 't': t,
+                                     'votes': votes[best], 'of': len(self._recent)}
+                        return self.last
+        return self.shown(t)
+
+    def shown(self, t=None):
+        """The last place, while it is fresh (it lingers HOLD_S after movement stops, then clears)."""
+        t = self.clock() if t is None else t
+        if self.last and t - self.last['t'] <= self.HOLD_S:
+            return self.last
+        self.last = None
+        return None
+
+    def quiet(self):
+        """Movement stopped: let old votes go so the next movement starts from scratch."""
+        self._recent.clear()
+
+    # ── honest self-check ─────────────────────────────────────────────────
+    def self_check(self):
+        """Train on the first half of each spot's readings and test on the second half, then the other way
+        round, only against spots on the same floor (as live). -> (hits, total, {name: (hits, total)},
+        [(true, guessed)]) or None when no floor has two taught spots."""
+        sp = self.usable()
+        floors = [f for f in ('up', 'down') if sum(1 for s in sp if s['floor'] == f) >= 2]
+        if not floors:
+            return None
+        hits = total = 0
+        per, wrong = {}, []
+        for train_first in (True, False):
+            tr, te = [], []
+            for s in sp:
+                a = s['samples']
+                h = len(a) // 2
+                first, second = a[:h], a[h:]
+                if len(first) < 5 or len(second) < 5:
+                    return None
+                tr.append(dict(s, samples=first if train_first else second))
+                te.append(second if train_first else first)
+            m = self._build(tr)
+            if m is None:
+                return None
+            model = {'spots': tr, 'm': m}
+            for i, s in enumerate(sp):
+                if s['floor'] not in floors:
+                    continue
+                idx = [j for j, o in enumerate(sp) if o['floor'] == s['floor']]
+                key = s['name']
+                for row in te[i]:
+                    f = np.asarray(row, float)
+                    rk = self._rank(model, f, idx)
+                    total += 1
+                    ok = rk[0][1] == i
+                    hits += 1 if ok else 0
+                    h_, t_ = per.get(key, (0, 0))
+                    per[key] = (h_ + (1 if ok else 0), t_ + 1)
+                    if not ok:
+                        wrong.append((s['name'], sp[rk[0][1]]['name']))
+        return hits, total, per, wrong
+
+    def self_check_text(self):
+        r = self.self_check()
+        if r is None:
+            return ('Teach at least two spots on the same floor and the app will check how often it tells them apart.')
+        hits, total, per, wrong = r
+        pct = 100.0 * hits / max(1, total)
+        txt = 'Self-check: %.0f%% of held-back readings matched the right spot (%d of %d).' % (pct, hits, total)
+        if wrong:
+            from collections import Counter
+            (a, b), n = Counter(wrong).most_common(1)[0]
+            txt += ' Most mix-ups: "%s" read as "%s".' % (a, b)
+        if pct < 70:
+            txt += ' That is weak: spots that are close together or in the same room look alike to one link; teach spots further apart.'
+        return txt
+
+
 def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
     """Builds the CSI tab inside `parent`. Returns a controller dict (also used by tests)."""
     import tkinter as tk
@@ -12105,6 +14794,8 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
         S['sess'] = None
         S['src'] = None
         S['sim'] = None
+        if W is not None:
+            W.csi_tab = None
         if resume and S['owns_bg'] and W is not None:
             S['owns_bg'] = False
             try:
@@ -12781,6 +15472,8 @@ def _nm_csi_build_tab(parent, D, win, state_dir=None, clock=None, watcher=None):
 
     def _feed_watcher():
         """While this tab owns a real board, give the watcher its once-a-second reading (alerts + history)."""
+        if W is not None:
+            W.csi_tab = ({'an': S['an'], 'src': S['src']} if (S['src'] is not None and S['sim'] is None) else None)
         if W is None or S['src'] is None or S['sim'] is not None:
             return
         now = clock()
@@ -13204,6 +15897,3714 @@ def _nm_floor_overlay(ax, W, Hh, tx, rx, moving, inten):
 
 
 
+def _nm_floor_spots_layer(ax, spots, floor, cur):
+    """The places you taught, drawn on one floor's plan: a small diamond and name each; the one the app thinks
+    the movement is at (`cur` = {'name','floor'}) is filled orange with a soft ring about 1.3 m across.
+    Returns the artists so the caller can remove them next redraw."""
+    from matplotlib.patches import Circle
+    arts = []
+    for sp in spots or []:
+        if sp.get('floor') != floor:
+            continue
+        x, y = float(sp['x']), float(sp['y'])
+        hot = bool(cur and cur.get('name') == sp.get('name') and cur.get('floor') == floor)
+        arts += ax.plot([x], [y], marker='D', ms=8 if hot else 5, mfc='#ff9f1c' if hot else 'none',
+                        mec='#ff9f1c' if hot else '#cfe8ff', mew=1.3, ls='', zorder=12,
+                        scalex=False, scaley=False)
+        arts.append(ax.text(x + 0.3, y - 0.3, str(sp.get('name')), color='#ffd9a0' if hot else '#cfe8ff',
+                            fontsize=8 if hot else 7, fontweight='bold' if hot else 'normal', zorder=12,
+                            bbox=dict(boxstyle='round,pad=0.15', fc='black', ec='none', alpha=0.45)))
+        if hot:
+            c = Circle((x, y), 1.3, fc='#ff9f1c', ec='#ff9f1c', alpha=0.28, lw=1.6, zorder=8)
+            ax.add_patch(c)
+            arts.append(c)
+    return arts
+
+
+_NM_BATT_STALE = 40.0      # a board reports every 10 s; older than this = no current reading
+
+
+def _nm_batt_text(b, now):
+    """One board's battery for display: '87% (4.05 V)', 'no battery' or 'no reading'."""
+    if not b or now - b.get('t', 0.0) > _NM_BATT_STALE:
+        return 'no reading'
+    if b.get('pct') is None:
+        return 'no battery'
+    return '%d%% (%.2f V)' % (b['pct'], b['mv'] / 1000.0)
+
+
+def _nm_batt_line(name, battery, now):
+    """'Upstairs boards: receiver 87% (4.05 V) · transmitter 85% (4.02 V)'. Boards with no battery gauge
+    (the plain ESP32 firmware) report nothing, which reads 'no reading'."""
+    battery = battery or {}
+    return '%s boards: receiver %s · transmitter %s' % (
+        name, _nm_batt_text(battery.get('rx'), now), _nm_batt_text(battery.get('tx'), now))
+
+
+def _nm_batt_alert(W, name, battery, memo, now=None):
+    """Phone alert when a board's battery is low (<= 20 %: at most once per 6 h; <= 10 %: once an hour).
+    A board on charge reads high, so a board that is plugged in never trips this. 'memo' holds the last time
+    each alert was raised so the caller can run this every tick without filling the event list."""
+    if W is None:
+        return
+    now = time.time() if now is None else now
+    for role, label in (('rx', 'receiver'), ('tx', 'transmitter')):
+        b = (battery or {}).get(role)
+        if not b or b.get('pct') is None or now - b.get('t', 0.0) > _NM_BATT_STALE:
+            continue
+        pct = b['pct']
+        if pct <= 10:
+            lvl, gap = 'critically low', 3600.0
+        elif pct <= 20:
+            lvl, gap = 'low', 6 * 3600.0
+        else:
+            continue
+        key = 'BATT:%s:%s:%s' % (name, role, lvl)
+        last = memo.get(key)
+        if last is not None and now - last < gap:
+            continue
+        memo[key] = now
+        try:
+            W.event('BATTERY', '%s %s battery is %s: %d%% (%.2f V). Plug it in to charge.' % (
+                name, label, lvl, pct, b['mv'] / 1000.0), alert=True, sev='warn', key=key, debounce=gap)
+        except Exception:
+            _exc_debug('battery alert')
+
+
+# ── Floor history: a week of "which floor moved, how much, and where" ───────────────────────────────
+
+_NM_FH_FILE = 'floor_history.json'
+_NM_FH_KEEP_DAYS = 7
+
+
+class _NMFloorHistory:
+    """A week of floor movement, one minute per bucket, per floor. Pure logic (no Tk, no threads of its own).
+
+    For every minute and floor it keeps whether we were WATCHING that floor's link (coverage) and, if there was
+    movement attributed to the floor, how many seconds of it, the peak movement score and the taught place the
+    movement was at most. Quiet minutes cost nothing but their coverage, so a week is a few hundred kB.
+    Whoever is running the detector (the background tracker, or the Floor window while it is connected) calls
+    record() every half second; the History window only reads.
+    """
+    FLOORS = ('up', 'down')
+    ACTIVE_S = 1.0              # a minute counts as 'movement' from this many seconds
+    EPISODE_GAP_MIN = 5         # this many quiet minutes end one burst of movement
+
+    def __init__(self, keep_days=_NM_FH_KEEP_DAYS, clock=None):
+        import threading
+        self.keep_min = int(round(float(keep_days) * 1440))
+        self.clock = clock or time.time
+        self.lock = threading.RLock()
+        self.cov = {f: set() for f in self.FLOORS}        # minutes we were watching this floor
+        self.ev = {f: {} for f in self.FLOORS}            # minute -> [moving seconds, peak score, place]
+        self._last_t = None
+        self._votes = {f: {} for f in self.FLOORS}        # place votes inside the minute in progress
+        self._vote_min = None
+        self._pruned_min = None
+        self.dirty = False
+        self.saved_t = 0.0
+
+    # ── recording ─────────────────────────────────────────────────────────
+    def record(self, now, info):
+        """info = {'up': {'ok', 'moving', 'score', 'place'}, 'down': {...}}: ok = that floor's link is delivering
+        data, moving = movement is attributed to that floor, place = taught place name (or None)."""
+        m = int(now // 60)
+        with self.lock:
+            gap = 0.5 if self._last_t is None else now - self._last_t
+            dt = gap if 0.0 < gap <= 3.0 else (0.5 if gap > 3.0 else 0.0)     # a long gap = we were not running
+            self._last_t = now
+            if m != self._vote_min:
+                self._vote_min = m
+                self._votes = {f: {} for f in self.FLOORS}
+                if self._pruned_min is None or m - self._pruned_min >= 30:
+                    self._prune(m)
+            for f in self.FLOORS:
+                i = (info or {}).get(f) or {}
+                if not i.get('ok'):
+                    continue
+                if m not in self.cov[f]:
+                    self.cov[f].add(m)
+                    self.dirty = True
+                if not i.get('moving'):
+                    continue
+                e = self.ev[f].get(m)
+                if e is None:
+                    e = self.ev[f][m] = [0.0, 0.0, '']
+                e[0] += dt
+                try:
+                    sc = float(i.get('score') or 0.0)
+                except (TypeError, ValueError):
+                    sc = 0.0
+                if sc == sc and sc > e[1]:
+                    e[1] = sc
+                pl = i.get('place')
+                if pl:
+                    v = self._votes[f]
+                    v[pl] = v.get(pl, 0) + 1
+                    e[2] = max(v, key=v.get)
+                self.dirty = True
+
+    def _prune(self, m):
+        cut = m - self.keep_min
+        for f in self.FLOORS:
+            self.cov[f] = {x for x in self.cov[f] if x > cut}
+            self.ev[f] = {x: e for x, e in self.ev[f].items() if x > cut}
+        self._pruned_min = m
+
+    def prune(self, now=None):
+        with self.lock:
+            self._prune(int((self.clock() if now is None else now) // 60))
+
+    # ── reading ───────────────────────────────────────────────────────────
+    def span(self, now=None):
+        """(t0, t1): from the oldest minute we have (never more than the kept week back, never less than an hour)
+        to now. The History window scales its slider to this."""
+        now = self.clock() if now is None else now
+        with self.lock:
+            firsts = [min(c) for c in self.cov.values() if c] + [min(e) for e in self.ev.values() if e]
+        t0 = max(min(firsts) * 60.0, now - self.keep_min * 60.0) if firsts else now - 3600.0
+        return min(t0, now - 3600.0), now
+
+    def bins(self, floor, t0, t1, n):
+        """-> (covered_s, moving_s, peak) lists of length n over [t0, t1)."""
+        n = max(1, int(n))
+        cov, mv, pk = [0.0] * n, [0.0] * n, [0.0] * n
+        w = (t1 - t0) / n
+        if w <= 0:
+            return cov, mv, pk
+        with self.lock:
+            for m in self.cov.get(floor, ()):
+                tm = m * 60.0
+                if t0 <= tm < t1:
+                    cov[min(n - 1, int((tm - t0) / w))] += 60.0
+            for m, e in self.ev.get(floor, {}).items():
+                tm = m * 60.0
+                if t0 <= tm < t1:
+                    k = min(n - 1, int((tm - t0) / w))
+                    mv[k] += e[0]
+                    pk[k] = max(pk[k], e[1])
+        return cov, mv, pk
+
+    def at(self, floor, t, radius=1):
+        """What was going on around time t on this floor (the minute and `radius` minutes either side)."""
+        m = int(t // 60)
+        with self.lock:
+            rng = range(m - radius, m + radius + 1)
+            covered = any(x in self.cov.get(floor, ()) or x in self.ev.get(floor, {}) for x in rng)
+            sec, peak, best = 0.0, 0.0, None
+            for x in rng:
+                e = self.ev.get(floor, {}).get(x)
+                if e:
+                    sec += e[0]
+                    peak = max(peak, e[1])
+                    if best is None or e[0] > best[0]:
+                        best = e
+            place = best[2] if best and best[2] else None
+        return {'covered': covered, 'moving': sec >= self.ACTIVE_S, 'sec': sec, 'peak': peak, 'place': place,
+                'minute': m}
+
+    def episodes(self, floor, t0, t1):
+        """Bursts of movement in [t0, t1]: [{'start','end' (minutes), 'sec', 'peak', 'place'}], oldest first."""
+        with self.lock:
+            act = sorted((m, e[0], e[1], e[2]) for m, e in self.ev.get(floor, {}).items()
+                         if e[0] >= self.ACTIVE_S and t0 <= m * 60.0 <= t1)
+        out = []
+        for m, sec, pk, pl in act:
+            if out and m - out[-1]['end'] <= self.EPISODE_GAP_MIN:
+                c = out[-1]
+                c['end'] = m
+            else:
+                c = {'start': m, 'end': m, 'sec': 0.0, 'peak': 0.0, 'places': {}}
+                out.append(c)
+            c['sec'] += sec
+            c['peak'] = max(c['peak'], pk)
+            if pl:
+                c['places'][pl] = c['places'].get(pl, 0.0) + sec
+        for c in out:
+            pls = c.pop('places')
+            c['place'] = max(pls, key=pls.get) if pls else None
+        return out
+
+    def neighbor(self, floor, t, direction, t0=None, t1=None):
+        """Time (s) of the start of the next (direction > 0) or previous (< 0) burst of movement, or None."""
+        now = self.clock()
+        eps = self.episodes(floor, now - self.keep_min * 60.0 if t0 is None else t0, now if t1 is None else t1)
+        m = int(t // 60)
+        if direction > 0:
+            c = [e for e in eps if e['start'] > m]
+            return c[0]['start'] * 60.0 + 30.0 if c else None
+        c = [e for e in eps if e['end'] < m - 1]
+        return c[-1]['start'] * 60.0 + 30.0 if c else None
+
+    def summary(self, floor, t0, t1):
+        """{'episodes', 'sec', 'place'} for [t0, t1]: how many bursts, total movement time, where it was most."""
+        eps = self.episodes(floor, t0, t1)
+        pls = {}
+        for e in eps:
+            if e['place']:
+                pls[e['place']] = pls.get(e['place'], 0.0) + e['sec']
+        return {'episodes': len(eps), 'sec': sum(e['sec'] for e in eps),
+                'place': max(pls, key=pls.get) if pls else None}
+
+    # ── persistence ───────────────────────────────────────────────────────
+    @staticmethod
+    def _ranges(minutes):
+        out = []
+        for m in sorted(minutes):
+            if out and m == out[-1][1] + 1:
+                out[-1][1] = m
+            else:
+                out.append([m, m])
+        return out
+
+    def to_json(self):
+        with self.lock:
+            return {'v': 1, 'keep_min': self.keep_min,
+                    'cov': {f: self._ranges(self.cov[f]) for f in self.FLOORS},
+                    'ev': {f: [[m, round(e[0], 1), round(e[1], 1), e[2]] for m, e in sorted(self.ev[f].items())]
+                           for f in self.FLOORS}}
+
+    def load(self, d, now=None):
+        """Read what to_json wrote. Anything malformed is skipped rather than raising."""
+        if not isinstance(d, dict):
+            return
+        cov_d, ev_d = d.get('cov'), d.get('ev')
+        cov_d = cov_d if isinstance(cov_d, dict) else {}
+        ev_d = ev_d if isinstance(ev_d, dict) else {}
+        with self.lock:
+            for f in self.FLOORS:
+                try:
+                    for a, b in (cov_d.get(f) or []):
+                        a, b = int(a), int(b)
+                        if b < a:
+                            continue
+                        a = max(a, b - self.keep_min)               # a hostile range cannot balloon memory
+                        self.cov[f].update(range(a, b + 1))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    for row in (ev_d.get(f) or []):
+                        m, sec, pk, pl = int(row[0]), float(row[1]), float(row[2]), str(row[3] or '')
+                        if sec == sec and pk == pk and sec >= 0:
+                            self.ev[f][m] = [sec, pk, pl]
+                except (TypeError, ValueError, IndexError):
+                    pass
+            self._prune(int((self.clock() if now is None else now) // 60))
+            self.dirty = False
+
+
+def _nm_floor_hist_open(state_dir, clock=None):
+    h = _NMFloorHistory(clock=clock)
+    try:
+        h.load(_nm_wifi_load(_NM_FH_FILE, {}, state_dir))
+    except Exception:
+        _exc_debug('floor history load')
+    return h
+
+
+def _nm_floor_hist_save(h, state_dir, force=False, every=60.0):
+    """Write the history if it changed (at most once per `every` seconds unless forced). -> True if written."""
+    now = time.time()
+    if not force and (not h.dirty or now - h.saved_t < every):
+        return False
+    d = h.to_json()
+    h.dirty = False
+    h.saved_t = now
+    return bool(_nm_wifi_save(_NM_FH_FILE, d, state_dir))
+
+
+def _nm_floor_hist_info(det, loc):
+    """What _NMFloorHistory.record wants, taken from a detector (and the place locator) right after det.tick()."""
+    v = det.verdict or {}
+    fl = v.get('floor') if v.get('moving') else None
+    shown = None
+    try:
+        shown = loc.shown() if loc is not None else None
+    except Exception:
+        _exc_debug('floor hist place')
+    out = {}
+    for f in ('up', 'down'):
+        rate = (det.live.get(f) or {}).get('rate')
+        try:
+            ok = rate is not None and float(rate) > 0.0
+        except (TypeError, ValueError):
+            ok = False
+        mv = fl == f or fl == 'both'
+        out[f] = {'ok': ok, 'moving': bool(mv and ok),
+                  'score': float(v.get('s_up' if f == 'up' else 's_down') or 0.0),
+                  'place': (shown['name'] if (mv and shown and shown.get('floor') == f) else None)}
+    return out
+
+
+def _nm_floor_cal_save(state_dir, det, memo):
+    """Remember the learned floor split (and so the calibration) across restarts. Cheap to call every tick: it only
+    writes when something changed. The empty-room profiles are saved by each analyzer's on_cal hook."""
+    try:
+        cur = json.dumps(det.cal, sort_keys=True)
+        if memo.get('cal') == cur:
+            return False
+        memo['cal'] = cur
+        return bool(_nm_wifi_save('floor_calibration.json', {'cal': det.cal}, state_dir))
+    except Exception:
+        _exc_debug('floor cal save')
+        return False
+
+
+def _nm_floor_cal_load(state_dir, det, memo=None):
+    """Put back a saved calibration into a fresh detector and hook the analyzers so a new one is saved."""
+    for f in det.FLOORS:
+        key = 'floor:' + f
+        try:
+            if det.an[f].empty is None:
+                det.an[f].empty = _nm_csi_cal_load(state_dir, key)
+            det.an[f].on_cal = lambda e, k=key: _nm_csi_cal_save(state_dir, k, e)
+        except Exception:
+            _exc_debug('floor cal hook')
+    try:
+        d = _nm_wifi_load('floor_calibration.json', {}, state_dir) or {}
+        for f in det.FLOORS:
+            c = (d.get('cal') or {}).get(f)
+            if isinstance(c, dict) and det.cal.get(f) is None:
+                det.cal[f] = {'ratio': float(c['ratio']), 'mag': float(c['mag']), 'n': int(c['n'])}
+        if memo is not None:
+            memo['cal'] = json.dumps(det.cal, sort_keys=True)
+    except Exception:
+        _exc_debug('floor cal load')
+
+
+def _nm_floor_make_source(sel, an, clock=None):
+    """A CSI reader for one receiver pick: 'wifi', 'wifi 192.168.1.9', 'wifi:4210' or a COM port."""
+    sel = (sel or '').strip()
+    if sel.lower().startswith('wifi'):
+        ip = None
+        port = _NM_CSI_UDP_PORT
+        rest = sel[4:].lstrip(' :')                 # after 'wifi': ' 192.168.1.9', ':4210', '192.168.1.9:4210'
+        m = re.match(r'(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?', rest)
+        if m:
+            ip = m.group(1)
+            if m.group(2):
+                port = int(m.group(2))
+        elif rest.isdigit():
+            port = int(rest)
+        return _NMCsiSource(an, udp_port=port, clock=clock or time.time, board_ip=ip)
+    return _NMCsiSource(an, port=sel, baud=_NM_CSI_BAUD, clock=clock or time.time)
+
+
+def _nm_floor_picks_problem(u, d):
+    """Why two receiver picks cannot be used together, or None when they can."""
+    u, d = (u or '').strip(), (d or '').strip()
+    if not u or not d:
+        return 'Pick a receiver for each floor first.'
+    if u == d:
+        return 'The two floors need different receivers (one is doubled up).'
+
+    def key(sel):
+        s = sel.lower()
+        if not s.startswith('wifi'):
+            return None
+        m = re.search(r'\d{1,3}(?:\.\d{1,3}){3}', sel)
+        return m.group(0) if m else '*'
+    ku, kd = key(u), key(d)
+    if ku is not None and kd is not None and (ku == '*' or kd == '*' or ku == kd):
+        return ('With both receivers on Wi-Fi, pick a specific board for each floor — press "Find Wi-Fi boards" and '
+                'choose a 192.168.x.x for each. A plain "wifi:4210" grabs every board, so the two floors would mix.')
+    return None
+
+
+class _NMFloorTracker:
+    """Keeps the floor detector running with the Floor window closed, so the week of history fills in by itself.
+
+    It reads the receiver picks the Floor window saved (floor_prefs.json), connects to both boards, restores the
+    saved calibration and taught places, and records every half second into the shared _NMFloorHistory. While the
+    Floor window is connected it pauses (a USB receiver can only be opened once) and the window records instead.
+    """
+    TICK_S = 0.5
+    RETRY_S = 30.0
+
+    def __init__(self, state_dir, history, clock=None, source_factory=None):
+        import threading
+        self.state_dir = state_dir
+        self.hist = history
+        self.clock = clock or time.time
+        self.source_factory = source_factory or _nm_floor_make_source
+        self.det = None
+        self.loc = None
+        self.note = None                     # note(source, time, moving): the night alarm listens here
+        self.src = {'up': None, 'down': None}
+        self.status = 'starting'
+        self._stop = threading.Event()
+        self._paused = False
+        self._thread = None
+        self._retry_t = 0.0
+        self._spots_t = 0.0
+        self._spots_m = None
+        self._memo = {}
+        self._lock = threading.RLock()
+
+    # ── lifecycle ─────────────────────────────────────────────────────────
+    def start(self):
+        import threading
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True, name='nm-floor-track')
+            self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._close()
+        try:
+            _nm_floor_hist_save(self.hist, self.state_dir, force=True)
+        except Exception:
+            _exc_debug('floor track final save')
+
+    def pause(self):
+        with self._lock:
+            self._paused = True
+        self._close()
+        self.status = 'paused while the Floor window is connected'
+
+    def resume(self):
+        with self._lock:
+            self._paused = False
+            self._retry_t = 0.0
+
+    def running(self):
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+
+    def _close(self):
+        with self._lock:
+            srcs, self.src = self.src, {'up': None, 'down': None}
+        for s in srcs.values():
+            if s is not None:
+                try:
+                    s.stop()
+                except Exception:
+                    _exc_debug('floor track src stop')
+
+    # ── work ──────────────────────────────────────────────────────────────
+    def _connect(self):
+        prefs = _nm_wifi_load('floor_prefs.json', {}, None)
+        if not isinstance(prefs, dict):
+            prefs = {}
+        u, d = str(prefs.get('up') or ''), str(prefs.get('down') or '')
+        bad = _nm_floor_picks_problem(u, d)
+        if bad:
+            self.status = 'waiting: open the Floor window and connect once to choose the receivers'
+            return False
+        det = _NMFloorDetector(clock=self.clock)
+        _nm_floor_cal_load(self.state_dir, det, self._memo)
+        loc = _NMSpotLocator(clock=self.clock)
+        loc.load(_nm_wifi_load('floor_spots.json', {}, self.state_dir))
+        try:
+            su, sd = self.source_factory(u, det.an['up'], self.clock), self.source_factory(d, det.an['down'], self.clock)
+            _nm_floor_macs_apply(su, 'up', prefs)
+            _nm_floor_macs_apply(sd, 'down', prefs)
+            su.start()
+            sd.start()
+        except Exception as ex:
+            self.status = 'could not connect: %s' % ex
+            self._close()
+            return False
+        with self._lock:
+            self.det, self.loc = det, loc
+            self.src = {'up': su, 'down': sd}
+        self._spots_t = self.clock()
+        self.status = 'recording'
+        return True
+
+    def _reload_spots(self, now):
+        """Pick up places taught in the Floor window since we started (the file's time changes)."""
+        if now - self._spots_t < 30.0:
+            return
+        self._spots_t = now
+        try:
+            p = _nm_wifi_dir(self.state_dir) / 'floor_spots.json'
+            mt = p.stat().st_mtime if p.exists() else None
+        except Exception:
+            mt = None
+        if mt != self._spots_m:
+            self._spots_m = mt
+            try:
+                self.loc.load(_nm_wifi_load('floor_spots.json', {}, self.state_dir))
+            except Exception:
+                _exc_debug('floor track spots')
+
+    def _follow_boards(self, now):
+        """Every few seconds: remember each receiver's hardware address, and if a receiver came back under a new
+        IP, store that as its pick so the Floor window and the next start use it."""
+        if now - getattr(self, '_follow_t', -1e9) < 5.0:
+            return
+        self._follow_t = now
+        try:
+            prefs = _nm_wifi_load('floor_prefs.json', {}, None)
+            if isinstance(prefs, dict) and _nm_floor_follow_sync(self.src, prefs):
+                _nm_wifi_save('floor_prefs.json', prefs, None)
+        except Exception:
+            _exc_debug('floor track follow')
+
+    def step(self):
+        """One tick (public so tests can drive it without the thread)."""
+        now = self.clock()
+        with self._lock:
+            paused, have = self._paused, self.src['up'] is not None
+        if paused:
+            return
+        if not have:
+            if now - self._retry_t >= self.RETRY_S:
+                self._retry_t = now
+                self._connect()
+            return
+        det, loc = self.det, self.loc
+        det.tick()
+        feat = loc.features(det, now)
+        if det.verdict.get('moving'):
+            loc.update(feat, det.verdict.get('floor'))
+        else:
+            loc.quiet()
+            loc.shown(now)
+        self.hist.record(now, _nm_floor_hist_info(det, loc))
+        if self.note is not None:
+            try:
+                self.note('floor', now, bool(det.verdict.get('moving')))
+            except Exception:
+                _exc_debug('floor track night note')
+        self._reload_spots(now)
+        self._follow_boards(now)
+        _nm_floor_hist_save(self.hist, self.state_dir)
+        try:
+            _nm_floor_cal_save(self.state_dir, det, self._memo)         # a calibration started from the web page
+        except Exception:
+            _exc_debug('floor track cal save')
+
+    def _run(self):
+        while not self._stop.wait(self.TICK_S):
+            try:
+                self.step()
+            except Exception:
+                _exc_debug('floor track step')
+        self._close()
+
+
+def _nm_open_floor_history(parent, D, hist, ctx_fn):
+    """History window: for each floor a plan, a timeline of the week and a slider. Drag a slider back in time and
+    that floor's plan shows what was going on then (movement, and the taught place it was at). The timeline
+    shows how much movement there was (red) and when the app was not watching (hatched); click it to jump.
+    ctx_fn() -> {'plan','samples','ids','spots','layout','names','rec'} is asked for fresh each time."""
+    import tkinter as tk
+    import datetime as _dt
+    import matplotlib.figure as _mf
+    import matplotlib.dates as _md
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FCanvas
+
+    win = tk.Toplevel(parent)
+    win.title('Floor History — the last 7 days')
+    win.configure(bg=D['bg'])
+    win.geometry('1120x780')
+    win.minsize(860, 600)
+    FLOORS = ('down', 'up')
+    NB = 240                                                  # bars across the timeline
+    S = {'t0': 0.0, 't1': 0.0, 'sel': {'down': None, 'up': None}, 'dead': False, 'job': None, 'busy': False,
+         'ctx': {}, 'dim': {}}
+    C = {}
+    link_var = tk.BooleanVar(value=False)
+
+    def _fmt_t(t):
+        return _dt.datetime.fromtimestamp(t).strftime('%a %d %b  %H:%M')
+
+    def _fmt_dur(s):
+        s = int(round(s))
+        if s < 90:
+            return '%d s' % s
+        if s < 5400:
+            return '%d min' % int(round(s / 60.0))
+        if s < 48 * 3600:
+            return '%.1f h' % (s / 3600.0)
+        return '%.1f days' % (s / 86400.0)
+
+    tk.Label(win, text='Floor history', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 15, 'bold')).pack(
+        anchor='w', padx=16, pady=(14, 0))
+    sub = tk.Label(win, text='', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9), wraplength=1040, justify='left')
+    sub.pack(anchor='w', padx=16, pady=(2, 6))
+    top = tk.Frame(win, bg=D['bg'])
+    top.pack(fill='x', padx=16)
+    tk.Checkbutton(top, text='Move both sliders together', variable=link_var, bg=D['bg'], fg=D['text2'],
+                   selectcolor=D['bg'], activebackground=D['bg'], activeforeground=D['text'],
+                   font=(_NM_MONO, 9)).pack(side='left')
+    rec_lbl = tk.Label(top, text='', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9))
+    rec_lbl.pack(side='right')
+    cols = tk.Frame(win, bg=D['bg'])
+    cols.pack(fill='both', expand=True, padx=16, pady=(6, 10))
+    cols.columnconfigure(0, weight=1, uniform='c')
+    cols.columnconfigure(1, weight=1, uniform='c')
+
+    def _sel_t(fl):
+        return S['sel'][fl] if S['sel'][fl] is not None else S['t1']
+
+    def _x(t):
+        return _md.date2num(_dt.datetime.fromtimestamp(t))
+
+    def _from_x(x):
+        return _md.num2date(x).replace(tzinfo=None).timestamp()
+
+    def _build_axes(fl):
+        c = C[fl]
+        c['fig'].clear()
+        gs = c['fig'].add_gridspec(2, 1, height_ratios=[3.5, 1.0], left=0.045, right=0.985, top=0.93, bottom=0.12,
+                                   hspace=0.34)
+        c['ax_plan'] = c['fig'].add_subplot(gs[0])
+        c['ax_strip'] = c['fig'].add_subplot(gs[1])
+        c['plan_arts'] = []
+        c['cur'] = None
+
+    def _paint_plan(fl):
+        c = C[fl]
+        ctx = S['ctx']
+        try:
+            S['dim'][fl] = _nm_floor_paint(c['ax_plan'], D, ctx.get('plan') or {}, ctx.get('samples') or [],
+                                           (ctx.get('ids') or {}).get(fl, 0 if fl == 'down' else 1),
+                                           (ctx.get('names') or {}).get(fl, fl))
+        except Exception:
+            _exc('floor history plan paint')
+            S['dim'][fl] = {'W': 10.0, 'H': 8.0}
+
+    def _draw_strip(fl):
+        c = C[fl]
+        ax = c['ax_strip']
+        ax.clear()
+        ax.set_facecolor(D['bg'])
+        t0, t1 = S['t0'], S['t1']
+        cov, mv, pk = hist.bins(fl, t0, t1, NB)
+        w = (t1 - t0) / NB
+        xs = [_x(t0 + i * w) for i in range(NB)]
+        wd = (_x(t1) - _x(t0)) / NB
+        gap = [i for i in range(NB) if cov[i] < 0.25 * w and mv[i] <= 0]
+        gapset = set(gap)
+        seen = [i for i in range(NB) if i not in gapset]
+        if seen:
+            ax.bar([xs[i] for i in seen], [1.0] * len(seen), width=wd, align='edge', color=D['well'], lw=0)
+        if gap:
+            ax.bar([xs[i] for i in gap], [1.0] * len(gap), width=wd, align='edge', color=D['bg'],
+                   edgecolor=D['border'], hatch='////', lw=0)
+        act = [i for i in range(NB) if mv[i] > 0]
+        if act:
+            hs = []
+            for i in act:
+                frac = mv[i] / max(1.0, min(cov[i] if cov[i] > 0 else w, w))
+                hs.append(max(0.1, min(1.0, frac ** 0.5)))
+            ax.bar([xs[i] for i in act], hs, width=wd, align='edge', color='#ff6b5e', lw=0)
+        ax.set_xlim(_x(t0), _x(t1))
+        ax.set_ylim(0, 1.05)
+        ax.set_yticks([])
+        loc = _md.AutoDateLocator(minticks=3, maxticks=7)
+        ax.xaxis.set_major_locator(loc)
+        ax.xaxis.set_major_formatter(_md.ConciseDateFormatter(loc))
+        ax.tick_params(axis='x', colors=D['text2'], labelsize=7, length=3)
+        for sp in ax.spines.values():
+            sp.set_color(D['border'])
+        ax.set_title('movement over time (red) · hatched = not watching · click to jump', loc='left',
+                     fontsize=7, color=D['text2'])
+        c['cur'] = ax.axvline(_x(_sel_t(fl)), color='#ffd23f', lw=1.8)
+
+    def _update_cursor(fl):
+        c = C[fl]
+        t = _sel_t(fl)
+        if c.get('cur') is not None:
+            c['cur'].set_xdata([_x(t), _x(t)])
+
+    def _update_plan(fl):
+        c = C[fl]
+        ax = c['ax_plan']
+        for a in c['plan_arts']:
+            try:
+                a.remove()
+            except Exception:
+                pass
+        c['plan_arts'] = []
+        t = _sel_t(fl)
+        live = S['sel'][fl] is None
+        info = hist.at(fl, t)
+        dm = S['dim'].get(fl) or {'W': 10.0, 'H': 8.0}
+        lay = (S['ctx'].get('layout') or {}).get(fl) or {}
+        cur = {'name': info['place'], 'floor': fl} if (info['moving'] and info['place']) else None
+        try:
+            c['plan_arts'] = _nm_floor_overlay(ax, dm['W'], dm['H'], lay.get('tx'), lay.get('rx'), info['moving'],
+                                               info['peak'] / 60.0)
+            c['plan_arts'] += _nm_floor_spots_layer(ax, S['ctx'].get('spots') or [], fl, cur)
+        except Exception:
+            _exc_debug('floor history overlay')
+        for sp in ax.spines.values():
+            sp.set_color('#ff3b30' if info['moving'] else D['border'])
+            sp.set_linewidth(3.2 if info['moving'] else 0.8)
+        nm = str((S['ctx'].get('names') or {}).get(fl) or ('Downstairs' if fl == 'down' else 'Upstairs'))
+        if not info['covered']:
+            state = 'not watching then'
+        elif info['moving']:
+            state = 'MOVEMENT' + (' near ' + info['place'] if info['place'] else '')
+        else:
+            state = 'quiet'
+        ax.set_title('%s  —  %s' % (nm.upper(), state), loc='left', fontsize=10, fontweight='bold',
+                     color='#ff6b5e' if info['moving'] else D['text'])
+        if not info['covered']:
+            line1 = ("Now  —  no signal from this floor's board right now." if live else
+                     '%s  —  the app was not watching this floor then.' % _fmt_t(t))
+        elif info['moving']:
+            line1 = '%s  —  %s of movement%s.' % ('Now' if live else _fmt_t(t), _fmt_dur(info['sec']),
+                                                       (', near ' + info['place']) if info['place'] else '')
+        else:
+            line1 = '%s  —  quiet.' % ('Now' if live else _fmt_t(t))
+        c['lbl'].configure(text=line1)
+
+    def _update_summary(fl):
+        sm = hist.summary(fl, S['t0'], S['t1'])
+        span = _fmt_dur(S['t1'] - S['t0'])
+        if sm['episodes']:
+            txt = 'Last %s: %d burst%s of movement · %s in all%s' % (
+                span, sm['episodes'], '' if sm['episodes'] == 1 else 's', _fmt_dur(sm['sec']),
+                (' · mostly near ' + sm['place']) if sm['place'] else '')
+        else:
+            txt = 'Last %s: no movement recorded on this floor.' % span
+        C[fl]['sum'].configure(text=txt)
+
+    def _set_scale(fl):
+        """Park the slider at the selected time (guarded so it does not call back)."""
+        c = C[fl]
+        span_min = max(60, int((S['t1'] - S['t0']) / 60.0))
+        S['busy'] = True
+        try:
+            c['scale'].configure(from_=-span_min, to=0)
+            c['scale'].set(0 if S['sel'][fl] is None else (S['sel'][fl] - S['t1']) / 60.0)
+        finally:
+            S['busy'] = False
+
+    def _refresh_view(fls):
+        for fl in fls:
+            _update_cursor(fl)
+            _update_plan(fl)
+            C[fl]['cv'].draw_idle()
+
+    def _go(fl, t):
+        """Move floor fl's slider to absolute time t (None = live)."""
+        t = None if (t is None or t >= S['t1'] - 30.0) else max(S['t0'], t)
+        targets = FLOORS if link_var.get() else (fl,)
+        for f in targets:
+            S['sel'][f] = t
+            _set_scale(f)
+        _refresh_view(targets)
+
+    def _on_slide(fl, v):
+        if S['busy']:
+            return
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            return
+        _go(fl, None if val >= -0.5 else S['t1'] + val * 60.0)
+
+    def _step(fl, direction):
+        t = hist.neighbor(fl, _sel_t(fl), direction, S['t0'], S['t1'])
+        if t is None:
+            C[fl]['lbl'].configure(text='No %s movement recorded on this floor.' % (
+                'later' if direction > 0 else 'earlier'))
+            return
+        _go(fl, t)
+
+    def _click(fl, ev):
+        if ev.inaxes is C[fl]['ax_strip'] and ev.xdata is not None:
+            try:
+                _go(fl, _from_x(ev.xdata))
+            except Exception:
+                _exc_debug('floor history click')
+
+    for ci, fl in enumerate(FLOORS):
+        col = tk.Frame(cols, bg=D['bg'])
+        col.grid(row=0, column=ci, sticky='nsew', padx=(0 if ci == 0 else 8, 0))
+        fig = _mf.Figure(figsize=(5.4, 4.6), facecolor=D['bg'])
+        cv = _FCanvas(fig, master=col)
+        C[fl] = {'fig': fig, 'cv': cv}
+        cv.get_tk_widget().pack(fill='both', expand=True)
+        cv.mpl_connect('button_press_event', lambda ev, f=fl: _click(f, ev))
+        c = C[fl]
+        c['scale'] = tk.Scale(col, from_=-60, to=0, orient='horizontal', resolution=1, showvalue=0,
+                              bg=D['accent'], fg=D['text'], troughcolor=D['chip'], highlightthickness=0, bd=0,
+                              sliderlength=26, width=18, activebackground='#ffd23f',
+                              command=lambda v, f=fl: _on_slide(f, v))
+        c['scale'].pack(fill='x', pady=(2, 0))
+        bf = tk.Frame(col, bg=D['bg'])
+        bf.pack(fill='x', pady=(3, 0))
+        for txt, cmd in (('◀ Earlier movement', lambda f=fl: _step(f, -1)),
+                         ('Later movement ▶', lambda f=fl: _step(f, 1)),
+                         ('Now', lambda f=fl: _go(f, None))):
+            tk.Button(bf, text=txt, font=(_NM_MONO, 8), bg=D['panel'], fg=D['text'], relief='flat', bd=0,
+                      padx=8, pady=2, command=cmd).pack(side='left', padx=(0, 4))
+        c['lbl'] = tk.Label(col, text='', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 9, 'bold'), anchor='w',
+                            justify='left', wraplength=500)
+        c['lbl'].pack(fill='x', pady=(4, 0))
+        c['sum'] = tk.Label(col, text='', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8), anchor='w',
+                            justify='left', wraplength=500)
+        c['sum'].pack(fill='x')
+
+    def _span():
+        now = time.time()
+        t0, t1 = hist.span(now)
+        S['t0'], S['t1'] = t0, t1
+
+    def _load_ctx():
+        try:
+            S['ctx'] = ctx_fn() or {}
+        except Exception:
+            _exc('floor history ctx')
+            S['ctx'] = {}
+
+    def _full(repaint_plans):
+        _span()
+        _load_ctx()
+        span = _fmt_dur(S['t1'] - S['t0'])
+        sub.configure(text='Drag a slider back in time to see what was happening on that floor then. The plan shows '
+                           'the movement and, if you taught places, where it was. History builds up to 7 days '
+                           '(showing the last %s so far).' % span)
+        rec_lbl.configure(text=str(S['ctx'].get('rec') or ''))
+        for fl in FLOORS:
+            if repaint_plans or 'ax_plan' not in C[fl]:
+                _build_axes(fl)
+                _paint_plan(fl)
+            _draw_strip(fl)
+            _set_scale(fl)
+            _update_summary(fl)
+        _refresh_view(FLOORS)
+
+    def _tick():
+        if S['dead']:
+            return
+        try:
+            _full(False)
+        except Exception:
+            _exc('floor history refresh')
+        S['job'] = win.after(20000, _tick)
+
+    def _on_close():
+        S['dead'] = True
+        if S['job']:
+            try:
+                win.after_cancel(S['job'])
+            except Exception:
+                pass
+        try:
+            win.destroy()
+        except Exception:
+            pass
+    win.protocol('WM_DELETE_WINDOW', _on_close)
+    tk.Button(top, text='Reload plans', font=(_NM_MONO, 8), bg=D['panel'], fg=D['text2'], relief='flat', bd=0,
+              padx=8, pady=2, command=lambda: _full(True)).pack(side='left', padx=12)
+    _full(True)
+    S['job'] = win.after(20000, _tick)
+    return win
+
+
+# <<LIDAR_CORE>>
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
+# LD14P lidar: a couple of 360-degree laser scanners, each wired to an ESP32 that streams it over the Wi-Fi.
+#   room map on the floor plan, where a person is (two lidars combined), intruder / movement detection, live view.
+# Pieces: packet decoding (_nm_ld_*), _NMLidarScanner (packets -> full turns), _NMLidarNode (one lidar: empty-room
+# model, blobs), _NMLidarFusion (both lidars -> people on the plan), _NMLidarHub (network, settings, events),
+# _NMLidarSim (pretend lidar for tests and the demo). The ESP32 side is in esp32_csi/lidar_node.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
+_NM_LIDAR_UDP_PORT = 4220           # the lidar boards stream here (lidar_config.h LIDAR_UDP_PORT)
+_NM_LD_MAX_MM = 8000                # LD14P range
+_NM_LD_PKT = 47                     # bytes in one LD14P measurement packet
+_NM_LD_MAGIC = b'NLD1'              # our datagram: magic, node, flags, seq u16, count, count x 47-byte packets
+
+
+def _nm_ld_crc_table():
+    tab = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (((c << 1) ^ 0x4D) & 0xFF) if (c & 0x80) else ((c << 1) & 0xFF)
+        tab.append(c)
+    return tuple(tab)
+
+
+_NM_LD_CRC = _nm_ld_crc_table()
+
+
+def _nm_ld_crc8(buf):
+    c = 0
+    for x in buf:
+        c = _NM_LD_CRC[(c ^ x) & 0xFF]
+    return c
+
+
+def _nm_ld_packet(b):
+    """One 47-byte LD14P packet -> {'speed' deg/s, 'start' deg, 'end' deg, 'ts' ms, 'pts': [(deg, mm, intensity)] x12},
+    or None when the header or the checksum is wrong."""
+    import struct
+    if len(b) != _NM_LD_PKT or b[0] != 0x54 or b[1] != 0x2C:
+        return None
+    if _nm_ld_crc8(b[:46]) != b[46]:
+        return None
+    speed, start = struct.unpack_from('<HH', b, 2)
+    end, ts = struct.unpack_from('<HH', b, 42)
+    v = struct.unpack_from('<' + 'HB' * 12, b, 6)
+    sa, ea = start / 100.0, end / 100.0
+    step = ((ea - sa) % 360.0) / 11.0
+    pts = [((sa + step * i) % 360.0, v[2 * i], v[2 * i + 1]) for i in range(12)]
+    return {'speed': speed, 'start': sa, 'end': ea, 'ts': ts, 'pts': pts}
+
+
+def _nm_ld_build(start_deg, dists, inten=None, speed=3600, ts=0, step_deg=0.9):
+    """Make a valid 47-byte packet (the simulator and the tests use this)."""
+    import struct
+    dists = list(dists)[:12] + [0] * (12 - len(list(dists)[:12]))
+    inten = list(inten) if inten is not None else [150 if d else 0 for d in dists]
+    end = (start_deg + step_deg * 11) % 360.0
+    body = struct.pack('<BBHH', 0x54, 0x2C, int(speed) & 0xFFFF, int(round(start_deg * 100)) % 36000)
+    for d, q in zip(dists, inten):
+        body += struct.pack('<HB', int(d) & 0xFFFF, int(q) & 0xFF)
+    body += struct.pack('<HH', int(round(end * 100)) % 36000, int(ts) & 0xFFFF)
+    return body + bytes([_nm_ld_crc8(body)])
+
+
+def _nm_ld_pack(node, seq, pkts, flags=0):
+    return _NM_LD_MAGIC + bytes([node & 0xFF, flags & 0xFF, seq & 0xFF, (seq >> 8) & 0xFF, len(pkts)]) + b''.join(pkts)
+
+
+def _nm_ld_unpack(data):
+    """A board datagram -> (node, flags, seq, [47-byte packets]) or None."""
+    if len(data) < 9 or data[:4] != _NM_LD_MAGIC:
+        return None
+    n = data[8]
+    if n == 0 or len(data) != 9 + n * _NM_LD_PKT:
+        return None
+    return data[4], data[5], data[6] | (data[7] << 8), [bytes(data[9 + i * _NM_LD_PKT:9 + (i + 1) * _NM_LD_PKT]) for i in range(n)]
+
+
+def _nm_ld_pose(p, sx, sy):
+    """Sensor-frame metres -> plan metres for a placement {'x','y','rot'} (rot = degrees counter-clockwise)."""
+    c, s = math.cos(math.radians(p['rot'])), math.sin(math.radians(p['rot']))
+    return p['x'] + c * sx - s * sy, p['y'] + s * sx + c * sy
+
+
+class _NMLidarScanner:
+    """Joins the 12-point packets into whole turns. A turn ends when the start angle jumps back (about ten a second)."""
+
+    def __init__(self):
+        self.a = []
+        self.d = []
+        self.q = []
+        self.last_start = None
+        self.turns = 0
+        self.bad = 0
+        self.rpm = 0.0
+        self.pkts = 0
+
+    def add(self, raw, t):
+        """Feed one 47-byte packet. Returns a finished turn {'t','ang','dist','int'} (numpy arrays) or None."""
+        p = _nm_ld_packet(raw)
+        if p is None:
+            self.bad += 1
+            return None
+        self.pkts += 1
+        self.rpm = p['speed'] / 6.0
+        done = None
+        if self.last_start is not None and p['start'] < self.last_start - 90.0 and len(self.a) >= 60:
+            done = {'t': t, 'ang': np.asarray(self.a, float), 'dist': np.asarray(self.d, float),
+                    'int': np.asarray(self.q, float)}
+            self.turns += 1
+            self.a, self.d, self.q = [], [], []
+        self.last_start = p['start']
+        for ang, d, q in p['pts']:
+            self.a.append(ang); self.d.append(d); self.q.append(q)
+        return done
+
+
+class _NMLidarNode:
+    """One lidar. Keeps the empty-room picture (distance to the nearest thing in each degree), and on every turn finds
+    what is closer than that: the blobs that are people (or a door, or a pet)."""
+    LEARN_S = 15.0
+    FAR_TURNS = 15                # a farther reading this many turns running replaces the picture (a door opened)
+    ABSORB_S = 900.0              # not calibrated: something that stays this long becomes part of the room
+
+    def __init__(self, lid, clock=None):
+        self.id = lid
+        self.clock = clock or time.time
+        self.name = 'Lidar %s' % str(lid).lstrip('L')
+        self.ip = ''
+        self.rssi = None
+        self.node = None
+        self.sc = _NMLidarScanner()
+        self.pose = {'floor': 'down', 'x': 1.0, 'y': 1.0, 'rot': 0.0, 'cw': True, 'mask': []}
+        self.bg = None                      # 360 x mm, 0 = nothing in range
+        self.bg_when = 0.0
+        self.calibrated = False             # learned on purpose with "Learn empty room"
+        self.learning = None                # {'t0','n','secs','rows','manual'}
+        self._far = np.zeros(360, int)
+        self._hold = np.zeros(360)
+        self.last = None                    # last turn (display): {'t','ang','dist','fg','cart'}
+        self.dets = []
+        self.t_last = 0.0
+        self.turn_t = []                    # recent turn times (rate)
+        self.lost = 0
+        self.seq = None
+        self.dgrams = 0
+        self.fg_frac = 0.0
+        self.demo = False
+        self.msgs = []
+
+    # ── settings ──
+    def set_pose(self, **kw):
+        p = self.pose
+        for k in ('x', 'y', 'rot'):
+            if k in kw and kw[k] is not None:
+                p[k] = float(kw[k])
+        if kw.get('floor') in ('up', 'down'):
+            p['floor'] = kw['floor']
+        if kw.get('cw') is not None:
+            p['cw'] = bool(kw['cw'])
+        if kw.get('mask') is not None:
+            m = []
+            for a in kw['mask']:
+                try:
+                    m.append([float(a[0]) % 360.0, float(a[1]) % 360.0])
+                except (TypeError, ValueError, IndexError):
+                    pass
+            p['mask'] = m[:8]
+        p['rot'] = ((p['rot'] + 180.0) % 360.0) - 180.0
+
+    def learn(self, secs=None, manual=True):
+        self.learning = {'t0': self.clock(), 'n': 0, 'secs': float(secs or self.LEARN_S), 'rows': [], 'manual': bool(manual)}
+
+    def forget(self):
+        self.bg = None
+        self.calibrated = False
+        self.learning = None
+        self.dets = []
+
+    def progress(self):
+        L = self.learning
+        if not L:
+            return None
+        return max(0.0, min(1.0, (self.clock() - L['t0']) / L['secs']))
+
+    # ── geometry ──
+    @staticmethod
+    def _bins(scan):
+        """One distance per whole degree (the nearest), NaN where this turn had no reading."""
+        ok = (scan['dist'] >= 100) & (scan['dist'] <= _NM_LD_MAX_MM)
+        out = np.full(360, np.nan)
+        if ok.any():
+            idx = scan['ang'][ok].astype(int) % 360
+            tmp = np.full(360, np.inf)
+            np.minimum.at(tmp, idx, scan['dist'][ok])
+            out = np.where(np.isfinite(tmp), tmp, np.nan)
+        return out
+
+    def _masked(self, ang):
+        m = np.zeros(len(ang), bool)
+        for a0, a1 in self.pose.get('mask') or []:
+            m |= ((ang >= a0) & (ang <= a1)) if a0 <= a1 else ((ang >= a0) | (ang <= a1))
+        return m
+
+    def cart(self, ang, dist):
+        """Sensor frame metres. Angle 0 is the lidar's front mark; clockwise on the unit unless 'cw' is off."""
+        th = np.radians(-ang if self.pose.get('cw', True) else ang)
+        return np.stack([dist / 1000.0 * np.cos(th), dist / 1000.0 * np.sin(th)], axis=1)
+
+    # ── a finished turn ──
+    def process(self, scan):
+        now = scan['t']
+        self.t_last = now
+        self.turn_t.append(now)
+        self.turn_t = [x for x in self.turn_t if now - x < 5.0]
+        b = self._bins(scan)
+        L = self.learning
+        if L is not None:
+            L['rows'].append(b)
+            L['n'] += 1
+            if now - L['t0'] >= L['secs'] and L['n'] >= 20:
+                self._finish_learn()
+        if self.bg is None:
+            if L is None:
+                self.learn(self.LEARN_S, manual=False)
+            self.dets = []
+            self.last = {'t': now, 'ang': scan['ang'], 'dist': scan['dist'], 'fg': np.zeros(len(scan['ang']), bool)}
+            return []
+        ang, dist = scan['ang'], scan['dist']
+        valid = (dist >= 100) & (dist <= 7800)
+        bins = ang.astype(int) % 360
+        bgv = self.bg[bins]
+        has = bgv > 0
+        tol = np.maximum(80.0, 0.04 * bgv)
+        fg = valid & np.where(has, dist < bgv - tol, dist < 7000) & ~self._masked(ang)
+        self.fg_frac = float(fg.sum()) / max(1, int(valid.sum()))
+        self._adapt(b, now)
+        dets = self._blobs(ang[fg], dist[fg])
+        self.dets = dets
+        self.last = {'t': now, 'ang': ang, 'dist': dist, 'fg': fg}
+        return dets
+
+    def _finish_learn(self):
+        L, self.learning = self.learning, None
+        M = np.vstack(L['rows'])
+        frac = np.isfinite(M).mean(axis=0)
+        with np.errstate(all='ignore'):
+            med = np.nanmedian(M, axis=0)
+        bg = np.where((frac >= 0.4) & np.isfinite(med), med, 0.0)
+        self.bg = bg
+        self.bg_when = self.clock()
+        self.calibrated = bool(L['manual'])
+        self._far[:] = 0
+        self._hold[:] = 0
+
+    def _adapt(self, b, now):
+        """Keep the empty-room picture current: farther readings replace it quickly (door opened, chair moved away); when
+        it was not calibrated on purpose, things that stay for a long time are absorbed."""
+        bg = self.bg
+        tol = np.maximum(80.0, 0.04 * bg)
+        fin = np.isfinite(b)
+        with np.errstate(invalid='ignore'):
+            far = fin & (bg > 0) & (b > bg + tol)
+            self._far = np.where(far, self._far + 1, np.where(fin, 0, self._far))
+            take = self._far >= self.FAR_TURNS
+            if take.any():
+                bg[take] = b[take]
+                self._far[take] = 0
+            if not self.calibrated:
+                near = fin & ((bg == 0) | (b < bg - tol))
+                self._hold = np.where(near, self._hold + 0.1, 0.0)
+                ab = self._hold >= self.ABSORB_S
+                if ab.any():
+                    bg[ab] = b[ab]
+                    self._hold[ab] = 0.0
+
+    def _blobs(self, ang, dist):
+        """Group neighbouring close points into blobs and keep the ones the size of a person (or bigger)."""
+        if len(ang) < 2:
+            return []
+        o = np.argsort(ang)
+        ang, dist = ang[o], dist[o]
+        P = self.cart(ang, dist)
+        n = len(ang)
+        groups, cur = [], [0]
+        for i in range(1, n):
+            r = max(dist[i], dist[i - 1]) / 1000.0
+            gap = float(np.hypot(*(P[i] - P[i - 1])))
+            if gap <= 0.10 + 0.035 * r and ang[i] - ang[i - 1] <= 5.0:
+                cur.append(i)
+            else:
+                groups.append(cur); cur = [i]
+        groups.append(cur)
+        if len(groups) > 1 and ang[0] + 360.0 - ang[-1] <= 5.0:
+            r = max(dist[0], dist[-1]) / 1000.0
+            if float(np.hypot(*(P[0] - P[-1]))) <= 0.10 + 0.035 * r:
+                groups[0] = groups.pop() + groups[0]
+        out = []
+        for g in groups:
+            pts = P[g]
+            cnt = len(g)
+            r = float(np.hypot(*pts.mean(axis=0)))
+            if cnt < (2 if r > 5.0 else 3):
+                continue
+            w = float(np.hypot(np.ptp(pts[:, 0]), np.ptp(pts[:, 1])))
+            if w < 0.10:
+                continue
+            c = pts.mean(axis=0)
+            nrm = float(np.hypot(*c))
+            if nrm > 0:
+                c = c + c / nrm * 0.10          # the middle of a body is behind the surface we see
+            out.append({'x': float(c[0]), 'y': float(c[1]), 'r': nrm, 'w': w, 'n': cnt,
+                        'kind': 'person' if w <= 1.1 else 'big'})
+        return out
+
+    def rate(self, now=None):
+        now = self.clock() if now is None else now
+        ts = [x for x in self.turn_t if now - x < 3.0]
+        return (len(ts) - 1) / (ts[-1] - ts[0]) if len(ts) >= 3 and ts[-1] > ts[0] else 0.0
+
+    def live(self, now=None, hold=3.0):
+        now = self.clock() if now is None else now
+        return self.t_last > 0 and now - self.t_last <= hold
+
+    # ── saved empty-room picture ──
+    def bg_json(self):
+        return {'bg': [int(round(v)) for v in (self.bg if self.bg is not None else [])], 'when': self.bg_when,
+                'calibrated': self.calibrated}
+
+    def bg_load(self, d):
+        try:
+            v = np.asarray(d.get('bg') or [], float)
+            if len(v) == 360:
+                self.bg, self.bg_when, self.calibrated = v, float(d.get('when') or 0), bool(d.get('calibrated'))
+        except Exception:
+            _exc_debug('lidar bg load')
+
+    def bg_plan(self, step=2):
+        """The empty-room outline in plan metres (for the room map)."""
+        if self.bg is None:
+            return []
+        a = np.arange(0, 360, step)
+        d = self.bg[a]
+        ok = d > 0
+        if not ok.any():
+            return []
+        P = self.cart(a[ok].astype(float), d[ok])
+        return [[round(_nm_ld_pose(self.pose, x, y)[0], 2), round(_nm_ld_pose(self.pose, x, y)[1], 2), int(ai)]
+                for (x, y), ai in zip(P, a[ok])]
+
+    def scan_plan(self, maxn=260):
+        """The latest turn in plan metres: [x, y, 1 if it is something new (foreground) else 0]."""
+        s = self.last
+        if not s or len(s['ang']) == 0:
+            return []
+        ok = (s['dist'] >= 100) & (s['dist'] <= _NM_LD_MAX_MM)
+        idx = np.nonzero(ok)[0]
+        if len(idx) > maxn:
+            idx = idx[np.linspace(0, len(idx) - 1, maxn).astype(int)]
+        P = self.cart(s['ang'][idx], s['dist'][idx])
+        out = []
+        for (x, y), f in zip(P, s['fg'][idx]):
+            px, py = _nm_ld_pose(self.pose, x, y)
+            out.append([round(px, 2), round(py, 2), 1 if f else 0])
+        return out
+
+
+class _NMLidarFusion:
+    """Puts what each lidar sees on the one plan, merges the two lidars' view of the same person, follows people
+    from turn to turn and says whether each is moving."""
+    GATE = 0.6
+    MERGE = 0.7
+    LOST_S = 3.0
+    CONFIRM_HITS = 5
+    CONFIRM_S = 0.8
+    MOVE_M = 0.30
+
+    def __init__(self):
+        self.latest = {}                    # lidar id -> (t, floor, [det in plan metres])
+        self.tracks = {}
+        self.next_id = 1
+        self.events = []
+
+    def feed(self, lid, t, floor, dets):
+        self.latest[lid] = (t, floor, dets)
+
+    def drop(self, lid):
+        self.latest.pop(lid, None)
+
+    def _merged(self, t):
+        by = {}
+        for lid, (tt, fl, dets) in self.latest.items():
+            if t - tt <= 0.6:
+                for d in dets:
+                    by.setdefault(fl, []).append(dict(d, lid=lid))
+        out = []
+        for fl, ds in by.items():
+            ds.sort(key=lambda d: d['r'])
+            cl = []
+            for d in ds:
+                for c in cl:
+                    if d['lid'] not in c['lids'] and math.hypot(d['x'] - c['x'], d['y'] - c['y']) <= self.MERGE:
+                        c['mem'].append(d); c['lids'].add(d['lid'])
+                        wsum = sum(1.0 / (0.3 + m['r']) for m in c['mem'])
+                        c['x'] = sum(m['x'] / (0.3 + m['r']) for m in c['mem']) / wsum
+                        c['y'] = sum(m['y'] / (0.3 + m['r']) for m in c['mem']) / wsum
+                        break
+                else:
+                    cl.append({'x': d['x'], 'y': d['y'], 'mem': [d], 'lids': {d['lid']}})
+            for c in cl:
+                kinds = [m['kind'] for m in c['mem']]
+                out.append({'floor': fl, 'x': c['x'], 'y': c['y'], 'kind': 'person' if 'person' in kinds else 'big',
+                            'lids': sorted(c['lids'])})
+        return out
+
+    def step(self, t):
+        """Advance the tracks to time t. Returns [('arrive'|'leave', track)] for what changed."""
+        evs = []
+        dets = self._merged(t)
+        free = set(self.tracks)
+        pairs = []
+        for i, d in enumerate(dets):
+            for k in self.tracks:
+                tr = self.tracks[k]
+                if tr['floor'] != d['floor']:
+                    continue
+                dist = math.hypot(tr['x'] - d['x'], tr['y'] - d['y'])
+                gate = min(1.6, self.GATE + 2.0 * max(0.0, t - tr['last']))
+                if dist <= gate:
+                    pairs.append((dist, i, k))
+        pairs.sort()
+        used = set()
+        for dist, i, k in pairs:
+            if i in used or k not in free:
+                continue
+            used.add(i); free.discard(k)
+            tr, d = self.tracks[k], dets[i]
+            a = 0.6
+            tr['x'] += a * (d['x'] - tr['x']); tr['y'] += a * (d['y'] - tr['y'])
+            tr['hits'] += 1
+            tr['last'] = t
+            tr['kind'] = d['kind']
+            tr['lids'] = d['lids']
+            tr['hist'].append((t, tr['x'], tr['y']))
+            tr['hist'] = [h for h in tr['hist'] if t - h[0] <= 4.0]
+            if not tr['confirmed'] and tr['hits'] >= self.CONFIRM_HITS and t - tr['first'] >= self.CONFIRM_S:
+                tr['confirmed'] = True
+                tr['conf_t'] = t
+                evs.append(('arrive', tr))
+        for i, d in enumerate(dets):
+            if i in used:
+                continue
+            k = self.next_id; self.next_id += 1
+            self.tracks[k] = {'id': k, 'floor': d['floor'], 'x': d['x'], 'y': d['y'], 'kind': d['kind'], 'lids': d['lids'],
+                              'first': t, 'last': t, 'hits': 1, 'confirmed': False, 'conf_t': None, 'moving': False,
+                              'hist': [(t, d['x'], d['y'])]}
+        for k in list(self.tracks):
+            tr = self.tracks[k]
+            if t - tr['last'] > self.LOST_S:
+                del self.tracks[k]
+                if tr['confirmed']:
+                    evs.append(('leave', tr))
+                continue
+            old = [h for h in tr['hist'] if t - h[0] >= 1.0]
+            if old and t - tr['last'] < 1.0:
+                h = old[-1]
+                tr['moving'] = math.hypot(tr['x'] - h[1], tr['y'] - h[2]) >= self.MOVE_M
+            elif t - tr['last'] >= 1.0:
+                tr['moving'] = False
+        return evs
+
+    def moving(self, t):
+        """Is any confirmed person walking about (or just arrived) right now?"""
+        for tr in self.tracks.values():
+            if tr['confirmed'] and t - tr['last'] < 1.5 and (tr['moving'] or t - (tr['conf_t'] or 0) < 2.0):
+                return True
+        return False
+
+    def people(self, t=None, fresh=1.2):
+        """Confirmed people; with a time, only those seen in the last `fresh` seconds (not ones just lost)."""
+        return [tr for tr in self.tracks.values() if tr['confirmed'] and (t is None or t - tr['last'] <= fresh)]
+
+
+def _nm_ld_solve_pair(a_plan, b_sensor):
+    """Where is lidar B? Given the same walking person seen by lidar A (already in plan metres) and by B (in B's own frame)
+    at the same moments, find B's rotation and position (Kabsch), ignoring the odd mismatched moment.
+    -> (rot_deg, x, y, rms_m, how_many_pairs_used)"""
+    A = np.asarray(a_plan, float); B = np.asarray(b_sensor, float)
+    keep = np.ones(len(A), bool)
+    th = tx = ty = 0.0
+    rms = 9.9
+    for _round in range(4):
+        ca, cb = A[keep].mean(axis=0), B[keep].mean(axis=0)
+        Ac, Bc = A[keep] - ca, B[keep] - cb
+        th = math.atan2(float((Bc[:, 0] * Ac[:, 1] - Bc[:, 1] * Ac[:, 0]).sum()),
+                        float((Bc[:, 0] * Ac[:, 0] + Bc[:, 1] * Ac[:, 1]).sum()))
+        c, s_ = math.cos(th), math.sin(th)
+        R = np.array([[c, -s_], [s_, c]])
+        t = ca - R @ cb
+        res = np.sqrt((((B @ R.T + t) - A) ** 2).sum(axis=1))
+        tx, ty = float(t[0]), float(t[1])
+        rms = float(np.sqrt((res[keep] ** 2).mean()))
+        lim = max(0.15, 2.5 * float(np.median(res[keep])))
+        nk = res <= lim
+        if nk.sum() < 8 or (nk == keep).all():
+            break
+        keep = nk
+    return math.degrees(th), tx, ty, rms, int(keep.sum())
+
+
+def _nm_ld_visible_poly(sx, sy, bg, rng_m):
+    """The area a lidar can see, as one closed outline [x, y, ...] around it: its learned wall points in order, and where a wall
+    is out of reach (no return) an arc at the lidar's range. Plan metres."""
+    if not bg or len(bg) < 3:
+        return []
+    runs, cur = [], None
+    for p in bg:
+        if cur is not None and p[2] - cur[-1][2] <= 2:
+            cur.append(p)
+        else:
+            cur = [p]
+            runs.append(cur)
+    if len(runs) > 1 and runs[0][0][2] <= 2 and runs[-1][-1][2] >= 357:
+        runs[0] = runs.pop() + runs[0]
+    sense = 1.0
+    for r in runs:
+        if len(r) >= 2:
+            a1 = math.atan2(r[0][1] - sy, r[0][0] - sx)
+            a2 = math.atan2(r[1][1] - sy, r[1][0] - sx)
+            c = math.sin(a2 - a1)
+            if abs(c) > 1e-9:
+                sense = 1.0 if c > 0 else -1.0
+                break
+    pts = []
+    for k, r in enumerate(runs):
+        for p in r:
+            pts.append([p[0], p[1]])
+        nxt = runs[(k + 1) % len(runs)]
+        aE = math.atan2(r[-1][1] - sy, r[-1][0] - sx)
+        aS = math.atan2(nxt[0][1] - sy, nxt[0][0] - sx)
+        sweep = ((aS - aE) * sense) % (2 * math.pi)
+        if len(runs) == 1 and sweep < 0.05:
+            continue
+        steps = max(1, int(sweep / math.radians(5.0)))
+        for j in range(1, steps):
+            a = aE + sense * sweep * j / steps
+            pts.append([round(sx + rng_m * math.cos(a), 2), round(sy + rng_m * math.sin(a), 2)])
+    return pts
+
+
+def _nm_ld_coverage(nodes, W, H, world=None, cell=0.25):
+    """Fraction (0..1) of the floor that at least one of the lidars has a clear line to, within its range.
+    With a pretend `world` only the reachable floor counts (not the wall cells themselves)."""
+    xs = (np.arange(int(W / cell)) + 0.5) * cell
+    ys = (np.arange(int(H / cell)) + 0.5) * cell
+    gx, gy = np.meshgrid(xs, ys)
+    seen = np.zeros(gx.shape, bool)
+    for n in nodes:
+        p = n.pose
+        dxp, dyp = gx - p['x'], gy - p['y']
+        c, s_ = math.cos(math.radians(p['rot'])), math.sin(math.radians(p['rot']))
+        sx, sy = c * dxp + s_ * dyp, -s_ * dxp + c * dyp
+        th = np.degrees(np.arctan2(sy, sx))
+        a = (-th if p.get('cw', True) else th)
+        ai = np.round(a).astype(int) % 360
+        r = np.where(n.bg[ai] > 0, n.bg[ai] / 1000.0, _NM_LD_MAX_MM / 1000.0)
+        seen |= np.hypot(dxp, dyp) <= np.minimum(r, _NM_LD_MAX_MM / 1000.0) + 0.05
+    if world is not None and hasattr(world, 'occ'):
+        k = max(1, int(round(cell / world.CS)))
+        ix = np.clip(((gx / world.CS)).astype(int), 0, world.nx - 1)
+        iy = np.clip(((gy / world.CS)).astype(int), 0, world.ny - 1)
+        free = ~world.occ[iy, ix]
+        return float((seen & free).sum()) / max(1.0, float(free.sum()))
+    return float(seen.sum()) / max(1.0, float(seen.size))
+
+
+class _NMLidarHub:
+    """Everything about the lidars in one place: listens for the boards, keeps each lidar's placement and empty-room picture,
+    follows people, raises the alerts and feeds the night alarm."""
+    PORT = _NM_LIDAR_UDP_PORT
+    SILENT_S = 60.0
+    PREF = {'lidar_on': False, 'lidar_alert': 'away'}
+
+    def __init__(self, watcher=None, clock=None, state_dir=None, threads=True):
+        import threading
+        self.W = watcher
+        self.clock = clock or time.time
+        self.state_dir = state_dir if state_dir is not None else getattr(watcher, 'state_dir', None)
+        self.lock = threading.RLock()
+        self._saved = {}
+        self.nodes = {}
+        self.fusion = _NMLidarFusion()
+        self.msgs = []
+        self.events = []
+        self._threads_on = bool(threads)
+        self.stop_ev = threading.Event()
+        self.sock = None
+        self.error = ''
+        self.running = False
+        self._thr = []
+        self.targets = set()                # board addresses we have heard (also asked directly)
+        self.demo_on = False
+        self._sim = None
+        self._note_sec = -1
+        self._flag = {}
+        self.pair = None
+        self.pair_msg = ''
+        self._n_people = 0
+        self._load()
+
+    # ── saved placement / pictures ──
+    def _node(self, lid, create=True):
+        n = self.nodes.get(lid)
+        if n is None and create:
+            n = self.nodes[lid] = _NMLidarNode(lid, clock=self.clock)
+        return n
+
+    def _load(self):
+        lay = _nm_wifi_load('lidar_layout.json', {}, self.state_dir)
+        for lid, d in ((lay.get('nodes') or {}) if isinstance(lay, dict) else {}).items():
+            if not isinstance(d, dict) or str(lid).startswith('D'):
+                continue
+            n = self._node(str(lid))
+            n.name = str(d.get('name') or n.name)[:40]
+            n.ip = str(d.get('ip') or '')
+            n.set_pose(**{k: d.get(k) for k in ('floor', 'x', 'y', 'rot', 'cw', 'mask')})
+            bg = _nm_wifi_load('lidar_bg_%s.json' % lid, None, self.state_dir)
+            if isinstance(bg, dict):
+                n.bg_load(bg)
+
+    def save(self):
+        d = {}
+        for lid, n in self.nodes.items():
+            if n.demo:
+                continue
+            d[lid] = dict(n.pose, name=n.name, ip=n.ip)
+        _nm_wifi_save('lidar_layout.json', {'nodes': d}, self.state_dir)
+
+    def save_bg(self, lid):
+        n = self.nodes.get(lid)
+        if n is not None and n.bg is not None and not n.demo:
+            _nm_wifi_save('lidar_bg_%s.json' % lid, n.bg_json(), self.state_dir)
+
+    # ── receiving ──
+    def feed_datagram(self, data, addr=None, t=None):
+        t = self.clock() if t is None else t
+        if data[:4] == _NM_LD_MAGIC:
+            u = _nm_ld_unpack(data)
+            if u is None:
+                return
+            node, flags, seq, pkts = u
+            lid = 'L%d' % node
+            with self.lock:
+                n = self._node(lid)
+                if addr:
+                    if n.ip != addr[0]:
+                        n.ip = addr[0]
+                    self.targets.add((addr[0], addr[1]))
+                n.dgrams += 1
+                if n.seq is not None:
+                    gap = (seq - n.seq - 1) & 0xFFFF
+                    if 0 < gap < 1000:
+                        n.lost += gap
+                n.seq = seq
+                for raw in pkts:
+                    scan = n.sc.add(raw, t)
+                    if scan is not None:
+                        self._turn(n, scan)
+            return
+        try:
+            txt = bytes(data).decode('ascii', 'replace').strip()
+        except Exception:
+            return
+        if txt.startswith('LIDAR_BOARD,'):
+            f = txt.split(',')
+            if len(f) >= 5:
+                try:
+                    lid = 'L%d' % int(f[4])
+                except ValueError:
+                    return
+                with self.lock:
+                    n = self._node(lid)
+                    n.ip = f[2]
+                    try:
+                        n.rssi = int(f[3])
+                    except ValueError:
+                        pass
+                    n.node = f[1]
+                    self.targets.add((f[2], self.PORT))
+        elif txt.startswith('LIDAR_MSG,'):
+            with self.lock:
+                self.msgs.append((t, txt[10:][:200]))
+                self.msgs = self.msgs[-30:]
+
+    def _turn(self, n, scan):
+        dets = n.process(scan)
+        fl = n.pose['floor']
+        plan = []
+        for d in dets:
+            x, y = _nm_ld_pose(n.pose, d['x'], d['y'])
+            plan.append(dict(d, x=x, y=y))
+        if n.learning is None and n.bg is not None:
+            self.fusion.feed(n.id, scan['t'], fl, plan)
+        else:
+            self.fusion.drop(n.id)
+        p = self.pair
+        if p is not None and n.id in (p['a'], p['b']):
+            p['last'][n.id] = (scan['t'], [(d['x'], d['y']) for d in dets if d['kind'] == 'person'])
+            la, lb = p['last'].get(p['a']), p['last'].get(p['b'])
+            if la and lb and abs(la[0] - lb[0]) <= 0.15 and len(la[1]) == 1 and len(lb[1]) == 1:
+                pa, pb = la[1][0], lb[1][0]
+                if not p['pairs'] or math.hypot(pa[0] - p['pairs'][-1][0][0], pa[1] - p['pairs'][-1][0][1]) >= 0.2:
+                    p['pairs'].append((pa, pb))
+                    p['pairs'] = p['pairs'][-400:]
+
+    # ── once in a while: tracks, events, night alarm ──
+    def tick(self, now=None):
+        now = self.clock() if now is None else now
+        with self.lock:
+            evs = self.fusion.step(now)
+            moving = self.fusion.moving(now)
+            live = [n for n in self.nodes.values() if n.live(now) and n.learning is None and n.bg is not None]
+            people = self.fusion.people(now)
+            self._n_people = len(people)
+            for n in self.nodes.values():
+                was = self._flag.get(n.id)
+                if n.live(now, 5.0):
+                    if was == 'silent':
+                        self._say('LIDAR', '%s is sending again.' % n.name)
+                    self._flag[n.id] = 'ok'
+                elif n.t_last > 0 and now - n.t_last >= self.SILENT_S and was != 'silent' and not n.demo:
+                    self._flag[n.id] = 'silent'
+                    self._say('LIDAR', '%s has sent nothing for %d s. Is its ESP32 powered and on the Wi-Fi?' %
+                              (n.name, int(now - n.t_last)), alert=True, key='LIDAR-SILENT-' + n.id, debounce=1800.0)
+        W = self.W
+        for kind, tr in evs:
+            where = self.where(tr)
+            if kind == 'arrive':
+                away = bool(W.is_away()) if W is not None else False
+                mode = str((W.prefs.get('lidar_alert') if W is not None else 'away') or 'away')
+                self._say('LIDAR', 'Lidar: a person appeared %s' % where + (' — while you are away' if away else ''),
+                          alert=(mode == 'always' or (mode == 'away' and away)), key='LIDAR-PERSON', debounce=120.0)
+            elif kind == 'leave' and not self.fusion.people():
+                self._say('LIDAR', 'Lidar: the room is empty again (last seen %s)' % where)
+        if W is not None and live and int(now) != self._note_sec:
+            self._note_sec = int(now)
+            try:
+                W.night.note('lidar', now, moving)
+            except Exception:
+                _exc_debug('lidar night note')
+
+    def _say(self, kind, text, alert=False, key=None, debounce=300.0):
+        self.events.append((self.clock(), text))
+        self.events = self.events[-40:]
+        if self.W is not None:
+            try:
+                self.W.event(kind, text, alert=alert, sev='warn', key=key, debounce=debounce)
+            except Exception:
+                _exc_debug('lidar event')
+
+    def names(self):
+        try:
+            sv = _nm_wifi_load('wifi_survey.json', {}, self.state_dir)
+            plan = (sv.get('plan') or {}) if isinstance(sv, dict) else {}
+            ids = _nm_floor_ids(plan)
+            return {fl: str((plan.get('floors') or {}).get(str(ids[fl])) or ('Downstairs' if fl == 'down' else 'Upstairs'))
+                    for fl in ('down', 'up')}
+        except Exception:
+            return {'down': 'Downstairs', 'up': 'Upstairs'}
+
+    def spots(self):
+        try:
+            loc = _NMSpotLocator()
+            loc.load(_nm_wifi_load('floor_spots.json', {}, self.state_dir))
+            return list(loc.spots)
+        except Exception:
+            return []
+
+    def where(self, tr):
+        nm = self.names().get(tr['floor'], tr['floor'])
+        low = nm.lower()
+        fl = low if low in ('downstairs', 'upstairs') else 'on the %s floor' % low
+        best, bd = None, 2.0
+        for s in self.spots():
+            if s.get('floor') != tr['floor']:
+                continue
+            d = math.hypot(s['x'] - tr['x'], s['y'] - tr['y'])
+            if d < bd:
+                best, bd = s, d
+        return ('%s, near %s' % (fl, best['name'])) if best else fl
+
+    # ── controls ──
+    def set_pose(self, lid, **kw):
+        with self.lock:
+            n = self.nodes.get(lid)
+            if n is None:
+                return False
+            if kw.get('name'):
+                n.name = str(kw['name'])[:40]
+            n.set_pose(**kw)
+            self.fusion.drop(lid)
+        self.save()
+        return True
+
+    def learn(self, lid=None, secs=None):
+        with self.lock:
+            ns = [self.nodes[lid]] if lid in self.nodes else [n for n in self.nodes.values() if n.live()]
+            for n in ns:
+                n.learn(secs, manual=True)
+                self.fusion.drop(n.id)
+        return len(ns)
+
+    def poll_learn(self):
+        """Save the picture of any lidar that has just finished learning."""
+        saved = self._saved
+        for n in list(self.nodes.values()):
+            if n.bg is not None and n.learning is None and saved.get(n.id) != n.bg_when:
+                saved[n.id] = n.bg_when
+                self.save_bg(n.id)
+
+    def forget(self, lid):
+        with self.lock:
+            n = self.nodes.pop(lid, None)
+            self.fusion.drop(lid)
+        if n is not None:
+            self.save()
+            try:
+                p = _nm_wifi_dir(self.state_dir) / ('lidar_bg_%s.json' % lid)
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                _exc_debug('lidar forget')
+        return n is not None
+
+    def pair_begin(self, a, b):
+        with self.lock:
+            if a not in self.nodes or b not in self.nodes or a == b:
+                return False, 'Pick two different lidars.'
+            if self.nodes[a].pose['floor'] != self.nodes[b].pose['floor']:
+                return False, 'Both lidars must be on the same floor.'
+            self.pair = {'a': a, 'b': b, 'pairs': [], 'last': {}, 't0': self.clock()}
+            self.pair_msg = ''
+        return True, 'Now walk slowly through the part of the room both lidars can see, for about half a minute.'
+
+    def pair_finish(self):
+        with self.lock:
+            p, self.pair = self.pair, None
+            if not p:
+                return False, 'Not collecting.'
+            na, nb = self.nodes.get(p['a']), self.nodes.get(p['b'])
+            if na is None or nb is None:
+                return False, 'A lidar has gone.'
+            pr = p['pairs']
+            if len(pr) < 12:
+                self.pair_msg = 'Only %d matching moments. Both lidars need to see ONE person at the same time; walk through the overlap.' % len(pr)
+                return False, self.pair_msg
+            A = [_nm_ld_pose(na.pose, x, y) for (x, y), _ in pr]
+            B = [pb for _, pb in pr]
+            if float(np.ptp(np.asarray(A)[:, 0]) + np.ptp(np.asarray(A)[:, 1])) < 1.2:
+                self.pair_msg = 'You walked too short a way. Walk across the room, not on the spot.'
+                return False, self.pair_msg
+            rot, x, y, rms, used = _nm_ld_solve_pair(A, B)
+            if rms > 0.30 or used < max(10, int(0.5 * len(pr))):
+                self.pair_msg = ('The two views do not line up (error %.2f m). Check the first lidar\'s position and turn, and '
+                                 'that "turns clockwise" is right for both.' % rms)
+                return False, self.pair_msg
+            nb.set_pose(x=x, y=y, rot=rot)
+            self.fusion.drop(nb.id)
+            self.pair_msg = 'Placed %s from %d moments (error %.0f cm).' % (nb.name, used, rms * 100)
+        self.save()
+        return True, self.pair_msg
+
+    # ── demo (no hardware) ──
+    def demo(self, on):
+        """Pretend lidars on a pretend copy of your floor: the walls of your floor-plan picture (or a made-up house), enough
+        lidars to see all of it, and a few people walking through every room. Nothing is saved."""
+        with self.lock:
+            self.demo_on = bool(on)
+            self._demo_gen = getattr(self, '_demo_gen', 0) + 1
+            gen = self._demo_gen
+            if not on:
+                for lid in [k for k, n in self.nodes.items() if n.demo]:
+                    del self.nodes[lid]
+                    self.fusion.drop(lid)
+                self._sim = None
+                return
+        if self._threads_on:
+            import threading
+            threading.Thread(target=self._demo_build, args=(gen,), daemon=True, name='nm-lidar-demo').start()
+        else:
+            self._demo_build(gen)
+
+    def _demo_build(self, gen):
+        try:
+            sv = _nm_wifi_load('wifi_survey.json', {}, self.state_dir)
+            plan = (sv.get('plan') or {}) if isinstance(sv, dict) else {}
+            ids = _nm_floor_ids(plan)
+            world = _NMLidarHome.from_plan(plan, ids['down'], people=3)
+            spots = world.pick_lidars()
+        except Exception:
+            _exc_debug('lidar demo build')
+            world = _NMLidarHome.synthetic(12.0, 8.0, people=3)
+            spots = world.pick_lidars()
+        with self.lock:
+            if not self.demo_on or gen != self._demo_gen:
+                return
+            for lid in [k for k, n in self.nodes.items() if n.demo]:
+                del self.nodes[lid]
+                self.fusion.drop(lid)
+            world.t0 = self.clock()
+            self._sim = world
+            for i, (x, y, rot) in enumerate(spots):
+                lid = 'D%d' % (i + 1)
+                n = self._node(lid)
+                n.demo = True
+                n.name = 'Demo lidar %d' % (i + 1)
+                n.set_pose(floor='down', x=x, y=y, rot=rot, cw=True)
+                n.bg = None
+                n.calibrated = False
+                n.learn(5.0, manual=False)
+            self._sim_t = self.clock()
+
+    def demo_step(self, now=None):
+        """Advance the pretend lidars to `now` (tests call this by hand; the tick thread calls it ten times a second)."""
+        now = self.clock() if now is None else now
+        with self.lock:
+            w = self._sim
+            if w is None:
+                return
+            while self._sim_t < now:
+                self._sim_t += 0.1
+                t = self._sim_t
+                w.set_time(t)
+                for lid, n in list(self.nodes.items()):
+                    if not n.demo:
+                        continue
+                    sim = w.sensor(lid, n.pose)
+                    scan = sim.turn(t)
+                    self._turn(n, scan)
+
+    # ── thread plumbing ──
+    def start(self):
+        import threading
+        if self.running:
+            return
+        self.running = True
+        self.stop_ev.clear()
+        if self._threads_on:
+            for fn, nm in ((self._udp_run, 'nm-lidar-udp'), (self._tick_run, 'nm-lidar-tick')):
+                th = threading.Thread(target=fn, daemon=True, name=nm)
+                th.start()
+                self._thr.append(th)
+
+    def stop(self):
+        self.running = False
+        self.stop_ev.set()
+        for lid in list(self.nodes):
+            self.save_bg(lid)
+
+    def _tick_run(self):
+        last_save = 0.0
+        while not self.stop_ev.wait(0.2):
+            try:
+                if self.demo_on:
+                    self.demo_step()
+                self.tick()
+                self.poll_learn()
+            except Exception:
+                _exc_debug('lidar tick')
+
+    def _udp_run(self):
+        import socket
+        s = None
+        err = None
+        for _ in range(8):
+            s = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                s.bind(('', self.PORT))
+                s.settimeout(0.25)
+                try:
+                    s.ioctl(socket.SIO_UDP_CONNRESET, False)
+                except Exception:
+                    pass
+                err = None
+                break
+            except Exception as ex:
+                err = ex
+                if s is not None:
+                    s.close()
+                s = None
+                if self.stop_ev.wait(0.2):
+                    return
+        if s is None:
+            self.error = 'Could not listen on UDP port %d: %s. Another program may be using it.' % (self.PORT, err)
+            return
+        self.sock = s
+        self.error = ''
+        last_sub = 0.0
+        try:
+            while not self.stop_ev.is_set():
+                data = addr = None
+                try:
+                    data, addr = s.recvfrom(4096)
+                except socket.timeout:
+                    pass
+                except OSError:
+                    self.stop_ev.wait(0.05)
+                if data:
+                    try:
+                        self.feed_datagram(data, addr, self.clock())
+                    except Exception:
+                        _exc_debug('lidar datagram')
+                now = time.time()
+                if now - last_sub >= 2.0:
+                    last_sub = now
+                    seen = set()
+                    with self.lock:
+                        tg = [('255.255.255.255', self.PORT)] + list(self.targets) + [(n.ip, self.PORT) for n in self.nodes.values() if n.ip and not n.demo]
+                    for t_ in tg:
+                        if t_ in seen:
+                            continue
+                        seen.add(t_)
+                        try:
+                            s.sendto(b'LIDAR_SUBSCRIBE', t_)
+                        except OSError:
+                            pass
+        except Exception as ex:
+            self.error = str(ex)
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+            self.sock = None
+
+    # ── actions from the web page / the window ──
+    ACTIONS = ('learn', 'clear', 'pose', 'nudge', 'pair_begin', 'pair_finish', 'pair_cancel', 'demo', 'alert', 'forget')
+
+    def act(self, req, local):
+        """One change from the phone page (the Tk window calls the methods directly). Same rule as the CSI calibration: the PC
+        itself, or the "allow switching off from other devices" tick. -> (ok, message)"""
+        W = self.W
+        a = str(req.get('action') or '')
+        if a not in self.ACTIONS:
+            return False, 'Unknown action.'
+        if not (local or (W is not None and W.prefs.get('web_control'))):
+            return False, ('Changing this from another device is not allowed. Tick "Allow switching off from other devices" '
+                           'on the PC first (Wi-Fi window, Controls).')
+        lid = str(req.get('lid') or '')
+        if a == 'learn':
+            n = self.learn(lid or None, secs=15.0)
+            return (True, 'Learning the empty room for 15 s. Keep out of its view.') if n else (False, 'No lidar is sending yet.')
+        if a == 'clear':
+            n = self.nodes.get(lid)
+            if n is None:
+                return False, 'Pick a lidar.'
+            n.forget()
+            self.fusion.drop(lid)
+            return True, 'Forgot the empty-room picture; it will learn again by itself.'
+        if a in ('pose', 'nudge'):
+            n = self.nodes.get(lid)
+            if n is None:
+                return False, 'Pick a lidar.'
+            kw = {}
+            try:
+                if a == 'nudge':
+                    kw = {'x': n.pose['x'] + float(req.get('dx') or 0), 'y': n.pose['y'] + float(req.get('dy') or 0),
+                          'rot': n.pose['rot'] + float(req.get('drot') or 0)}
+                else:
+                    for k in ('x', 'y', 'rot'):
+                        if req.get(k) not in (None, ''):
+                            kw[k] = float(req[k])
+                    if req.get('floor') in ('up', 'down'):
+                        kw['floor'] = req['floor']
+                    if req.get('cw') is not None:
+                        kw['cw'] = bool(req['cw'])
+                    if req.get('name'):
+                        kw['name'] = str(req['name'])
+                    if isinstance(req.get('mask'), list):
+                        kw['mask'] = req['mask']
+            except (TypeError, ValueError):
+                return False, 'Those numbers do not look right.'
+            for k in ('x', 'y'):
+                if k in kw and not (-5.0 <= kw[k] <= 200.0):
+                    return False, 'That position is off the plan.'
+            self.set_pose(lid, **kw)
+            return True, 'Saved.'
+        if a == 'pair_begin':
+            return self.pair_begin(str(req.get('a') or ''), str(req.get('b') or ''))
+        if a == 'pair_finish':
+            return self.pair_finish()
+        if a == 'pair_cancel':
+            self.pair = None
+            return True, 'Stopped.'
+        if a == 'demo':
+            on = bool(req.get('on'))
+            self.demo(on)
+            if on:
+                self.start()
+            elif not (W is not None and W.prefs.get('lidar_on')):
+                self.stop()
+            return True, 'Demo on: pretend lidars across the whole floor and people walking about.' if on else 'Demo off.'
+        if a == 'alert':
+            mode = str(req.get('mode') or '')
+            if mode not in ('away', 'always', 'off') or W is None:
+                return False, 'Pick away, always or off.'
+            W.set_pref('lidar_alert', mode)
+            return True, 'Saved.'
+        if a == 'forget':
+            return (True, 'Forgotten.') if self.forget(lid) else (False, 'Pick a lidar.')
+        return False, 'Unknown action.'
+
+    # ── what the screens show ──
+    def snapshot(self):
+        now = self.clock()
+        with self.lock:
+            nodes = []
+            for n in sorted(self.nodes.values(), key=lambda q: q.id):
+                nodes.append({'id': n.id, 'name': n.name, 'ip': n.ip, 'live': n.live(now), 'age': (now - n.t_last) if n.t_last else None,
+                              'rate': round(n.rate(now), 1), 'rpm': round(n.sc.rpm, 0), 'rssi': n.rssi, 'pose': dict(n.pose),
+                              'calibrated': n.calibrated, 'has_bg': n.bg is not None,
+                              'learning': n.progress(), 'fg': round(n.fg_frac, 3), 'dets': len(n.dets),
+                              'bad': n.sc.bad, 'lost': n.lost, 'demo': n.demo})
+            tracks = []
+            for tr in self.fusion.people(now):
+                if True:
+                    tracks.append({'id': tr['id'], 'floor': tr['floor'], 'x': round(tr['x'], 2), 'y': round(tr['y'], 2),
+                                   'moving': bool(tr['moving']), 'kind': tr['kind'], 'by': tr['lids'],
+                                   'where': self.where(tr), 'age': round(now - tr['first'], 1)})
+            return {'running': self.running, 'demo': self.demo_on, 'error': self.error, 'nodes': nodes, 'tracks': tracks,
+                    'moving': self.fusion.moving(now), 'people': len(tracks), 'now': now, 'names': self.names(),
+                    'events': [(round(t, 1), x) for t, x in self.events[-8:]], 'msgs': [(round(t, 1), x) for t, x in self.msgs[-5:]],
+                    'pair': ({'a': self.pair['a'], 'b': self.pair['b'], 'n': len(self.pair['pairs']),
+                              'secs': round(now - self.pair['t0'], 0)} if self.pair else None), 'pair_msg': self.pair_msg}
+
+    def map_view(self, floor, dims=None):
+        """What to draw for one floor. `dims` ({'w','h'} metres) adds how much of the floor the lidars together can see."""
+        with self.lock:
+            nodes = []
+            live = []
+            for n in sorted(self.nodes.values(), key=lambda q: q.id):
+                if n.pose['floor'] != floor:
+                    continue
+                nodes.append({'id': n.id, 'name': n.name, 'x': n.pose['x'], 'y': n.pose['y'], 'rot': n.pose['rot'],
+                              'live': n.live(), 'bg': n.bg_plan(1), 'poly': [], 'scan': n.scan_plan(360) if n.live() else []})
+                if n.bg is not None:
+                    live.append(n)
+            for nd in nodes:
+                nd['poly'] = _nm_ld_visible_poly(nd['x'], nd['y'], nd['bg'], _NM_LD_MAX_MM / 1000.0)
+            out = {'floor': floor, 'nodes': nodes, 'range': _NM_LD_MAX_MM / 1000.0}
+            if dims and live:
+                try:
+                    out['coverage'] = round(_nm_ld_coverage(live, float(dims['w']), float(dims['h']), self._sim if self.demo_on else None), 3)
+                except Exception:
+                    _exc_debug('lidar coverage')
+            if self.demo_on and self._sim is not None and floor == 'down' and getattr(self._sim, 'rects', None) \
+                    and not (dims or {}).get('image'):
+                out['rooms'] = [[round(v, 2) for v in r] for r in self._sim.rects]
+            return out
+
+
+class _NMLidarWorld:
+    """A pretend room for the simulator: walls, a table, and one or two people walking about. Plan metres."""
+
+    def __init__(self, w, h, people=1, seed=3):
+        import random
+        self.w, self.h = float(w), float(h)
+        self.boxes = [(self.w * 0.45, self.h * 0.40, self.w * 0.45 + 0.9, self.h * 0.40 + 0.5)]
+        self.people = []
+        self.rng = random.Random(seed)
+        self.walk_n = people
+        self.t = 0.0
+        self.override = None                # tests: function t -> [(x, y, r)]
+
+    def set_time(self, t):
+        self.t = t
+
+    def circles(self, t=None):
+        t = self.t if t is None else t
+        if self.override is not None:
+            return self.override(t)
+        out = []
+        for i in range(self.walk_n):
+            # a slow loop around the table, a pause, and back
+            ph = (t * 0.18 + i * 0.5) % 1.0
+            cx, cy = self.w * 0.5, self.h * 0.5
+            rx, ry = self.w * 0.30, self.h * 0.30
+            a = ph * 2 * math.pi
+            out.append((cx + rx * math.cos(a), cy + ry * math.sin(a), 0.2))
+        return out
+
+    def cast(self, px, py, dx, dy):
+        """Metres from (px, py) to the nearest wall or box along each ray (inf = nothing)."""
+        W = self
+        with np.errstate(all='ignore'):
+            tx = np.where(dx > 1e-9, (W.w - px) / dx, np.where(dx < -1e-9, (0 - px) / dx, np.inf))
+            ty = np.where(dy > 1e-9, (W.h - py) / dy, np.where(dy < -1e-9, (0 - py) / dy, np.inf))
+            tmin = np.minimum(tx, ty)
+            for (x0, y0, x1, y1) in W.boxes:
+                t1x, t2x = (x0 - px) / dx, (x1 - px) / dx
+                t1y, t2y = (y0 - py) / dy, (y1 - py) / dy
+                lo = np.maximum(np.minimum(t1x, t2x), np.minimum(t1y, t2y))
+                hi = np.minimum(np.maximum(t1x, t2x), np.maximum(t1y, t2y))
+                hit = (hi >= lo) & (hi > 0)
+                tt = np.where(lo > 0, lo, hi)
+                tmin = np.where(hit & (tt > 0), np.minimum(tmin, tt), tmin)
+        return tmin
+
+    def sensor(self, lid, pose):
+        s = getattr(self, '_s', None)
+        if s is None:
+            s = self._s = {}
+        sn = s.get(lid)
+        if sn is None:
+            sn = s[lid] = _NMLidarSim(self, pose)
+        sn.pose = pose
+        return sn
+
+
+def _nm_ld_floor_dims(plan, fid):
+    """(width m, height m, picture path or '') of a floor, the way the web pages size it."""
+    fk = str(fid)
+    sz = (plan.get('sizes') or {}).get(fk) or [plan.get('w', 12), plan.get('h', 8)]
+    try:
+        W, H = max(2.0, float(sz[0] or 12)), max(2.0, float(sz[1] or 8))
+    except (TypeError, ValueError):
+        W, H = 12.0, 8.0
+    ip = (plan.get('images') or {}).get(fk)
+    if ip and os.path.isfile(ip):
+        try:
+            from PIL import Image as _PI
+            with _PI.open(ip) as _im:
+                iw, ih = _im.size
+            H = max(2.0, min(500.0, W * ih / float(iw)))
+        except Exception:
+            _exc_debug('lidar floor dims')
+            ip = ''
+    else:
+        ip = ''
+    return W, H, ip
+
+
+def _nm_ld_house_rects(w, h):
+    """A pretend house on a w x h floor, as filled rectangles (x0, y0, x1, y1) in metres: partition walls with door gaps
+    (a hall, a lounge, a kitchen, a study, a bedroom and a landing) and furniture in the rooms."""
+    t = 0.10
+    R = []
+
+    def vwall(x, y0, y1, gaps=()):
+        ys = [y0] + [v for g in sorted(gaps) for v in g] + [y1]
+        for a, b in zip(ys[0::2], ys[1::2]):
+            if b - a > 0.05:
+                R.append((x - t / 2, a, x + t / 2, b))
+
+    def hwall(y, x0, x1, gaps=()):
+        xs = [x0] + [v for g in sorted(gaps) for v in g] + [x1]
+        for a, b in zip(xs[0::2], xs[1::2]):
+            if b - a > 0.05:
+                R.append((a, y - t / 2, b, y + t / 2))
+    d = 0.9                                         # door width
+    x1, x2 = 0.30 * w, 0.64 * w
+    y1, y2 = 0.42 * h, 0.60 * h
+    vwall(x1, 0, 0.72 * h, [(0.20 * h, 0.20 * h + d), (0.56 * h, 0.56 * h + d)])
+    vwall(x2, 0, 0.55 * h, [(0.14 * h, 0.14 * h + d), (0.40 * h, 0.40 * h + d)])
+    vwall(x2, 0.72 * h, h, [(0.82 * h, 0.82 * h + d)])
+    hwall(y1, x1, x2, [(x1 + 0.35 * (x2 - x1), x1 + 0.35 * (x2 - x1) + d)])
+    hwall(y2, 0, x1 - 0.0, [(0.10 * w, 0.10 * w + d)])
+    hwall(0.72 * h, x1, x2, [(x1 + 0.12 * (x2 - x1), x1 + 0.12 * (x2 - x1) + d)])
+    # furniture
+    R += [(0.06 * w, 0.06 * h, 0.06 * w + 1.9, 0.06 * h + 0.9),                       # sofa
+          (0.10 * w, 0.20 * h, 0.10 * w + 0.9, 0.20 * h + 0.9),                       # coffee table
+          (x1 + 0.45, 0.06 * h, x1 + 2.0, 0.06 * h + 0.6),                           # kitchen counter
+          (x1 + 0.9, y1 - 1.6, x1 + 1.6, y1 - 0.9),                                  # kitchen island
+          (x2 + 0.35, 0.10 * h, x2 + 2.2, 0.10 * h + 0.9),                           # desk
+          (x2 + 0.35, 0.58 * h, x2 + 2.1, 0.58 * h + 1.0),                           # bed
+          (0.06 * w, 0.66 * h, 0.06 * w + 0.7, 0.66 * h + 1.4),                      # wardrobe
+          (x1 + 0.5, 0.80 * h, x1 + 1.5, 0.80 * h + 0.9),                            # dining table
+          (x1 + 2.4, 0.78 * h, x1 + 3.0, 0.78 * h + 0.6)]                            # cabinet
+    return [r for r in R if r[0] < w - 0.3 and r[1] < h - 0.3 and r[2] > 0.05 and r[3] > 0.05]
+
+
+class _NMLidarHome(_NMLidarWorld):
+    """The demo's pretend floor: a grid of wall cells (traced from the floor-plan picture when there is one, otherwise a
+    pretend house), people who walk a route through every part of it, and a way to pick where lidars should stand so
+    that together they see the whole floor."""
+    CS = 0.04                           # wall grid cell, metres
+    WALK_CS = 0.2                       # walking grid cell, metres
+
+    def __init__(self, w, h, occ, people=3, seed=7, quiet_s=6.0, rects=None):
+        _NMLidarWorld.__init__(self, w, h, people=people, seed=seed)
+        self.boxes = []
+        self.occ = occ                                   # bool [iy, ix], y up
+        self.ny = occ.shape[0]
+        self.nx = occ.shape[1]
+        self.quiet_s = float(quiet_s)                    # the floor is empty for this long (the lidars learn it), then people arrive
+        self.rects = rects or []                         # drawn when there is no floor-plan picture
+        self._steps = np.arange(0.04, _NM_LD_MAX_MM / 1000.0 + 0.2, 0.02)
+        self._routes = None
+        self._walk = None
+
+    # ── building ──
+    @classmethod
+    def synthetic(cls, w, h, people=3):
+        cs = cls.CS
+        nx, ny = int(math.ceil(w / cs)), int(math.ceil(h / cs))
+        occ = np.zeros((ny, nx), bool)
+        rects = _nm_ld_house_rects(w, h)
+        for (x0, y0, x1, y1) in rects:
+            occ[max(0, int(y0 / cs)):min(ny, int(math.ceil(y1 / cs))), max(0, int(x0 / cs)):min(nx, int(math.ceil(x1 / cs)))] = True
+        occ[0, :] = occ[-1, :] = True
+        occ[:, 0] = occ[:, -1] = True
+        return cls(w, h, occ, people=people, rects=rects)
+
+    @classmethod
+    def from_plan(cls, plan, fid, people=3):
+        """Walls traced from the floor-plan picture of floor `fid`; a pretend house when there is none (or it is unusable)."""
+        W, H, ip = _nm_ld_floor_dims(plan, fid)
+        W, H = min(W, 60.0), min(H, 40.0)
+        if ip:
+            try:
+                from PIL import Image as _PI
+                lay = _nm_floor_plan_lines(ip)
+                ink = lay['lines'][..., 3].astype(np.float32) / 255.0
+                cs = cls.CS
+                nx, ny = int(math.ceil(W / cs)), int(math.ceil(H / cs))
+                im = _PI.fromarray((ink > 0.5).astype(np.uint8) * 255).resize((nx, ny), _PI.BOX)
+                occ = (np.asarray(im, np.float32) / 255.0 > 0.06)[::-1]
+                # a border is a wall; a plan with no clear floor (a photo, a scribble) is not usable
+                occ[0, :] = occ[-1, :] = True
+                occ[:, 0] = occ[:, -1] = True
+                if 0.45 < float((~occ).mean()):
+                    return cls(W, H, np.ascontiguousarray(occ), people=people)
+            except Exception:
+                _exc_debug('lidar demo plan')
+        return cls.synthetic(W, H, people=people)
+
+    # ── seeing ──
+    def cast(self, px, py, dx, dy):
+        """Metres from (px, py) to the first wall cell along each ray (inf when nothing within range)."""
+        t = self._steps
+        xs = px + dx[:, None] * t[None, :]
+        ys = py + dy[:, None] * t[None, :]
+        ix = (xs / self.CS).astype(np.int64)
+        iy = (ys / self.CS).astype(np.int64)
+        out = (ix < 0) | (iy < 0) | (ix >= self.nx) | (iy >= self.ny)
+        hit = out | self.occ[np.clip(iy, 0, self.ny - 1), np.clip(ix, 0, self.nx - 1)]
+        first = hit.argmax(axis=1)
+        return np.where(hit.any(axis=1), t[first], np.inf)
+
+    # ── walking ──
+    def _grid(self):
+        if self._walk is not None:
+            return self._walk
+        k = int(round(self.WALK_CS / self.CS))
+        ny5, nx5 = int(math.ceil(self.ny / k)), int(math.ceil(self.nx / k))
+        pad = np.ones((ny5 * k, nx5 * k), bool)
+        pad[:self.ny, :self.nx] = self.occ
+        blocked = pad.reshape(ny5, k, nx5, k).any(axis=(1, 3))
+        best = None
+        for grow in (1, 0):
+            b = blocked.copy()
+            if grow:
+                b2 = b.copy()
+                b2[1:, :] |= b[:-1, :]; b2[:-1, :] |= b[1:, :]
+                b2[:, 1:] |= b[:, :-1]; b2[:, :-1] |= b[:, 1:]
+                b2[1:, 1:] |= b[:-1, :-1]; b2[:-1, :-1] |= b[1:, 1:]
+                b2[1:, :-1] |= b[:-1, 1:]; b2[:-1, 1:] |= b[1:, :-1]
+                b = b2
+            free = ~b
+            if not free.any():
+                continue
+            # the biggest connected stretch of free floor
+            seed = None
+            ys_, xs_ = np.nonzero(free)
+            for cand in (len(ys_) // 2, len(ys_) // 3, len(ys_) // 4, 0, len(ys_) - 1):
+                seed = (int(ys_[cand]), int(xs_[cand]))
+                comp = self._flood(free, seed)
+                if best is None or comp.sum() > best[1].sum():
+                    best = (free, comp, grow)
+            if best[1].sum() >= 0.5 * free.sum():
+                break
+        free, comp, _g = best
+        self._walk = {'free': free, 'comp': comp, 'k': k}
+        return self._walk
+
+    @staticmethod
+    def _step8(m):
+        o = m.copy()
+        o[1:, :] |= m[:-1, :]; o[:-1, :] |= m[1:, :]
+        o[:, 1:] |= m[:, :-1]; o[:, :-1] |= m[:, 1:]
+        o[1:, 1:] |= m[:-1, :-1]; o[:-1, :-1] |= m[1:, 1:]
+        o[1:, :-1] |= m[:-1, 1:]; o[:-1, 1:] |= m[1:, :-1]
+        return o
+
+    def _flood(self, free, seed):
+        comp = np.zeros_like(free)
+        comp[seed] = True
+        while True:
+            nxt = self._step8(comp) & free
+            if nxt.sum() == comp.sum():
+                return comp
+            comp = nxt
+
+    def _dist(self, comp, src):
+        """Steps from src to every cell of comp (wavefront; -1 = unreachable)."""
+        d = np.full(comp.shape, -1, np.int32)
+        d[src] = 0
+        front = np.zeros_like(comp)
+        front[src] = True
+        n = 0
+        while front.any():
+            n += 1
+            nxt = self._step8(front) & comp & (d < 0)
+            d[nxt] = n
+            front = nxt
+        return d
+
+    def _path(self, d, dst):
+        """Cells from the wavefront's source to dst (follows the distances downhill from dst)."""
+        p = [dst]
+        cur = dst
+        while d[cur] > 0:
+            y, x = cur
+            best, bd = None, d[cur]
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    yy, xx = y + dy, x + dx
+                    if (dy or dx) and 0 <= yy < d.shape[0] and 0 <= xx < d.shape[1] and 0 <= d[yy, xx] < bd:
+                        best, bd = (yy, xx), d[yy, xx]
+            if best is None:
+                break
+            p.append(best)
+            cur = best
+        return p[::-1]
+
+    def routes(self):
+        """For each person a looping walk: (times, xs, ys). They visit every part of the floor, pausing now and then."""
+        if self._routes is not None:
+            return self._routes
+        g = self._grid()
+        comp, k = g['comp'], g['k']
+        cells = np.argwhere(comp)
+        rng = np.random.RandomState(11)
+        # waypoints spread over the whole floor: always take the free cell farthest from those chosen so far
+        n_wp = int(min(40, max(8, len(cells) * self.WALK_CS * self.WALK_CS / 2.6)))   # about one stop per 2.6 square metres
+        wps = [tuple(cells[rng.randint(len(cells))])]
+        dmin = np.hypot(cells[:, 0] - wps[0][0], cells[:, 1] - wps[0][1])
+        for _ in range(n_wp - 1):
+            j = int(dmin.argmax())
+            wps.append(tuple(cells[j]))
+            dmin = np.minimum(dmin, np.hypot(cells[:, 0] - cells[j][0], cells[:, 1] - cells[j][1]))
+        order = [0]
+        left = set(range(1, len(wps)))
+        while left:
+            a = wps[order[-1]]
+            j = min(left, key=lambda q: (wps[q][0] - a[0]) ** 2 + (wps[q][1] - a[1]) ** 2)
+            order.append(j); left.discard(j)
+        dists = {i: self._dist(comp, wps[i]) for i in range(len(wps))}
+        cs = self.WALK_CS
+        out = []
+        for pi in range(max(1, self.walk_n)):
+            nw = max(1, self.walk_n)                              # each person takes their own stretch of the tour, so together they cover it all
+            seq = order[(pi * len(order)) // nw:((pi + 1) * len(order)) // nw] or order[:1]
+            if len(seq) < 2:
+                seq = list(order[:2])
+            seq = seq + [seq[0]]
+            speed = 0.85 + 0.12 * pi
+            T, X, Y = [0.0], [], []
+            x0, y0 = (wps[seq[0]][1] + 0.5) * cs, (wps[seq[0]][0] + 0.5) * cs
+            X.append(x0); Y.append(y0)
+            for a, b in zip(seq[:-1], seq[1:]):
+                path = self._path(dists[a], wps[b])
+                px = np.array([(c[1] + 0.5) * cs for c in path])
+                py = np.array([(c[0] + 0.5) * cs for c in path])
+                if len(px) > 4:                                   # round the corners a little
+                    kx = np.ones(5) / 5.0
+                    sx = np.convolve(np.r_[px[0], px[0], px, px[-1], px[-1]], kx, 'valid')
+                    sy = np.convolve(np.r_[py[0], py[0], py, py[-1], py[-1]], kx, 'valid')
+                    px, py = sx, sy
+                for qx, qy in zip(px[1:], py[1:]):
+                    T.append(T[-1] + math.hypot(qx - X[-1], qy - Y[-1]) / speed)
+                    X.append(float(qx)); Y.append(float(qy))
+                dwell = 3.0 + 4.0 * rng.rand()                    # stops for a few seconds (sits down, looks out of the window)
+                T.append(T[-1] + dwell); X.append(X[-1]); Y.append(Y[-1])
+            out.append((np.array(T), np.array(X), np.array(Y)))
+        self._routes = out
+        return out
+
+    def circles(self, t=None):
+        t = self.t if t is None else t
+        if self.override is not None:
+            return self.override(t)
+        if t < self.quiet_s + (getattr(self, 't0', None) or 0.0):
+            return []
+        out = []
+        for i, (T, X, Y) in enumerate(self.routes()):
+            tt = (t - self.quiet_s - (getattr(self, 't0', None) or 0.0) + i * 9.0) % T[-1]
+            out.append((float(np.interp(tt, T, X)), float(np.interp(tt, T, Y)), 0.2))
+        return out
+
+    # ── where lidars should stand ──
+    def pick_lidars(self, max_n=5, want=0.97):
+        """[(x, y, rot)]: greedy choice of spots that together see (within 8 m, round furniture and walls) as much of the
+        floor as possible; at least two."""
+        g = self._grid()
+        comp, k = g['comp'], g['k']
+        cs = self.WALK_CS
+        cells = np.argwhere(comp)
+        total = float(comp.sum())
+        step = max(3, int(math.ceil(math.sqrt(len(cells) / 450.0))))
+        cands = [tuple(c) for c in cells if c[0] % step == 0 and c[1] % step == 0]
+        if len(cands) < 6:
+            cands = [tuple(c) for c in cells[::max(1, len(cells) // 60)]]
+        n_rays = 240
+        ang = np.radians(np.arange(n_rays) * 360.0 / n_rays)
+        dx, dy = np.cos(ang), np.sin(ang)
+        ds = np.arange(0.2, _NM_LD_MAX_MM / 1000.0, 0.12)
+        seen_sets = []
+        for (cy, cx) in cands:
+            px, py = (cx + 0.5) * cs, (cy + 0.5) * cs
+            tm = np.minimum(self.cast(px, py, dx, dy), _NM_LD_MAX_MM / 1000.0)
+            vis = np.zeros(comp.shape, bool)
+            m = ds[None, :] < tm[:, None]
+            xi = ((px + dx[:, None] * ds[None, :]) / cs).astype(int)[m]
+            yi = ((py + dy[:, None] * ds[None, :]) / cs).astype(int)[m]
+            ok = (xi >= 0) & (yi >= 0) & (xi < comp.shape[1]) & (yi < comp.shape[0])
+            vis[yi[ok], xi[ok]] = True
+            vis = self._step8(vis) & comp
+            seen_sets.append(vis)
+        chosen, covered = [], np.zeros_like(comp)
+        for _ in range(max_n):
+            gains = [int((s & ~covered).sum()) for s in seen_sets]
+            j = int(np.argmax(gains))
+            if chosen and (len(chosen) >= 2) and (gains[j] < 0.012 * total or covered.sum() >= want * total):
+                break
+            if gains[j] <= 0:
+                break
+            chosen.append(cands[j])
+            covered |= seen_sets[j]
+        if len(chosen) == 1 and len(cands) > 1:                   # a small open room: still show two lidars, the second well away from the first
+            a = chosen[0]
+            j = max(range(len(cands)), key=lambda q: (cands[q][0] - a[0]) ** 2 + (cands[q][1] - a[1]) ** 2)
+            chosen.append(cands[j])
+            covered |= seen_sets[j]
+        self.coverage_planned = float(covered.sum()) / max(1.0, total)
+        return [((cx + 0.5) * cs, (cy + 0.5) * cs, 0.0) for (cy, cx) in chosen]
+
+
+class _NMLidarSim:
+    """A pretend LD14P in a _NMLidarWorld: ray-casts what the real one would measure (with a little noise)."""
+
+    def __init__(self, world, pose, seed=1):
+        import random
+        self.world = world
+        self.pose = pose
+        self.rng = np.random.RandomState(seed)
+        self.k = 0
+        self.noise = 8.0
+        self.drop = 0.01
+
+    def ranges(self, sensor_deg):
+        """Distances (mm, 0 = no return) at sensor-frame angles, for the current world."""
+        p, W = self.pose, self.world
+        sd = np.asarray(sensor_deg, float)
+        th = np.radians(p['rot'] + (-sd if p.get('cw', True) else sd))
+        dx, dy = np.cos(th), np.sin(th)
+        px, py = p['x'], p['y']
+        with np.errstate(all='ignore'):
+            tmin = W.cast(px, py, dx, dy)
+            for (cx, cy, r) in W.circles():
+                ox, oy = px - cx, py - cy
+                b = ox * dx + oy * dy
+                c = ox * ox + oy * oy - r * r
+                disc = b * b - c
+                tt = -b - np.sqrt(np.where(disc >= 0, disc, np.nan))
+                tmin = np.where((disc >= 0) & (tt > 0), np.minimum(tmin, tt), tmin)
+        mm = tmin * 1000.0
+        mm = mm + self.rng.normal(0, self.noise, len(mm))
+        mm = np.where((mm > _NM_LD_MAX_MM) | (mm < 20) | (self.rng.rand(len(mm)) < self.drop), 0, mm)
+        return mm
+
+    def turn(self, t):
+        """One finished turn (about 400 points) as the scanner would hand it over."""
+        n = 400
+        self.world.set_time(t)
+        ang = (np.arange(n) * 0.9 + (self.k % 7) * 0.13) % 360.0
+        self.k += 1
+        d = self.ranges(ang)
+        ok = d > 0
+        return {'t': t, 'ang': ang[ok], 'dist': d[ok], 'int': np.full(int(ok.sum()), 150.0)}
+
+    def packets(self, t, secs=0.1, ts0=0):
+        """The same thing as raw 47-byte packets (to test the decoder end to end)."""
+        out = []
+        n_pk = int(round(secs * 4000 / 12))
+        for j in range(n_pk):
+            self.world.set_time(t + secs * j / max(1, n_pk))
+            a0 = (self.k * 12 * 0.9) % 360.0
+            ang = (a0 + np.arange(12) * 0.9) % 360.0
+            self.k += 1
+            d = self.ranges(ang)
+            out.append(_nm_ld_build(a0, [int(v) for v in d], ts=(ts0 + len(out) * 3) & 0xFFFF))
+        return out
+# <<END LIDAR_CORE>>
+
+
+# <<LIDAR_TK>>
+_NM_LIDAR_COLS = ['#38b8f0', '#ffd23f', '#a371f7', '#39e08a', '#ff9f43']
+
+
+def _nm_lidar_runs(bg):
+    """Split an outline ([x, y, degree] points, 1 degree apart) into unbroken stretches."""
+    runs, cur = [], None
+    for p in bg or []:
+        if cur is not None and p[2] - cur[-1][2] <= 2:
+            cur.append(p)
+        else:
+            cur = [p]
+            runs.append(cur)
+    if len(runs) > 1 and runs[0][0][2] <= 2 and runs[-1][-1][2] >= 357:
+        runs[0] = runs.pop() + runs[0]
+    return runs
+
+
+def _nm_lidar_paint(ax, D, hub, floor, dm, img_path=None, placing=None, trails=None):
+    """Draw one floor: the plan, what each lidar can see (tinted, brighter where two overlap), the glowing outline of the empty
+    room each one learned, range rings, and the people with their trails. Plan metres, y up."""
+    from matplotlib.patches import Polygon, Circle, Rectangle
+    import matplotlib.patheffects as pe
+    ax.clear()
+    W, H = float(dm['w']), float(dm['h'])
+    light = bool(img_path and os.path.isfile(img_path))
+    ax.set_facecolor('#eef2f7' if light else '#0a1522')
+    ax.set_xlim(-0.2, W + 0.2); ax.set_ylim(-0.2, H + 0.2)
+    ax.set_aspect('equal', adjustable='box')
+    ax.tick_params(colors=D['text2'], labelsize=7)
+    for sp in ax.spines.values():
+        sp.set_color(D['border'])
+    ax.add_patch(Rectangle((0, 0), W, H, facecolor='#eef2f7' if light else '#0b1828', edgecolor='#47607f' if light else '#6fa3d8',
+                           lw=1.4, zorder=0))
+    if light:
+        try:
+            pl = _nm_floor_plan_lines(img_path)
+            ax.imshow(pl['lines'], extent=[0, W, 0, H], origin='upper', zorder=1, interpolation='bilinear')
+        except Exception:
+            _exc_debug('lidar plan image')
+    else:
+        for gx in range(0, int(W) + 1):
+            ax.plot([gx, gx], [0, H], color='#82b4eb', lw=0.5, alpha=0.20 if gx % 5 == 0 else 0.08, zorder=1)
+        for gy in range(0, int(H) + 1):
+            ax.plot([0, W], [gy, gy], color='#82b4eb', lw=0.5, alpha=0.20 if gy % 5 == 0 else 0.08, zorder=1)
+    mv = hub.map_view(floor, dm)
+    snap = hub.snapshot()
+    for r in mv.get('rooms') or []:
+        ax.add_patch(Rectangle((r[0], r[1]), r[2] - r[0], r[3] - r[1], facecolor='#28405e' if light else '#78a5dc',
+                               edgecolor='#47607f' if light else '#9cc8f5', alpha=0.45 if light else 0.30, lw=1.0, zorder=2))
+    rng = float(mv.get('range') or 8.0)
+    glow = [pe.Stroke(linewidth=5, foreground='#000000' if light else 'white', alpha=0.0 if light else 0.12), pe.Normal()]
+    for i, n in enumerate(mv['nodes']):
+        col = _NM_LIDAR_COLS[i % len(_NM_LIDAR_COLS)]
+        runs = _nm_lidar_runs(n['bg'])
+        if len(n.get('poly') or []) > 2:
+            ax.add_patch(Polygon(n['poly'], closed=True, facecolor=col, edgecolor='none', alpha=0.13 if light else 0.10, zorder=2))
+        for rn in runs:
+            if len(rn) < 2:
+                continue
+            seg, prev = [], None
+            for p in rn:
+                if prev is not None and math.hypot(p[0] - prev[0], p[1] - prev[1]) >= 0.6:
+                    if len(seg) > 1:
+                        ax.plot([q[0] for q in seg], [q[1] for q in seg], color=col, lw=1.6, alpha=0.95, zorder=4,
+                                solid_capstyle='round', path_effects=glow)
+                    seg = []
+                seg.append(p); prev = p
+            if len(seg) > 1:
+                ax.plot([q[0] for q in seg], [q[1] for q in seg], color=col, lw=1.6, alpha=0.95, zorder=4,
+                        solid_capstyle='round', path_effects=glow)
+        for m in (2, 4, 6, 8):
+            if m <= rng + 0.01:
+                ax.add_patch(Circle((n['x'], n['y']), m, fill=False, edgecolor=col, lw=0.6, ls=(0, (1.5, 4)), alpha=0.35, zorder=3))
+                if i == 0:
+                    ax.text(n['x'] + m * 0.7071 + 0.08, n['y'] + m * 0.7071 + 0.05, '%d m' % m, fontsize=6,
+                            color='#1c2a3c' if light else '#bed7f5', alpha=0.75, zorder=3)
+        sc = n['scan']
+        if sc:
+            fg = [p for p in sc if p[2]]
+            bgp = [p for p in sc if not p[2]]
+            if bgp:
+                ax.scatter([p[0] for p in bgp], [p[1] for p in bgp], s=1.5, c=col, alpha=0.5, zorder=4, linewidths=0)
+            if fg:
+                ax.scatter([p[0] for p in fg], [p[1] for p in fg], s=26, c='#ff3b30', alpha=0.25, zorder=5, linewidths=0)
+                ax.scatter([p[0] for p in fg], [p[1] for p in fg], s=8, c='#ff3b30', zorder=5, linewidths=0)
+    for t in snap['tracks']:
+        if t['floor'] != floor:
+            continue
+        hot = bool(t['moving'])
+        col = '#ff5242' if hot else '#ffaa3c'
+        tr = (trails or {}).get(t['id']) or []
+        for q in range(1, len(tr)):
+            f = q / float(len(tr))
+            ax.plot([tr[q - 1][0], tr[q][0]], [tr[q - 1][1], tr[q][1]], color=col, lw=1 + 2.2 * f, alpha=0.55 * f,
+                    solid_capstyle='round', zorder=8)
+        ax.add_patch(Circle((t['x'], t['y']), 0.62, facecolor=col, edgecolor='none', alpha=0.16, zorder=8))
+        ax.add_patch(Circle((t['x'], t['y']), 0.40, facecolor=col, edgecolor='none', alpha=0.22, zorder=8))
+        ax.add_patch(Circle((t['x'], t['y']), 0.22, facecolor=col, edgecolor='white', lw=1.6, zorder=9))
+        if hot and len(tr) > 5:
+            o = tr[-6]
+            dx, dy = t['x'] - o[0], t['y'] - o[1]
+            dl = math.hypot(dx, dy)
+            if dl > 0.25:
+                ax.annotate('', xy=(t['x'] + dx / dl * 0.62, t['y'] + dy / dl * 0.62),
+                            xytext=(t['x'] + dx / dl * 0.26, t['y'] + dy / dl * 0.26),
+                            arrowprops=dict(arrowstyle='-|>', color='white', lw=1.4, mutation_scale=9), zorder=10)
+        lab = t['where']
+        for pre in ('downstairs, ', 'upstairs, '):
+            if lab.lower().startswith(pre):
+                lab = lab[len(pre):]
+        ax.annotate(lab if lab.lower() not in ('downstairs', 'upstairs') else ('moving' if hot else 'still'),
+                    (t['x'], t['y']), xytext=(0, 14), textcoords='offset points', ha='center', fontsize=8, color='white',
+                    bbox=dict(boxstyle='round,pad=0.25', fc='#08111c', ec='none', alpha=0.8), zorder=11)
+    for i, n in enumerate(mv['nodes']):
+        col = _NM_LIDAR_COLS[i % len(_NM_LIDAR_COLS)]
+        a = math.radians(n['rot'])
+        ax.plot([n['x'], n['x'] + 0.45 * math.cos(a)], [n['y'], n['y'] + 0.45 * math.sin(a)], color=col, lw=2.2, zorder=12,
+                solid_capstyle='round')
+        ax.scatter([n['x']], [n['y']], s=64, c=col if n['live'] else '#7a8496', edgecolors='#06101b', linewidths=1.5, zorder=13)
+        ax.annotate(n['name'], (n['x'], n['y']), xytext=(0, -13), textcoords='offset points', ha='center', fontsize=7.5,
+                    color='white', bbox=dict(boxstyle='round,pad=0.2', fc='#08111c', ec='none', alpha=0.72), zorder=14)
+    ax.plot([0.3, 1.3], [0.3, 0.3], color='#223' if light else '#dfeaff', lw=1.4, zorder=14)
+    ax.text(1.4, 0.3, '1 m', fontsize=6.5, va='center', color='#223' if light else '#dfeaff', zorder=14)
+    cov = mv.get('coverage')
+    if isinstance(cov, (int, float)):
+        bar = '#2fe07a' if cov >= 0.9 else ('#ffb340' if cov >= 0.6 else '#ff6a5c')
+        ax.text(0.3, H - 0.35, 'Floor seen by lidars  %d%%' % int(round(cov * 100)), fontsize=8, color='white', va='top', zorder=15,
+                fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', fc='#08111c', ec=bar, alpha=0.85, lw=1.2))
+    if snap.get('demo'):
+        ax.text(W - 0.3, 0.2, 'DEMO', fontsize=30, fontweight='bold', ha='right', va='bottom',
+                color='#142030' if light else '#bedcff', alpha=0.10, zorder=1.5)
+    if placing:
+        ax.set_title('Click on the plan where %s stands' % placing, color=D['text'], fontsize=9)
+    return mv
+
+
+def plt_rect(x, y, w, h, D):
+    from matplotlib.patches import Rectangle
+    return Rectangle((x, y), w, h, facecolor=D['panel'], edgecolor=D['border'], lw=1, zorder=0)
+
+
+def _nm_open_lidar(monitor, parent=None, watcher=None):
+    """Lidar window: live view of the LD14P lidars, their room outline on the floor plan, where people are, placement and
+    learning. See _NMLidarHub."""
+    import tkinter as tk
+    from tkinter import ttk as _ttk
+    import matplotlib.figure as _mf
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg as _FCanvas
+    D = _nm_wifi_palette(monitor)
+    W = watcher or (_nm_wifi_get_watcher(monitor, create=True) if monitor is not None else None)
+    hub = W.lidar_hub() if W is not None else _NMLidarHub(None, threads=False)
+    win = tk.Toplevel(parent)
+    win.title('Lidar — room map and people')
+    win.configure(bg=D['bg'])
+    try:
+        win.geometry('1060x%d' % max(760, min(940, win.winfo_screenheight() - 90)))
+    except Exception:
+        win.geometry('1060x900')
+    win.minsize(900, 680)
+    try:
+        _nm_wifi_ttk(win, D)
+    except Exception:
+        _exc_debug('lidar ttk')
+    S = {'floor': 'down', 'sel': None, 'placing': None, 'trails': {}, 'dead': False, 'sig': None, 'plan_sig': None,
+         'plan': {}, 'ids': {'down': 0, 'up': 1}, 'dims': {}}
+    names = hub.names()
+
+    hdr = tk.Frame(win, bg=D['bg']); hdr.pack(fill='x', padx=16, pady=(14, 0))
+    tk.Label(hdr, text='Lidar', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 15, 'bold')).pack(side='left')
+    chip_v = tk.StringVar(value='')
+    chip = tk.Label(hdr, textvariable=chip_v, bg=D['chip'], fg=D['text2'], font=(_NM_MONO, 9, 'bold'), padx=10, pady=2)
+    chip.pack(side='right')
+    tk.Label(win, text='Each LD14P lidar sits on an ESP32 that sends its scan over the Wi-Fi. Place each one on the plan, let it learn '
+             'the empty room, and the app shows where people are and raises an alert when someone appears.',
+             bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9), wraplength=980, justify='left').pack(anchor='w', padx=16, pady=(2, 8))
+
+    bar = tk.Frame(win, bg=D['bg']); bar.pack(fill='x', padx=16)
+    on_v = tk.BooleanVar(value=bool(W.prefs.get('lidar_on')) if W else False)
+    demo_v = tk.BooleanVar(value=hub.demo_on)
+    _ttk.Checkbutton(bar, text='Listen for lidars', variable=on_v,
+                     command=lambda: W.set_pref('lidar_on', bool(on_v.get())) if W else None).pack(side='left', padx=(0, 12))
+    _ttk.Checkbutton(bar, text='Demo (pretend lidars)', variable=demo_v,
+                     command=lambda: _demo()).pack(side='left', padx=(0, 12))
+    tk.Label(bar, text='Alert when a person appears', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='left', padx=(8, 4))
+    _AL = {'When I am away': 'away', 'Always': 'always', 'Never': 'off'}
+    al_v = tk.StringVar(value={v: k for k, v in _AL.items()}.get(str((W.prefs.get('lidar_alert') if W else 'away') or 'away'), 'When I am away'))
+    al_cb = _ttk.Combobox(bar, textvariable=al_v, width=16, state='readonly', values=list(_AL))
+    al_cb.pack(side='left')
+    al_cb.bind('<<ComboboxSelected>>', lambda e: W.set_pref('lidar_alert', _AL.get(al_v.get(), 'away')) if W else None)
+    fl_v = tk.StringVar(value=names['down'])
+    fl_cb = _ttk.Combobox(bar, textvariable=fl_v, width=16, state='readonly', values=[names['down'], names['up']])
+    fl_cb.pack(side='right')
+    tk.Label(bar, text='Floor', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='right', padx=(0, 6))
+
+    def _floor_changed(_e=None):
+        S['floor'] = 'up' if fl_v.get() == names['up'] and names['up'] != names['down'] else 'down'
+        S['trails'].clear(); S['plan_sig'] = None
+        _redraw()
+    fl_cb.bind('<<ComboboxSelected>>', _floor_changed)
+
+    fig = _mf.Figure(figsize=(10, 4.4), facecolor=D['bg'])
+    ax = fig.add_subplot(111)
+    fig.subplots_adjust(left=0.04, right=0.99, top=0.96, bottom=0.07)
+    cv = _FCanvas(fig, master=win)
+    cv.get_tk_widget().pack(fill='both', expand=True, padx=16, pady=(8, 4))
+    stat_v = tk.StringVar(value='')
+    tk.Label(win, textvariable=stat_v, bg=D['bg'], fg=D['text'], font=(_NM_MONO, 9), anchor='w', justify='left').pack(fill='x', padx=16)
+
+    # ── the list of lidars ──
+    mid = tk.Frame(win, bg=D['bg']); mid.pack(fill='x', padx=16, pady=(6, 0))
+    cols = ('name', 'status', 'rate', 'floor', 'pos', 'room')
+    tree = _ttk.Treeview(mid, columns=cols, show='headings', height=4, selectmode='browse')
+    for c, t, wd in (('name', 'Lidar', 150), ('status', 'Status', 130), ('rate', 'Turns/s', 70), ('floor', 'Floor', 100),
+                     ('pos', 'Position (x, y, facing)', 190), ('room', 'Empty room', 150)):
+        tree.heading(c, text=t); tree.column(c, width=wd, anchor='w')
+    tree.pack(side='left', fill='x', expand=True)
+
+    ed = tk.Frame(win, bg=D['bg']); ed.pack(fill='x', padx=16, pady=(6, 0))
+    ev = {k: tk.StringVar() for k in ('name', 'x', 'y', 'rot')}
+    cw_v = tk.BooleanVar(value=True)
+    efl_v = tk.StringVar(value=names['down'])
+    for i, (k, lab, wd) in enumerate((('name', 'Name', 14), ('x', 'x (m)', 7), ('y', 'y (m)', 7), ('rot', 'Facing (°)', 7))):
+        tk.Label(ed, text=lab, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).grid(row=0, column=i * 2, sticky='w', padx=(0, 3))
+        _ttk.Entry(ed, textvariable=ev[k], width=wd).grid(row=0, column=i * 2 + 1, padx=(0, 10))
+    efl_cb = _ttk.Combobox(ed, textvariable=efl_v, width=14, state='readonly', values=[names['down'], names['up']])
+    efl_cb.grid(row=0, column=8, padx=(0, 10))
+    _ttk.Checkbutton(ed, text='Scan turns clockwise', variable=cw_v).grid(row=0, column=9, padx=(0, 10))
+    msg_v = tk.StringVar(value='')
+
+    def _sel_id():
+        s = tree.selection()
+        return s[0] if s else None
+
+    def _apply(_e=None):
+        lid = _sel_id()
+        if not lid:
+            return
+        try:
+            kw = dict(x=float(ev['x'].get()), y=float(ev['y'].get()), rot=float(ev['rot'].get()), cw=bool(cw_v.get()),
+                      floor='up' if efl_cb.get() == names['up'] and names['up'] != names['down'] else 'down')
+        except ValueError:
+            msg_v.set('Those numbers do not look right.'); return
+        if ev['name'].get().strip():
+            kw['name'] = ev['name'].get().strip()
+        hub.set_pose(lid, **kw)
+        msg_v.set('Saved.'); S['sig'] = None
+    _ttk.Button(ed, text='Apply', command=_apply).grid(row=0, column=10)
+
+    def _nudge(dx, dy, dr):
+        lid = _sel_id()
+        if not lid or lid not in hub.nodes:
+            return
+        p = hub.nodes[lid].pose
+        hub.set_pose(lid, x=p['x'] + dx, y=p['y'] + dy, rot=p['rot'] + dr)
+        S['sig'] = None
+
+    nb = tk.Frame(win, bg=D['bg']); nb.pack(fill='x', padx=16, pady=(6, 0))
+    for lab, args in (('←', (-0.1, 0, 0)), ('→', (0.1, 0, 0)), ('↑', (0, 0.1, 0)), ('↓', (0, -0.1, 0)),
+                      ('↺ 5°', (0, 0, 5)), ('↻ 5°', (0, 0, -5)), ('↺ 1°', (0, 0, 1)), ('↻ 1°', (0, 0, -1))):
+        _ttk.Button(nb, text=lab, width=6, command=lambda a=args: _nudge(*a)).pack(side='left', padx=(0, 4))
+
+    def _place():
+        lid = _sel_id()
+        if not lid:
+            msg_v.set('Pick a lidar in the list first.'); return
+        S['placing'] = lid
+        msg_v.set('Now click on the plan where it stands.')
+
+    def _learn():
+        lid = _sel_id()
+        n = hub.learn(lid if lid else None, secs=15.0)
+        msg_v.set('Learning the empty room for 15 s: keep out of its view.' if n else 'No lidar is sending yet.')
+
+    def _clear():
+        lid = _sel_id()
+        if lid in hub.nodes:
+            hub.nodes[lid].forget(); hub.fusion.drop(lid); msg_v.set('Forgot the picture; it will learn again by itself.')
+
+    def _remove():
+        lid = _sel_id()
+        if lid and hub.forget(lid):
+            msg_v.set('Removed.')
+    _ttk.Button(nb, text='Place by clicking', command=_place).pack(side='left', padx=(12, 4))
+    _ttk.Button(nb, text='Learn empty room', command=_learn).pack(side='left', padx=(0, 4))
+    _ttk.Button(nb, text='Forget picture', command=_clear).pack(side='left', padx=(0, 4))
+    _ttk.Button(nb, text='Remove', command=_remove).pack(side='left')
+
+    pb = tk.Frame(win, bg=D['bg']); pb.pack(fill='x', padx=16, pady=(8, 0))
+    tk.Label(pb, text='Pair by walking:', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='left', padx=(0, 6))
+    pa_v, pbv = tk.StringVar(), tk.StringVar()
+    pa_cb = _ttk.Combobox(pb, textvariable=pa_v, width=14, state='readonly'); pa_cb.pack(side='left')
+    tk.Label(pb, text='already placed, then', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9)).pack(side='left', padx=4)
+    pb_cb = _ttk.Combobox(pb, textvariable=pbv, width=14, state='readonly'); pb_cb.pack(side='left', padx=(0, 6))
+
+    def _ids_by_name():
+        return {n.name: n.id for n in hub.nodes.values()}
+
+    def _pair_go():
+        m = _ids_by_name()
+        ok, text = hub.pair_begin(m.get(pa_v.get(), ''), m.get(pbv.get(), ''))
+        msg_v.set(text)
+
+    def _pair_done():
+        ok, text = hub.pair_finish()
+        msg_v.set(text); S['sig'] = None
+    _ttk.Button(pb, text='Start walking', command=_pair_go).pack(side='left', padx=(0, 4))
+    _ttk.Button(pb, text='Done walking', command=_pair_done).pack(side='left', padx=(0, 4))
+    _ttk.Button(pb, text='Cancel', command=lambda: (setattr(hub, 'pair', None), msg_v.set('Stopped.'))).pack(side='left')
+    tk.Label(win, textvariable=msg_v, bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9), anchor='w', wraplength=980,
+             justify='left').pack(fill='x', padx=16, pady=(6, 10))
+
+    def _demo():
+        if demo_v.get():
+            hub.demo(True); hub.start()
+        else:
+            hub.demo(False)
+            if not (W and W.prefs.get('lidar_on')):
+                hub.stop()
+        S['sig'] = None
+
+    def _plan_info():
+        sv = _nm_wifi_load('wifi_survey.json', {}, hub.state_dir)
+        plan = (sv.get('plan') or {}) if isinstance(sv, dict) else {}
+        ids = _nm_floor_ids(plan)
+        cwb = W.csi_web() if W is not None else _NMCsiWeb(type('X', (), {'state_dir': hub.state_dir})())
+        dm = cwb._dims(plan, ids[S['floor']])
+        return dm, (plan.get('images') or {}).get(str(ids[S['floor']]))
+
+    def _redraw():
+        if S['dead']:
+            return
+        try:
+            dm, ip = _plan_info()
+            _nm_lidar_paint(ax, D, hub, S['floor'], dm, ip, S['placing'] and hub.nodes.get(S['placing']) and hub.nodes[S['placing']].name, S['trails'])
+            cv.draw_idle()
+        except Exception:
+            _exc_debug('lidar redraw')
+
+    def _click(ev_):
+        if not S['placing'] or ev_.inaxes is not ax or ev_.xdata is None:
+            return
+        lid, S['placing'] = S['placing'], None
+        hub.set_pose(lid, x=round(float(ev_.xdata), 2), y=round(float(ev_.ydata), 2), floor=S['floor'])
+        msg_v.set('Placed. Use the arrows and turn buttons to line the outline up with the walls.')
+        S['sig'] = None
+    cv.mpl_connect('button_press_event', _click)
+
+    def _fill_tree(snap):
+        sel = _sel_id()
+        sig = json.dumps([[n['id'], n['name'], n['pose'], n['has_bg'], n['calibrated']] for n in snap['nodes']], sort_keys=True)
+        rows = {}
+        for n in snap['nodes']:
+            st = ('Learning %d%%' % round(100 * n['learning'])) if n['learning'] is not None else ('Live' if n['live'] else 'Silent')
+            p = n['pose']
+            rows[n['id']] = (n['name'] + (' (demo)' if n['demo'] and 'demo' not in n['name'].lower() else ''), st, ('%.1f' % n['rate']) if n['live'] else '-',
+                             names['up'] if p['floor'] == 'up' else names['down'],
+                             '%.2f, %.2f, %.0f°' % (p['x'], p['y'], p['rot']),
+                             ('learned' if n['calibrated'] else 'by itself') if n['has_bg'] else 'none yet')
+        cur = list(tree.get_children())
+        if cur != list(rows):
+            for c in cur:
+                tree.delete(c)
+            for k, v in rows.items():
+                tree.insert('', 'end', iid=k, values=v)
+            if sel in rows:
+                tree.selection_set(sel)
+            elif rows and sel is None:
+                tree.selection_set(next(iter(rows)))
+        else:
+            for k, v in rows.items():
+                tree.item(k, values=v)
+        names_l = [v[0].replace(' (demo)', '') for v in rows.values()]
+        for cb in (pa_cb, pb_cb):
+            if list(cb['values']) != names_l:
+                cb['values'] = names_l
+        if names_l and not pa_v.get():
+            pa_v.set(names_l[0])
+        if len(names_l) > 1 and not pbv.get():
+            pbv.set(names_l[1])
+        return sig
+
+    def _on_select(_e=None):
+        lid = _sel_id()
+        if lid in hub.nodes:
+            n = hub.nodes[lid]
+            ev['name'].set(n.name); ev['x'].set('%.2f' % n.pose['x']); ev['y'].set('%.2f' % n.pose['y'])
+            ev['rot'].set('%.1f' % n.pose['rot']); cw_v.set(bool(n.pose['cw']))
+            efl_v.set(names['up'] if n.pose['floor'] == 'up' else names['down'])
+    tree.bind('<<TreeviewSelect>>', _on_select)
+
+    def _tick():
+        if S['dead']:
+            return
+        try:
+            snap = hub.snapshot()
+            sig = _fill_tree(snap)
+            if sig != S['sig']:
+                S['sig'] = sig
+                _on_select()
+            for t in snap['tracks']:
+                a = S['trails'].setdefault(t['id'], [])
+                a.append((t['x'], t['y']))
+                del a[:-25]
+            live_ids = {t['id'] for t in snap['tracks']}
+            for k in list(S['trails']):
+                if k not in live_ids:
+                    del S['trails'][k]
+            live = sum(1 for n in snap['nodes'] if n['live'])
+            if not (snap['running'] or snap['demo']):
+                chip_v.set('NOT LISTENING'); chip.configure(bg=D['chip'], fg=D['text2'])
+            elif not snap['nodes']:
+                chip_v.set('NO LIDARS YET'); chip.configure(bg='#6b3d00', fg='#ffe0b0')
+            elif not live:
+                chip_v.set('NO DATA'); chip.configure(bg='#6b3d00', fg='#ffe0b0')
+            elif snap['people']:
+                chip_v.set('%d %s%s' % (snap['people'], 'PERSON' if snap['people'] == 1 else 'PEOPLE', ' · MOVING' if snap['moving'] else ''))
+                chip.configure(bg='#7a1d12' if snap['moving'] else '#12384f', fg='#ffd5cf' if snap['moving'] else '#bfe6ff')
+            else:
+                chip_v.set('EMPTY'); chip.configure(bg='#12482b', fg='#c8ffe0')
+            lines = ['%s · %s · %s' % (t['where'], 'moving' if t['moving'] else 'still', 'seen by ' + ' + '.join(t['by'])) for t in snap['tracks']]
+            if snap['error']:
+                lines.append(snap['error'])
+            elif not (snap['running'] or snap['demo']):
+                lines.append('Tick "Listen for lidars" to start (the app listens on UDP port %d).' % hub.PORT)
+            if snap['pair']:
+                lines.append('Collecting for pairing: %d matching moments (%d s). Keep walking, then press Done walking.' % (snap['pair']['n'], snap['pair']['secs']))
+            for t_, x_ in snap['events'][-2:]:
+                lines.append('%s  %s' % (time.strftime('%H:%M:%S', time.localtime(t_)), x_))
+            stat_v.set('\n'.join(lines[:6]))
+            _redraw()
+        except Exception:
+            _exc_debug('lidar window tick')
+        win.after(500, _tick)
+
+    def _close():
+        S['dead'] = True
+        try:
+            win.destroy()
+        except Exception:
+            pass
+    win.protocol('WM_DELETE_WINDOW', _close)
+    win.after(200, _tick)
+    return {'win': win, 'hub': hub, 'S': S, 'tree': tree, 'tick': _tick, 'redraw': _redraw}
+# <<END LIDAR_TK>>
+
+
+# ── Night alarm: a klaxon when the boards see sustained movement in a night window ───────────────────────────
+def _nm_claxon_wav(seconds=2.4, rate=22050):
+    """A loud klaxon as WAV bytes: a blaring horn that sweeps 380 -> 540 Hz three times, overdriven so it is harsh and
+    carries through a house. Pure data (no sound card needed), so it can be tested."""
+    import io, wave
+    n = int(seconds * rate)
+    t = np.arange(n) / float(rate)
+    blast = 0.8                                            # one blast every 0.8 s: horn, then a short gap
+    ph = np.mod(t, blast)
+    f = 380.0 + 160.0 * np.clip(ph / 0.55, 0.0, 1.0)
+    phase = 2 * np.pi * np.cumsum(f) / rate
+    w = np.sin(phase) + 0.5 * np.sin(2 * phase) + 0.33 * np.sin(3 * phase) + 0.2 * np.sin(5 * phase)
+    w = np.tanh(2.6 * w)
+    env = np.where(ph < 0.62, 1.0, 0.0)
+    edge = np.clip(np.minimum(ph, 0.62 - ph) / 0.01, 0.0, 1.0)      # 10 ms ramps so it does not click
+    w = w * env * np.where(env > 0, edge, 0.0) * 0.97
+    pcm = np.clip(w * 32767.0, -32767, 32767).astype('<i2').tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+_NM_CLAXON = {'path': None, 'beep': None}
+
+
+def _nm_claxon_file():
+    """The klaxon WAV on disk (Windows cannot loop a sound from memory in the background, only from a file)."""
+    import tempfile
+    p = os.path.join(tempfile.gettempdir(), 'nm_klaxon_v1.wav')
+    if not os.path.isfile(p) or os.path.getsize(p) < 1000:
+        with open(p, 'wb') as f:
+            f.write(_nm_claxon_wav())
+    return p
+
+
+def _nm_claxon_beeps(stop_ev):
+    """Fallback if the sound file cannot be played: a harsh two-tone with winsound.Beep (blocking, so it has its own thread)."""
+    import winsound
+    while not stop_ev.is_set():
+        for f in (440, 540, 440, 540):
+            if stop_ev.is_set():
+                return
+            winsound.Beep(f, 220)
+
+
+def _nm_claxon_play():
+    """Start the klaxon looping (Windows). Returns True if sound was started. Never raises. It does NOT touch the
+    system volume: if the speakers are muted it is silent, which is why the page tells you to test it."""
+    import threading
+    _nm_claxon_stop()
+    try:
+        import winsound
+    except Exception:
+        _exc_debug('claxon: no winsound')
+        return False
+    try:
+        winsound.PlaySound(_nm_claxon_file(), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
+        return True
+    except Exception:
+        _exc('claxon play (file) failed, falling back to beeps')
+    try:
+        ev = threading.Event()
+        threading.Thread(target=_nm_claxon_beeps, args=(ev,), daemon=True, name='nm-klaxon-beep').start()
+        _NM_CLAXON['beep'] = ev
+        return True
+    except Exception:
+        _exc('claxon beeps')
+        return False
+
+
+def _nm_claxon_stop():
+    ev, _NM_CLAXON['beep'] = _NM_CLAXON.get('beep'), None
+    if ev is not None:
+        ev.set()
+    try:
+        import winsound
+        winsound.PlaySound(None, winsound.SND_PURGE)
+    except Exception:
+        pass
+
+
+_NM_NIGHT_BOX_TITLE = 'NIGHT ALARM'
+
+
+def _nm_night_box(text):
+    """A topmost message box (Windows) that stays until you click OK; returns when it is closed. Runs on its own thread."""
+    try:
+        import ctypes
+        MB_OK, MB_ICONSTOP, MB_SYSTEMMODAL, MB_TOPMOST, MB_SETFOREGROUND = 0x0, 0x10, 0x1000, 0x40000, 0x10000
+        ctypes.windll.user32.MessageBoxW(0, text, _NM_NIGHT_BOX_TITLE,
+                                         MB_OK | MB_ICONSTOP | MB_SYSTEMMODAL | MB_TOPMOST | MB_SETFOREGROUND)
+    except Exception:
+        _exc_debug('night box')
+
+
+def _nm_night_box_close():
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.FindWindowW(None, _NM_NIGHT_BOX_TITLE)
+        if hwnd:
+            ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)          # WM_CLOSE
+    except Exception:
+        _exc_debug('night box close')
+
+
+class _NMNightAlarm:
+    """Sounds a klaxon (and sends a phone alert) when the boards or the floor links see SUSTAINED movement during a
+    night window (default 01:00 to 03:00). Sustained = movement in at least N different seconds of the last 20, so a
+    twitch, a fan or one noisy packet never trips it; a person walking about does. It reads the same movement the
+    rest of the app uses (the receiver board, and both floor links), not the PC's Wi-Fi card.
+
+    The klaxon repeats until someone presses OK on the alarm box, presses Silence, or it has run for its set time
+    (default 2 minutes). After a silence it waits two minutes before it can sound again."""
+    SENS = {'low': 14, 'normal': 8, 'high': 4}
+    LOOK_S = 20.0
+    REARM_S = 120.0
+
+    def __init__(self, watcher, clock=None, play=None, stop=None, box=None, box_close=None):
+        import threading
+        self.W = watcher
+        self.clock = clock or time.time
+        self._play = play or _nm_claxon_play
+        self._stop = stop or _nm_claxon_stop
+        self._box = box or (_nm_night_box if _NM_IS_WIN else (lambda text: None))
+        self._box_close = box_close or (_nm_night_box_close if _NM_IS_WIN else (lambda: None))
+        self.lock = threading.RLock()
+        self.sec = {}                    # source -> {whole second: True}
+        self.active = False
+        self.since = None
+        self.last_fire = None
+        self.last_why = ''
+        self.silenced_t = -1e18
+        self.fired = 0
+        self.last_seen = {}              # source -> last time it reported (for "is anything watching")
+        self._timer = None
+
+    # ── settings ──────────────────────────────────────────────────────────
+    def prefs(self):
+        p = self.W.prefs
+        return {'on': bool(p.get('night_alarm', True)), 'from': str(p.get('night_from') or '01:00'),
+                'to': str(p.get('night_to') or '03:00'), 'sens': str(p.get('night_sens') or 'normal'),
+                'minutes': p.get('night_min', 2)}
+
+    @staticmethod
+    def parse_hm(s, default):
+        try:
+            h, m = str(s).strip().split(':')[:2]
+            h, m = int(h), int(m)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h * 60 + m
+        except (ValueError, AttributeError):
+            pass
+        return default
+
+    def in_window(self, t=None):
+        p = self.prefs()
+        a, b = self.parse_hm(p['from'], 60), self.parse_hm(p['to'], 180)
+        d = datetime.fromtimestamp(self.clock() if t is None else t)
+        m = d.hour * 60 + d.minute
+        if a == b:
+            return False
+        return (a <= m < b) if a < b else (m >= a or m < b)
+
+    def need(self):
+        return self.SENS.get(self.prefs()['sens'], 8)
+
+    def duration_s(self):
+        try:
+            return max(10.0, min(900.0, float(self.prefs()['minutes']) * 60.0))
+        except (TypeError, ValueError):
+            return 120.0
+
+    # ── feed ──────────────────────────────────────────────────────────────
+    def note(self, src, t, moving):
+        """One reading from a source ('board' or 'floor'): is it seeing movement right now?"""
+        try:
+            with self.lock:
+                self.last_seen[src] = t
+                d = self.sec.setdefault(src, {})
+                if moving:
+                    d[int(t)] = True
+                for k in [k for k in d if k < t - self.LOOK_S - 2]:
+                    del d[k]
+                if not moving:
+                    return
+                if not self.prefs()['on'] or not self.in_window(t) or self.active:
+                    return
+                if t - self.silenced_t < self.REARM_S:
+                    return
+                n = sum(1 for k in d if k >= t - self.LOOK_S)
+                need = self.need()
+                if n < need:
+                    return
+            self.fire(src, n, t)
+        except Exception:
+            _exc_debug('night alarm note')
+
+    def fire(self, src, n, t=None):
+        import threading
+        t = self.clock() if t is None else t
+        what = {'board': 'the receiver board', 'floor': 'the floor links', 'lidar': 'the lidars'}.get(src, src)
+        why = 'Movement in the house at %s: %d seconds of movement in the last %d seconds on %s.' % (
+            datetime.fromtimestamp(t).strftime('%H:%M'), n, int(self.LOOK_S), what)
+        with self.lock:
+            if self.active:
+                return
+            self.active = True
+            self.since = t
+            self.last_fire = t
+            self.last_why = why
+            self.fired += 1
+        started = self._play()
+        self.W.event('NIGHTALARM', why + ('' if started else ' (no sound could be started on this PC)'), alert=True,
+                     sev='crit', key='NIGHTALARM', debounce=60.0)
+        threading.Thread(target=self._box, args=('NIGHT ALARM\n\n' + why + '\n\nClick OK to silence the klaxon.',),
+                         daemon=True, name='nm-night-box').start()
+        tm = threading.Timer(self.duration_s(), self.silence, kwargs={'why': 'time'})
+        tm.daemon = True
+        with self.lock:
+            self._timer = tm
+        tm.start()
+
+    def silence(self, why='user'):
+        with self.lock:
+            was = self.active
+            self.active = False
+            tm, self._timer = self._timer, None
+            if why != 'time' or was:
+                self.silenced_t = self.clock()
+        if tm is not None:
+            try:
+                tm.cancel()
+            except Exception:
+                pass
+        if was:
+            self._stop()
+            self._box_close()
+        return was
+
+    def test(self, seconds=3.0):
+        """Play the klaxon briefly so you can check the speakers (does not raise an alarm)."""
+        import threading
+        ok = self._play()
+        tm = threading.Timer(float(seconds), self._stop)
+        tm.daemon = True
+        tm.start()
+        return ok
+
+    def status(self):
+        p = self.prefs()
+        now = self.clock()
+        with self.lock:
+            fresh = [s for s, t in self.last_seen.items() if now - t <= 8.0]
+            return {'on': p['on'], 'from': p['from'], 'to': p['to'], 'sens': p['sens'], 'minutes': p['minutes'],
+                    'in_window': self.in_window(), 'active': self.active, 'since': self.since, 'why': self.last_why,
+                    'last_fire': self.last_fire, 'watching': bool(fresh), 'fired': self.fired}
+
+
+import contextlib
+
+
+class _NMCsiWeb:
+    """The data behind the /csi web page: what the desktop CSI tab and Floor window show, as small JSON documents.
+    Pure logic (no Tk). Feeds: 'board' is the single receiver the CSI tab (or "Keep watching") has open, 'down' and
+    'up' are the two floor links of the floor detector, whichever of the Floor window or the background recorder is
+    reading them right now. Reading is open to anyone who can open the dashboard; changing calibration needs the PC
+    itself, or the "allow switching off from other devices" tick (the same rule as the other switches)."""
+    HEAT_COLS = 122
+    HEAT_BANDS = 8
+    CAL_WAIT_S = 10.0
+    CAL_DUR_S = 20.0
+    FLOORS = ('down', 'up')
+
+    def __init__(self, W):
+        self.W = W
+
+    # ── small helpers ─────────────────────────────────────────────────────
+    @staticmethod
+    def _dec(rows, n):
+        if len(rows) <= n:
+            return rows
+        k = len(rows) / float(n)
+        return [rows[int(i * k)] for i in range(n)]
+
+    @staticmethod
+    def _num(v, nd=3):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        if v != v or v in (float('inf'), float('-inf')):
+            return None
+        return round(v, nd)
+
+    def _lst(self, a, nd=3):
+        return [self._num(v, nd) for v in np.asarray(a, float).ravel()]
+
+    def plan(self):
+        sv = _nm_wifi_load('wifi_survey.json', {}, self.W.state_dir)
+        plan = (sv.get('plan') or {}) if isinstance(sv, dict) else {}
+        if not isinstance(plan, dict):
+            plan = {}
+        ids = _nm_floor_ids(plan)
+        names = {}
+        for fl in self.FLOORS:
+            nm = (plan.get('floors') or {}).get(str(ids[fl]))
+            names[fl] = str(nm or ('Downstairs' if fl == 'down' else 'Upstairs'))
+        return plan, ids, names
+
+    def label(self, fid):
+        if fid == 'board':
+            return 'Board'
+        names = self.plan()[2]
+        return '%s link' % names.get(fid, fid)
+
+    def parts(self, fid):
+        """(analyzer, source or None, owner) for a feed, or None when nothing is feeding it right now."""
+        W = self.W
+        if fid == 'board':
+            tab = W.csi_tab
+            if tab and tab.get('an') is not None and tab.get('src') is not None:
+                return tab['an'], tab['src'], 'tab'
+            with W.lock:
+                an, src = W._csi_an, W._csi_src
+            if an is not None and src is not None:
+                return an, src, 'background'
+            return None
+        if fid in self.FLOORS:
+            ff = W.floor_feed()
+            if ff is not None:
+                det, _loc, srcs, owner = ff
+                return det.an[fid], srcs.get(fid), owner
+        return None
+
+    def _off_reason(self, fid):
+        W = self.W
+        if fid == 'board':
+            if not W.csi_wanted():
+                return ('No board is open. On the PC, pick the receiver in the CSI tab and press Connect, or tick '
+                        '"Keep watching with this board" so it runs by itself.')
+            return 'The board is not sending right now (see the status below).'
+        return ('The two-floor detector is not running. Tick "Keep recording the weekly history in the background" '
+                'below (after connecting once in the Floor window on the PC).')
+
+    def feeds(self):
+        W = self.W
+        plan, ids, names = self.plan()
+        out = []
+        ff = W.floor_feed()
+        for fid in ('board', 'down', 'up'):
+            p = self.parts(fid)
+            if fid == 'board':
+                show = bool(p) or W.csi_wanted()
+            else:
+                show = bool(p) or bool(W.prefs.get('floor_bg')) or ff is not None
+            out.append({'id': fid, 'label': self.label(fid), 'live': p is not None, 'owner': p[2] if p else '',
+                        'show': bool(show)})
+        h = None
+        try:
+            h = W.csi_hist_db()
+            lo, hi = h.bounds() if h is not None else (None, None)
+        except Exception:
+            _exc_debug('csi web bounds')
+            lo = hi = None
+        return {'ok': True, 'feeds': out, 'names': names, 'floor_bg': bool(W.prefs.get('floor_bg')),
+                'night': W.night.status(), 'night_alarm': bool(W.prefs.get('night_alarm', True)),
+                'csi_bg': bool(W.prefs.get('csi_bg')), 'csi_port': str(W.prefs.get('csi_port') or ''),
+                'hist': {'lo': lo, 'hi': hi}, 'now': time.time()}
+
+    # ── one picture of a link: heat map, level line, signal shape, breathing ──────────────────────
+    def _pack(self, snap, act, turb, thr_arr, prof, ref, valid):
+        thr, mu = self._num(snap.get('thr'), 4), self._num(snap.get('mu'), 4)
+        heat = None
+        if act is not None and np.isfinite(act).any():
+            import warnings
+            with warnings.catch_warnings(), np.errstate(all='ignore'):
+                warnings.simplefilter('ignore')
+                floor = np.nanpercentile(act, 20, axis=1)
+                rel = act - floor[:, None]
+                if thr is not None and mu is not None:
+                    span = 2.5 * max(float(thr - mu), 1e-4)
+                else:
+                    span = max(float(np.nanpercentile(rel, 90)), 1e-4)
+                q = np.clip(np.nan_to_num(rel / span, nan=0.0), 0.0, 2.0) / 2.0
+                q = np.where(np.isfinite(act), q, -1.0)
+            heat = np.where(q < 0, -1, np.round(q * 100.0)).astype(int).tolist()
+        rows = []
+        for i, (x, y) in enumerate(turb):
+            yy = self._num(y, 4)
+            if yy is None:
+                continue
+            tv = self._num(thr_arr[i], 4) if (thr_arr is not None and i < len(thr_arr)) else None
+            rows.append(([round(float(x), 2), yy], tv))
+        if len(rows) > 160:
+            k = len(rows) / 160.0
+            rows = [rows[int(i * k)] for i in range(160)]
+        pts = [r[0] for r in rows]
+        tarr = [r[1] for r in rows]
+        shape = None
+        if prof is not None:
+            vm = np.asarray(valid, bool) if valid is not None else np.isfinite(prof)
+            now_l = [(self._num(v, 3) if (i < len(vm) and vm[i]) else None) for i, v in enumerate(np.asarray(prof, float))]
+            ref_l = None
+            if ref is not None:
+                ref_l = [(self._num(v, 3) if (i < len(vm) and vm[i]) else None) for i, v in enumerate(np.asarray(ref, float))]
+            shape = {'now': now_l, 'ref': ref_l}
+        b = snap.get('breath') or {}
+        fr, pw = b.get('freqs'), b.get('power')
+        breath = {'bpm': self._num(b.get('bpm'), 1), 'why': str(b.get('why') or '')}
+        if fr is not None and pw is not None:
+            fr, pw = np.asarray(fr, float) * 60.0, np.asarray(pw, float)
+            step = max(1, int(len(fr) / 70))
+            breath['freqs'] = self._lst(fr[::step], 2)
+            breath['power'] = self._lst(pw[::step], 3)
+        return {'heat': heat, 'learning': thr is None, 'turb': pts, 'thr': thr, 'mu': mu,
+                'thr_arr': (tarr if any(v is not None for v in tarr) else None), 'shape': shape, 'breath': breath}
+
+    @staticmethod
+    def _room(rs, dev, no_ref, past=False):
+        if rs == 'differs':
+            return {'text': 'ROOM: DIFFERENT FROM EMPTY' + ('' if dev is None or past else ' (%.2f)' % dev), 'tone': 'warn'}
+        if rs == 'match':
+            return {'text': 'ROOM: matched empty reference' if past else 'ROOM: matches empty reference', 'tone': 'quiet'}
+        if past:
+            return {'text': 'ROOM: no reference then', 'tone': 'idle'}
+        return {'text': 'ROOM: no reference' if no_ref else 'ROOM: measuring…', 'tone': 'idle'}
+
+    def live(self, fid):
+        W = self.W
+        W.csi_web_touch()
+        label = self.label(fid)
+        p = self.parts(fid)
+        if p is None:
+            return {'ok': True, 'feed': fid, 'label': label, 'live': False, 'chip': 'NOT CONNECTED', 'tone': 'idle',
+                    'why': self._off_reason(fid), 'status': (W.csi_status_text() if fid == 'board' else '')}
+        an, src, owner = p
+        now = time.time()
+        lk = getattr(src, 'lock', None)
+        try:
+            with (lk if lk is not None else contextlib.nullcontext()):
+                snap = an.snapshot(now)
+                act = an.activity(now, 61.0, self.HEAT_COLS, self.HEAT_BANDS)
+                turb = [(t - now, v) for (t, v) in list(an.turb) if now - t <= 61.5]
+                valid = an.valid
+                prof = None
+                if an.n_sc and len(an.X) > 10:
+                    prof = np.asarray(list(an.X)[-50:]).mean(axis=0)
+                empty = an.empty
+                ref = empty['mean'] if empty is not None else None
+                cal_when = empty['when'] if empty is not None else None
+        except Exception as ex:
+            _exc_debug('csi web live')
+            return {'ok': False, 'error': str(ex)}
+        score = float(snap.get('score') or 0.0)
+        if int(snap.get('frames') or 0) == 0:
+            chip, tone = 'WAITING FOR DATA', 'idle'
+        elif not snap.get('ready'):
+            chip, tone = 'LEARNING BASELINE…', 'idle'
+        elif snap.get('moving'):
+            chip, tone = 'MOTION  %.0f' % score, 'moving'
+        else:
+            chip, tone = 'STILL  %.0f' % score, 'quiet'
+        out = self._pack(snap, act, turb, None, prof, ref, valid)
+        b = out['breath']
+        hint = ''
+        try:
+            hint = src.hint() if src is not None else ''
+        except Exception:
+            _exc_debug('csi web hint')
+        after = W.csi_cal_after.get(fid)
+        out.update({'ok': True, 'feed': fid, 'label': label, 'live': True, 'owner': owner, 'now': now,
+                    'chip': chip, 'tone': tone, 'moving': bool(snap.get('moving')), 'score': round(score, 1),
+                    'room': self._room(snap.get('room'), self._num(snap.get('dev'), 2), empty is None),
+                    'breath_text': ('breathing: %.0f per min' % b['bpm']) if b.get('bpm') else 'breathing: —',
+                    'stats': {'rate': self._num(snap.get('rate'), 0), 'rssi': self._num(snap.get('rssi'), 0),
+                              'n_sc': snap.get('n_sc'), 'frames': int(snap.get('frames') or 0),
+                              'bad': int(getattr(src, 'bad', 0) or 0)},
+                    'cal': {'progress': self._num(snap.get('cal'), 3),
+                            'when': self._num(cal_when, 0),
+                            'after': (round(max(0.0, after - now), 1) if after and after > now else None)},
+                    'hint': hint})
+        return out
+
+    # ── calibration (needs the PC itself, or web_control) ───────────────────────────────────────────
+    def act(self, req, local):
+        W = self.W
+        a = str(req.get('action') or '')
+        fid = str(req.get('feed') or '')
+        if a not in ('cal_empty', 'cal_clear', 'cal_floor', 'night_silence', 'night_test'):
+            return False, 'Unknown action.'
+        if not (local or W.prefs.get('web_control')):
+            return False, ('Changing this from another device is not allowed. Tick "Allow switching off '
+                           'from other devices" on the PC first (Wi-Fi window, Controls).')
+        if a == 'night_silence':
+            return True, ('Klaxon silenced.' if W.night.silence('user') else 'The alarm was not sounding.')
+        if a == 'night_test':
+            return True, ('Playing the klaxon for 3 seconds.' if W.night.test() else
+                          'Could not play a sound on the PC (the klaxon needs Windows sound).')
+        if a == 'cal_floor' or (a in ('cal_empty', 'cal_clear') and fid in ('floor', 'down', 'up')):
+            ff = W.floor_feed()
+            if ff is None:
+                return False, 'The two-floor detector is not running (connect in the Floor window, or switch on background recording).'
+            det = ff[0]
+            if a == 'cal_empty':
+                det.start_empty(dur=self.CAL_DUR_S)
+                return True, 'Learning the empty room for %d s — keep the house still.' % int(self.CAL_DUR_S)
+            if a == 'cal_clear':
+                det.clear_calibration()
+                return True, 'Calibration cleared.'
+            fl = str(req.get('floor') or '')
+            if fl not in ('up', 'down'):
+                return False, 'Say which floor.'
+            if not det.empty_done():
+                return False, 'Learn the empty room first.'
+            det.start_floor(fl, dur=25.0)
+            return True, 'Now walk around %s for 25 s.' % ('UPSTAIRS' if fl == 'up' else 'DOWNSTAIRS')
+        p = self.parts('board')
+        if p is None:
+            return False, 'No board is connected.'
+        an, src, _owner = p
+        if a == 'cal_clear':
+            lk = getattr(src, 'lock', None)
+            with (lk if lk is not None else contextlib.nullcontext()):
+                an.clear_calibration()
+            return True, 'Calibration cleared.'
+        import threading
+        W.csi_cal_after['board'] = time.time() + self.CAL_WAIT_S
+
+        def go():
+            lk2 = getattr(src, 'lock', None)
+            try:
+                with (lk2 if lk2 is not None else contextlib.nullcontext()):
+                    an.start_calibration(time.time(), self.CAL_DUR_S)
+            except Exception:
+                _exc_debug('csi web calibrate')
+            W.csi_cal_after.pop('board', None)
+        t = threading.Timer(self.CAL_WAIT_S, go)
+        t.daemon = True
+        t.start()
+        return True, 'Leave the room now — calibration starts in %d s and takes %d s.' % (int(self.CAL_WAIT_S), int(self.CAL_DUR_S))
+
+    # ── the single board's recorded history (csi_history.db) ──────────────────────────────────────────
+    def hist_overview(self, span, n=300):
+        h = self.W.csi_hist_db()
+        if h is None:
+            return {'ok': False, 'error': 'History needs the app database.'}
+        lo, hi = h.bounds()
+        if lo is None:
+            return {'ok': True, 'empty': True}
+        t1 = hi
+        t0 = lo if not span or span <= 0 else max(lo, t1 - span)
+        if t1 - t0 < 60.0:
+            t0 = t1 - 60.0
+        n = int(max(10, min(400, n)))
+        xs, real, sim = h.overview(t0, t1, n)
+        return {'ok': True, 'empty': False, 't0': t0, 't1': t1, 'lo': lo, 'hi': hi,
+                'real': [self._num(v, 1) for v in real], 'sim': [self._num(v, 1) for v in sim],
+                'size': h.size_bytes(), 'keep_days': h.keep_s / 86400.0, 'now': time.time()}
+
+    def hist_nav(self, t, direction):
+        h = self.W.csi_hist_db()
+        if h is None:
+            return {'ok': False, 'error': 'History needs the app database.'}
+        r = h.next_event(float(t), 1 if direction > 0 else -1)
+        return {'ok': True, 't': r}
+
+    def hist_at(self, T):
+        W = self.W
+        h = W.csi_hist_db()
+        if h is None:
+            return {'ok': False, 'error': 'History needs the app database.'}
+        w = h.window(T - 60.0, T)
+        n = len(w['t'])
+        base = {'ok': True, 'past': True, 't': T, 'feed': 'board', 'label': 'Board'}
+        if not n or (T - w['t'][n - 1]) > 2.0:
+            base.update(empty=True, chip='NOTHING RECORDED HERE', tone='idle', room={'text': 'ROOM: —', 'tone': 'idle'},
+                        breath_text='breathing: —', stats={}, heat=None, turb=[], thr=None, mu=None, shape=None,
+                        breath={'bpm': None, 'why': 'nothing was recorded here'}, learning=True, thr_arr=None)
+            return base
+        cols = self.HEAT_COLS
+        grid = np.linspace(T - 60.0, T, cols)
+        idx = np.searchsorted(w['t'], grid, side='right') - 1
+        ok = (idx >= 0) & ((grid - w['t'][np.clip(idx, 0, n - 1)]) <= 1.2)
+        act = np.full((8, cols), np.nan)
+        act[:, ok] = w['bands'][idx[ok]].T
+        last = n - 1
+        fl = int(w['flags'][last])
+        fin = lambda v: None if v != v else float(v)
+        cur, ref = h.shape_at(T)
+        m = np.isfinite(w['turb'])
+        turb = [(float(x), float(y)) for x, y in zip(w['t'][m] - T, w['turb'][m])]
+        bpm = fin(w['bpm'][last])
+        snap = {'thr': fin(w['thr'][last]), 'mu': fin(w['mu'][last]),
+                'breath': {'bpm': bpm, 'why': ('recorded: about %.0f breaths a minute' % bpm) if bpm
+                           else 'no breathing detected at this moment'}}
+        pack = self._pack(snap, act, turb, w['thr'][m], cur, ref, np.isfinite(cur) if cur is not None else None)
+        score = float(w['score'][last])
+        ready, moving = bool(fl & 2), bool(fl & 1)
+        if not ready:
+            chip, tone = 'PAST · LEARNING BASELINE…', 'idle'
+        elif moving:
+            chip, tone = 'PAST · MOTION  %.0f' % score, 'moving'
+        else:
+            chip, tone = 'PAST · STILL  %.0f' % score, 'quiet'
+        room = 'differs' if fl & 16 else ('match' if fl & 8 else None)
+        rate, rssi = fin(w['rate'][last]), fin(w['rssi'][last])
+        kind = w['kind'][last]
+        pack.update(base)
+        pack.update({'empty': False, 'chip': chip, 'tone': tone, 'moving': moving, 'score': round(score, 1),
+                     'room': self._room(room, None, cur is None and ref is None, past=True),
+                     'breath_text': ('breathing: %.0f per min' % bpm) if bpm else 'breathing: —',
+                     'stats': {'rate': self._num(rate, 0), 'rssi': self._num(rssi, 0)},
+                     'kind': kind, 'cal': {}})
+        return pack
+
+    # ── the two floors ────────────────────────────────────────────────────────────────────────────
+    def _dims(self, plan, fid):
+        fk = str(fid)
+        sz = (plan.get('sizes') or {}).get(fk) or [plan.get('w', 12), plan.get('h', 8)]
+        try:
+            Wm, Hm = max(2.0, float(sz[0] or 12)), max(2.0, float(sz[1] or 8))
+        except (TypeError, ValueError):
+            Wm, Hm = 12.0, 8.0
+        ip = (plan.get('images') or {}).get(fk)
+        has = False
+        if ip and os.path.isfile(ip):
+            try:
+                from PIL import Image as _PI
+                with _PI.open(ip) as _im:
+                    iw, ih = _im.size
+                Hm = max(2.0, min(500.0, Wm * ih / float(iw)))
+                has = True
+            except Exception:
+                _exc_debug('csi web plan dims')
+        rt = (plan.get('routers') or {}).get(fk)
+        return {'id': int(fid), 'w': Wm, 'h': Hm, 'image': has, 'router': (list(rt) if rt else None)}
+
+    def floor_view(self):
+        W = self.W
+        W.csi_web_touch()
+        plan, ids, names = self.plan()
+        ff = W.floor_feed()
+        now = time.time()
+        lay = _nm_wifi_load('floor_layout.json', {}, W.state_dir)
+        if not isinstance(lay, dict):
+            lay = {}
+        out = {'ok': True, 'names': names, 'active': ff is not None, 'now': now,
+               'floors': {fl: self._dims(plan, ids[fl]) for fl in self.FLOORS},
+               'layout': {fl: {k: v for k, v in (lay.get(fl) or {}).items() if k in ('tx', 'rx')} for fl in self.FLOORS},
+               'floor_bg': bool(W.prefs.get('floor_bg')), 'local_ok': True}
+        if ff is None:
+            spots = _NMSpotLocator()
+            spots.load(_nm_wifi_load('floor_spots.json', {}, W.state_dir))
+            out.update(chip='NOT RUNNING', tone='idle', verdict=None, place=None, calibrated=False, empty_done=False,
+                       spots=[{'name': s['name'], 'floor': s['floor'], 'x': s['x'], 'y': s['y']} for s in spots.spots],
+                       links={}, battery=[], owner='', status=self._off_reason('down'), cal={}, learn=None)
+            return out
+        det, loc, srcs, owner = ff
+        snap = det.snapshot()
+        v = snap['verdict']
+        fl = v.get('floor')
+        place = None
+        try:
+            place = loc.shown() if loc is not None else None
+        except Exception:
+            _exc_debug('csi web place')
+        label = {'up': names['up'].upper(), 'down': names['down'].upper(), 'both': 'BOTH FLOORS'}.get(fl)
+        if label and place:
+            label = '%s  ·  near %s' % (label, place['name'])
+        if label:
+            chip, tone = label, 'moving'
+        else:
+            chip, tone = 'QUIET', 'quiet'
+        links = {}
+        for f in self.FLOORS:
+            L = snap['live'].get(f) or {}
+            links[f] = {'rate': self._num(L.get('rate'), 0), 'rssi': self._num(L.get('rssi'), 0),
+                        'score': self._num(L.get('score'), 0), 'moving': bool(L.get('moving'))}
+        bat = []
+        for f in self.FLOORS:
+            s = srcs.get(f)
+            b = getattr(s, 'battery', None) or {}
+            if b:
+                bat.append(_nm_batt_line(names[f], b, now))
+        if det._learn is not None:
+            status = 'Now walk around %s…' % ('UPSTAIRS' if det._learn['floor'] == 'up' else 'DOWNSTAIRS')
+        elif not det.empty_done() and det.empty_progress() > 0:
+            status = 'Learning the empty room — keep the house still…'
+        elif snap['calibrated']:
+            status = 'Calibrated. Watching.'
+        elif det.empty_done():
+            status = 'Empty room learned. Next: walk upstairs and downstairs (steps 2 and 3).'
+        else:
+            status = 'Step 1: with the house empty and still, press "Learn empty room".'
+        out.update(chip=chip, tone=tone, owner=owner, calibrated=bool(snap['calibrated']), empty_done=bool(snap['empty_done']),
+                   verdict={'floor': fl, 'label': v.get('label'), 'moving': bool(v.get('moving')),
+                            'conf': self._num(v.get('conf'), 2)},
+                   place=({'name': place['name'], 'floor': place['floor'], 'x': place['x'], 'y': place['y']} if place else None),
+                   spots=[{'name': s['name'], 'floor': s['floor'], 'x': s['x'], 'y': s['y']} for s in (loc.spots if loc else [])],
+                   links=links, battery=bat, status=status,
+                   cal={f: ({'ratio': self._num(c['ratio'], 2), 'n': c['n']} if c else None) for f, c in snap['cal'].items()},
+                   learn=({'floor': snap['learn']['floor'], 'progress': self._num(snap['learn']['progress'], 2)}
+                          if snap['learn'] else None),
+                   empty_progress=self._num(det.empty_progress(), 2))
+        return out
+
+    # ── the weekly floor history ─────────────────────────────────────────────────────────────────────
+    def fhist(self, floor, t0=None, t1=None, n=240):
+        W = self.W
+        if floor not in self.FLOORS:
+            return {'ok': False, 'error': 'floor must be up or down'}
+        h = W.floor_history()
+        s0, s1 = h.span()
+        t0 = s0 if t0 is None else max(float(t0), s0)
+        t1 = s1 if t1 is None else min(float(t1), s1 + 5.0)
+        if t1 - t0 < 60.0:
+            t0 = t1 - 60.0
+        n = int(max(10, min(400, n)))
+        cov, mv, pk = h.bins(floor, t0, t1, n)
+        sm = h.summary(floor, t0, t1)
+        return {'ok': True, 'floor': floor, 't0': t0, 't1': t1, 'n': n, 'cov': [round(v, 0) for v in cov],
+                'mv': [round(v, 1) for v in mv], 'pk': [round(v, 1) for v in pk],
+                'summary': {'episodes': sm['episodes'], 'sec': round(sm['sec'], 0), 'place': sm['place']},
+                'span': [s0, s1], 'now': time.time()}
+
+    def fhist_at(self, floor, t):
+        if floor not in self.FLOORS:
+            return {'ok': False, 'error': 'floor must be up or down'}
+        h = self.W.floor_history()
+        a = h.at(floor, float(t))
+        return {'ok': True, 'floor': floor, 't': float(t), 'covered': a['covered'], 'moving': a['moving'],
+                'sec': round(a['sec'], 1), 'peak': round(a['peak'], 1), 'place': a['place']}
+
+    def fhist_nav(self, floor, t, direction):
+        if floor not in self.FLOORS:
+            return {'ok': False, 'error': 'floor must be up or down'}
+        h = self.W.floor_history()
+        s0, s1 = h.span()
+        r = h.neighbor(floor, float(t), 1 if direction > 0 else -1, s0, s1)
+        return {'ok': True, 't': r}
+
+
 def _nm_open_floor(monitor, parent=None):
     """Floor Detection window: two CSI receivers (one per floor) share one transmitter; after a short
     calibration the app tells which floor movement is on. Each receiver can be on USB (a COM port) or on
@@ -13216,8 +19617,11 @@ def _nm_open_floor(monitor, parent=None):
     win = tk.Toplevel(parent)
     win.title('Floor Detection — which floor moved')
     win.configure(bg=D['bg'])
-    win.geometry('1080x960')
-    win.minsize(900, 760)
+    try:
+        win.geometry('1080x%d' % max(760, min(960, win.winfo_screenheight() - 90)))
+    except Exception:
+        win.geometry('1080x960')
+    win.minsize(900, 700)
 
     det = _NMFloorDetector(clock=clock, on_floor=lambda floor, detail: _on_floor(floor, detail))
     S = {'src': {'up': None, 'down': None}, 'job': None, 'dead': False, 'connected': False, 'paused': False}
@@ -13227,6 +19631,12 @@ def _nm_open_floor(monitor, parent=None):
         # raise one debounced phone alert per floor (the detector already rate-limits by alert_gap)
         if not alerts_on.get() or W is None:
             return
+        try:
+            _pl = LOC.shown()
+            if _pl:
+                detail = '%s \u2014 near %s' % (detail, _pl['name'])
+        except Exception:
+            _exc_debug('floor alert place')
         try:
             W.event('FLOORMOVE', detail, alert=True, sev='warn', key='FLOOR:' + floor, debounce=det.alert_gap)
         except Exception:
@@ -13249,14 +19659,25 @@ def _nm_open_floor(monitor, parent=None):
         if v and v not in port_vals:
             port_vals.append(v)
 
+    PM = {k: prefs[k] for k in ('up_mac', 'up_mac_ip', 'down_mac', 'down_mac_ip') if k in prefs}   # learned hardware addresses
+
+    def _prefs_now():
+        d = {'up': up_var.get(), 'down': down_var.get()}
+        d.update(PM)
+        return d
+
     def _save_prefs(*_a):
         try:
-            _nm_wifi_save('floor_prefs.json', {'up': up_var.get(), 'down': down_var.get()}, None)
+            _nm_wifi_save('floor_prefs.json', _prefs_now(), None)
         except Exception:
             _exc_debug('floor prefs save')
 
-    tk.Label(win, text='Which floor moved', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 15, 'bold')).pack(
-        anchor='w', padx=16, pady=(14, 0))
+    hdr_f = tk.Frame(win, bg=D['bg'])
+    hdr_f.pack(fill='x', padx=16, pady=(14, 0))
+    tk.Label(hdr_f, text='Which floor moved', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 15, 'bold')).pack(side='left')
+    hist_btn = tk.Button(hdr_f, text='Weekly history\u2026', font=(_NM_MONO, 10, 'bold'), bg=D['accent'], fg='#04121f',
+                         relief='flat', bd=0, padx=14, pady=3, command=lambda: _open_hist())
+    hist_btn.pack(side='right')
     tk.Label(win, text='One transmitter, a receiver on each floor. Connect both, calibrate once, then the '
              'app compares the two links to place movement.', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9),
              wraplength=720, justify='left').pack(anchor='w', padx=16, pady=(2, 10))
@@ -13331,7 +19752,12 @@ def _nm_open_floor(monitor, parent=None):
     FLAY = _nm_wifi_load('floor_layout.json', {}, sdir)       # {'up': {'tx': [x, y], 'rx': [x, y]}, 'down': {...}}
     if not isinstance(FLAY, dict):
         FLAY = {}
-    fig_f = _mf.Figure(figsize=(10, 4.0), facecolor=D['bg'])
+    LOC = _NMSpotLocator(clock=clock)                          # places you taught it (see "Teach a place" below)
+    LOC.load(_nm_wifi_load('floor_spots.json', {}, sdir))
+    HIST = W.floor_history() if W is not None else _nm_floor_hist_open(sdir)      # the week of history (shared with the background recorder)
+    CALMEMO = {}
+    _nm_floor_cal_load(sdir, det, CALMEMO)                    # a calibration made earlier survives restarts
+    fig_f = _mf.Figure(figsize=(10, 3.3), facecolor=D['bg'])
     cv_f = _FCanvas(fig_f, master=win)
     cv_f.get_tk_widget().pack(fill='both', expand=True, padx=16, pady=(0, 4))
 
@@ -13371,8 +19797,10 @@ def _nm_open_floor(monitor, parent=None):
             vf = snap['verdict'].get('floor') if S['connected'] else None
             mv = {fl: (vf == fl or vf == 'both') for fl in ('down', 'up')}
             sc = {fl: float((live.get(fl) or {}).get('score') or 0.0) for fl in ('down', 'up')}
+            _cur = LOC.shown() if S['connected'] else None
             key = (mv['down'], mv['up'], int(min(100.0, sc['down']) / 10), int(min(100.0, sc['up']) / 10),
-                   S['connected'], json.dumps(FLAY, sort_keys=True))
+                   S['connected'], json.dumps(FLAY, sort_keys=True), (_cur or {}).get('name'),
+                   len(LOC.spots), sum(len(s['samples']) for s in LOC.spots))
             if not force and key == FP['key']:
                 return
             FP['key'] = key
@@ -13389,6 +19817,7 @@ def _nm_open_floor(monitor, parent=None):
                 lay = FLAY.get(fl) or {}
                 FP['arts'][fl] = _nm_floor_overlay(ax_, dm['W'], dm['H'], lay.get('tx'), lay.get('rx'),
                                                    mv[fl], sc[fl] / 60.0)
+                FP['arts'][fl] += _nm_floor_spots_layer(ax_, LOC.spots, fl, _cur)
                 for sp in ax_.spines.values():
                     sp.set_color('#ff3b30' if mv[fl] else D['border'])
                     sp.set_linewidth(3.2 if mv[fl] else 0.8)
@@ -13459,6 +19888,21 @@ def _nm_open_floor(monitor, parent=None):
         if not arm or ev.inaxes is None or ev.xdata is None:
             return
         fl, kind = arm
+        if kind == 'spot':
+            fl2 = next((k for k, a_ in FP['ax'].items() if a_ is ev.inaxes), None)
+            if fl2 is None:
+                _fp_say('Click on one of the two floor plans, where the place is.')
+                return
+            nm = sp_name.get().strip()
+            try:
+                LOC.start_learn(nm, fl2, ev.xdata, ev.ydata, dur=15.0)
+            except ValueError as ex:
+                _fp_say(str(ex))
+                return
+            _fp_unarm()
+            _fp_say('Teaching "%s" on the %s plan: stand there, or walk slowly around it, for 15 seconds\u2026' % (
+                nm, 'DOWNSTAIRS' if fl2 == 'down' else 'UPSTAIRS'))
+            return
         if ev.inaxes is not FP['ax'].get(fl):
             _fp_say('That is the wrong plan \u2014 click on the %s one.' % ('DOWNSTAIRS' if fl == 'down' else 'UPSTAIRS'))
             return
@@ -13469,11 +19913,116 @@ def _nm_open_floor(monitor, parent=None):
         _fp_say('Saved the %s %s spot. The red zone will run along the line between that floor\u2019s Tx and Rx.' % (
             'downstairs' if fl == 'down' else 'upstairs', 'Tx' if kind == 'tx' else 'Rx'))
     fig_f.canvas.mpl_connect('button_press_event', _fp_click)
+
+    # ── teach a place: name it, click it on the plan, stand there for 15 s ─────────────────────────
+    sp_f = tk.Frame(win, bg=D['bg'])
+    sp_f.pack(fill='x', padx=16, pady=(2, 2))
+    tk.Label(sp_f, text='Teach a place:', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8)).pack(side='left', padx=(0, 6))
+    sp_name = tk.StringVar(value='')
+    sp_entry = tk.Entry(sp_f, textvariable=sp_name, width=16, bg=D['panel'], fg=D['text'], insertbackground=D['text'],
+                        relief='flat', font=(_NM_MONO, 9))
+    sp_entry.pack(side='left', padx=2, ipady=2)
+
+    def _sp_teach():
+        nm = sp_name.get().strip()
+        if not nm:
+            _fp_say('Type a name for the place first (for example Kitchen), then press Teach.')
+            return
+        if not S['connected']:
+            _fp_say('Connect both receivers first.')
+            return
+        if not det.empty_done():
+            _fp_say('Learn the empty room first (step 1 under Calibration), so the places are measured against it.')
+            return
+        _fp_unarm()
+        FP['place'] = ('any', 'spot')
+        sp_btn.configure(bg='#ffd23f', fg='#04121f')
+        try:
+            cv_f.get_tk_widget().configure(cursor='crosshair')
+        except Exception:
+            pass
+        _fp_say('\u25b6 Click the plan where "%s" is. Then stand there (or walk slowly around it) for 15 seconds.' % nm)
+    sp_btn = tk.Button(sp_f, text='Teach', font=(_NM_MONO, 8, 'bold'), bg=D['panel'], fg=D['text'], relief='flat',
+                       bd=0, padx=9, pady=2, command=_sp_teach)
+    sp_btn.pack(side='left', padx=2)
+    pl_btns[('any', 'spot')] = sp_btn
+    sp_pick = tk.StringVar(value='')
+    sp_cb = _ttk.Combobox(sp_f, textvariable=sp_pick, width=22, state='readonly', values=[])
+    sp_cb.pack(side='left', padx=(10, 2))
+
+    def _sp_label(s_):
+        return '%s \u00b7 %s' % (s_['name'], 'down' if s_['floor'] == 'down' else 'up')
+
+    def _sp_refresh():
+        vals = [_sp_label(s_) for s_ in LOC.spots]
+        sp_cb['values'] = vals
+        if sp_pick.get() not in vals:
+            sp_pick.set(vals[0] if vals else '')
+        sp_info.configure(text='%d place%s taught' % (len(vals), '' if len(vals) == 1 else 's'))
+
+    def _sp_save():
+        try:
+            _nm_wifi_save('floor_spots.json', LOC.to_json(), sdir)
+        except Exception:
+            _exc_debug('floor spots save')
+
+    def _sp_delete():
+        cur_ = sp_pick.get()
+        for s_ in list(LOC.spots):
+            if _sp_label(s_) == cur_:
+                LOC.delete(s_['name'], s_['floor'])
+                _sp_save()
+                _sp_refresh()
+                _fp_dyn(force=True)
+                _fp_say('Forgot "%s".' % s_['name'])
+                return
+
+    def _sp_clear():
+        LOC.clear()
+        _sp_save()
+        _sp_refresh()
+        _fp_dyn(force=True)
+        _fp_say('Forgot every taught place.')
+    tk.Button(sp_f, text='Forget', font=(_NM_MONO, 8), bg=D['panel'], fg=D['text2'], relief='flat', bd=0,
+              padx=7, pady=2, command=_sp_delete).pack(side='left', padx=2)
+    tk.Button(sp_f, text='Forget all', font=(_NM_MONO, 8), bg=D['panel'], fg=D['text2'], relief='flat', bd=0,
+              padx=7, pady=2, command=_sp_clear).pack(side='left', padx=2)
+    sp_info = tk.Label(sp_f, text='', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 8))
+    sp_info.pack(side='left', padx=8)
+    _sp_refresh()
+
+    def _loc_step():
+        """Once per tick: feed the teaching capture, and while movement is detected say which taught place it is."""
+        now = clock()
+        feat = LOC.features(det, now)
+        res = LOC.feed(feat, now)
+        if res is not None:
+            ok, msg = res
+            if ok:
+                _sp_save()
+                _sp_refresh()
+            _fp_say(msg)
+            _fp_dyn(force=True)
+            return
+        li = LOC.learn_info()
+        if li is not None:
+            _fp_say('Teaching "%s": keep standing or walking slowly there \u2014 %d s left (%d readings so far).' % (
+                li['name'], int(li['left'] + 0.99), li['n']))
+            return
+        v = det.verdict
+        if v.get('moving'):
+            LOC.update(feat, v.get('floor'))
+        else:
+            LOC.quiet()
+            LOC.shown(now)
     links_f = tk.Frame(win, bg=D['bg']); links_f.pack(fill='x', padx=16)
     up_lbl = tk.Label(links_f, text='Upstairs link: —', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 10), anchor='w')
     up_lbl.pack(fill='x')
     down_lbl = tk.Label(links_f, text='Downstairs link: —', bg=D['bg'], fg=D['text'], font=(_NM_MONO, 10), anchor='w')
     down_lbl.pack(fill='x')
+    batt_lbl = tk.Label(links_f, text='', bg=D['bg'], fg=D['text2'], font=(_NM_MONO, 9), anchor='w', justify='left')
+    batt_lbl.pack(fill='x', pady=(4, 0))
+    batt_memo = {}
 
     # ── calibration ─────────────────────────────────────────────────────────
     cal_f = tk.Frame(win, bg=D['well']); cal_f.pack(fill='x', padx=16, pady=14)
@@ -13497,9 +20046,47 @@ def _nm_open_floor(monitor, parent=None):
     b_clear = _mkbtn(cal_btns, 'Clear', lambda: (det.clear_calibration(), _set_status('Calibration cleared.')))
     b_clear.pack(side='left', padx=6)
 
-    tk.Checkbutton(win, text='Send a phone alert when a floor moves', variable=alerts_on, bg=D['bg'],
+    opt_f = tk.Frame(win, bg=D['bg'])
+    opt_f.pack(fill='x', padx=16)
+    tk.Checkbutton(opt_f, text='Send a phone alert when a floor moves', variable=alerts_on, bg=D['bg'],
                    fg=D['text2'], selectcolor=D['bg'], activebackground=D['bg'], activeforeground=D['text'],
-                   font=(_NM_MONO, 9)).pack(anchor='w', padx=16)
+                   font=(_NM_MONO, 9)).pack(side='left')
+    bg_var = tk.BooleanVar(value=bool(W.prefs.get('floor_bg')) if W is not None else False)
+
+    def _bg_toggle():
+        if W is None:
+            return
+        W.set_pref('floor_bg', bool(bg_var.get()))
+        trk_ = W.floor_tracker
+        if trk_ is not None and S['connected']:
+            trk_.pause()                                   # this window is reading the boards right now
+        _fp_say('Weekly history is now recorded even when this window is closed.' if bg_var.get() else
+                'Background recording is off: history is only recorded while this window is connected.')
+    tk.Checkbutton(opt_f, text='Keep recording the weekly history in the background', variable=bg_var,
+                   command=_bg_toggle, bg=D['bg'], fg=D['text2'], selectcolor=D['bg'], activebackground=D['bg'],
+                   activeforeground=D['text'], font=(_NM_MONO, 9)).pack(side='left', padx=(18, 0))
+
+    def _hist_ctx():
+        trk_ = W.floor_tracker if W is not None else None
+        if S['connected']:
+            rec = 'Recording now (this window is connected).'
+        elif trk_ is not None and trk_.running():
+            rec = 'Recording in the background (%s).' % trk_.status
+        else:
+            rec = 'Not recording \u2014 tick "Keep recording the weekly history in the background" in the Floor window.'
+        return {'plan': FP['plan'], 'samples': FP['samples'], 'ids': FP['ids'], 'spots': LOC.spots, 'layout': FLAY,
+                'names': {fl_: _fp_name(fl_) for fl_ in ('down', 'up')}, 'rec': rec}
+
+    def _open_hist():
+        hw = S.get('hist_win')
+        try:
+            if hw is not None and hw.winfo_exists():
+                hw.lift()
+                return
+        except Exception:
+            pass
+        _nm_floor_hist_save(HIST, sdir, force=True)
+        S['hist_win'] = _nm_open_floor_history(win, D, HIST, _hist_ctx)
 
     def _set_status(msg):
         try:
@@ -13517,20 +20104,9 @@ def _nm_open_floor(monitor, parent=None):
         return m.group(0) if m else '*'
 
     def _mk_source(sel, an):
-        sel = (sel or '').strip()
-        if sel.lower().startswith('wifi'):
-            ip = None
-            port = _NM_CSI_UDP_PORT
-            rest = sel[4:].lstrip(' :')                 # after 'wifi': ' 192.168.1.9', ':4210', '192.168.1.9:4210'
-            m = re.match(r'(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?', rest)
-            if m:
-                ip = m.group(1)
-                if m.group(2):
-                    port = int(m.group(2))
-            elif rest.isdigit():
-                port = int(rest)
-            return _NMCsiSource(an, udp_port=port, clock=clock, board_ip=ip)
-        return _NMCsiSource(an, port=sel, baud=_NM_CSI_BAUD, clock=clock)
+        s = _nm_floor_make_source(sel, an, clock)
+        _nm_floor_macs_apply(s, 'up' if an is det.an['up'] else 'down', _prefs_now())
+        return s
 
     def _toggle():
         if S['connected']:
@@ -13547,6 +20123,9 @@ def _nm_open_floor(monitor, parent=None):
                         'the two floors would mix.'); return
         # The Wi-Fi board is read through the shared _NMCsiUdpBroker, so the Floor window can run at the
         # same time as "Keep watching" and the CSI tab -- no need to pause the background watcher.
+        _trk = W.floor_tracker if W is not None else None
+        if _trk is not None:
+            _trk.pause()                           # a USB receiver can only be opened once: this window takes over
         try:
             S['src']['up'] = _mk_source(u, det.an['up'])
             S['src']['down'] = _mk_source(d, det.an['down'])
@@ -13558,6 +20137,14 @@ def _nm_open_floor(monitor, parent=None):
         _save_prefs()                              # remember this working pick for next time
         conn_btn.configure(text='Disconnect')
         _set_status('Connected. Step 1: with the house empty and still, press "Learn empty room".')
+        if W is not None and not W.prefs.get('floor_bg_set'):
+            W.set_pref('floor_bg_set', True)       # first time: start the weekly history by default (tick it off to stop)
+            bg_var.set(True)
+            _bg_toggle()
+            _set_status('Connected. The weekly history now records in the background too (untick "Keep recording" '
+                        'to stop). Step 1: with the house empty and still, press "Learn empty room".')
+        if det.calibrated():
+            _set_status('Connected. Your saved calibration is loaded \u2014 watching. (Press "Clear" to start over.)')
 
     def _disconnect():
         for f in det.FLOORS:
@@ -13568,7 +20155,12 @@ def _nm_open_floor(monitor, parent=None):
                     _exc_debug('floor src stop')
                 S['src'][f] = None
         S['connected'] = False
+        if W is not None:
+            W.floor_win = None
         conn_btn.configure(text='Connect')
+        _trk = W.floor_tracker if W is not None else None
+        if _trk is not None:
+            _trk.resume()                          # hand the boards back to the background recorder
 
     def _cal_empty():
         if not S['connected']:
@@ -13601,12 +20193,43 @@ def _nm_open_floor(monitor, parent=None):
         if S['dead']:
             return
         try:
+            if W is not None:
+                W.floor_win = ({'det': det, 'loc': LOC, 'src': S['src']} if S['connected'] else None)
             if S['connected']:
                 det.tick()
+                _loc_step()
+                HIST.record(clock(), _nm_floor_hist_info(det, LOC))
+                if W is not None:
+                    W.night.note('floor', clock(), bool(det.verdict.get('moving')))
+                _nm_floor_hist_save(HIST, sdir)
+            _nm_floor_cal_save(sdir, det, CALMEMO)
+            if S['connected']:
+                _pn = _prefs_now()
+                if _nm_floor_follow_sync(S['src'], _pn):            # a receiver came back on a new address
+                    for _k in ('up', 'down'):
+                        if _pn[_k] != (up_var if _k == 'up' else down_var).get():
+                            (up_var if _k == 'up' else down_var).set(_pn[_k])
+                            _cbx = up_cb if _k == 'up' else down_cb
+                            if _pn[_k] not in list(_cbx['values']):
+                                _cbx['values'] = list(_cbx['values']) + [_pn[_k]]
+                    PM.update({k: v for k, v in _pn.items() if k.endswith('_mac') or k.endswith('_mac_ip')})
+                    _save_prefs()
+                    _set_status('A receiver moved to a new address; the app followed it.')
             snap = det.snapshot()
             lv = snap['live']
             up_lbl.configure(text=_fmt_link('Upstairs link', lv['up']))
             down_lbl.configure(text=_fmt_link('Downstairs link', lv['down']))
+            if S['connected']:
+                _bt = time.time()
+                _bl = []
+                for _fl, _nm in (('up', 'Upstairs'), ('down', 'Downstairs')):
+                    _s = S['src'].get(_fl)
+                    _bat = getattr(_s, 'battery', None) or {}
+                    if _bat:
+                        _bl.append(_nm_batt_line(_nm, _bat, _bt))
+                        _nm_batt_alert(W, _nm, _bat, batt_memo, _bt)
+                batt_lbl.configure(text='\n'.join(_bl) if _bl else
+                                   'Battery: not reported (only the Heltec V3 firmware has a battery gauge).')
             # calibration progress / status
             learn = snap['learn']
             if learn is not None:
@@ -13628,6 +20251,9 @@ def _nm_open_floor(monitor, parent=None):
                 fl = v['floor']
                 if fl in VCOL:
                     bg, fg, txt = VCOL[fl]
+                    _pl = LOC.shown()
+                    if _pl:
+                        txt = '%s  \u00b7  near %s' % (txt, _pl['name'])
                     chip.configure(text=txt, bg=bg, fg=fg)
                 else:
                     chip.configure(text='QUIET', bg='#12482b', fg='#c8ffe0')
@@ -13647,6 +20273,16 @@ def _nm_open_floor(monitor, parent=None):
             except Exception:
                 pass
         _disconnect()
+        try:
+            _nm_floor_hist_save(HIST, sdir, force=True)
+        except Exception:
+            _exc_debug('floor history close save')
+        try:
+            hw = S.get('hist_win')
+            if hw is not None and hw.winfo_exists():
+                hw.destroy()
+        except Exception:
+            pass
         try:
             win.destroy()
         except Exception:
@@ -15711,7 +22347,7 @@ def _nm_open_quality(monitor):
     dev_state = {'devs': [], 'centers': {}, 'sel': None, 'ports': {},
                  'auto': True, 'gw': None, 'myip': None, 'busy': False}
     try:
-        dev_state['gw'] = _nm_default_gateway()
+        dev_state['gw'] = _nm_lan_gateway()
     except Exception:
         pass
     try:
@@ -22472,6 +29108,12 @@ class EtherApeWindow:
         _ports_lbl.pack(side='left', padx=12, fill='x', expand=True)
 
         def _fmt_ports():
+            if _nm_hp_prefs()['source'] == 'tpot':
+                if _nm_hp_prefs().get('remote'):
+                    return ('Source: T-Pot in a VM (real visitor addresses). This window shows what it caught.\n'
+                            'Change the VM on the T-Pot page (HONEYPOT button opens it in your browser)')
+                return ('Source: T-Pot (20+ honeypots in Docker). It opens its own decoy ports; this window shows what it caught.\n'
+                        'Start/stop T-Pot with tpot_start.ps1 / tpot_stop.ps1 in ' + _NM_TPOT_DIR)
             _t = ', '.join('%d %s' % (p, _NM_HONEYPOT_PORTS[p])
                            for p in sorted(_NM_HONEYPOT_PORTS))
             _u = ', '.join('%d %s' % (p, _NM_HONEYPOT_UDP_PORTS[p])
@@ -22542,7 +29184,7 @@ class EtherApeWindow:
             _th.Thread(target=work, daemon=True).start()
 
         def on_hit(rec, count):
-            if autoblock.get() and count >= 2:
+            if autoblock.get() and count >= 2 and not (rec.get('masked') or _nm_hp_is_masked(rec.get('ip'))):
                 ok, err = _nm_firewall_block(rec['ip'])
                 if ok:
                     log.info('[honeypot] auto-blocked %s after %d hits',
@@ -22566,7 +29208,7 @@ class EtherApeWindow:
                 tree.insert('', 'end', values=(
                     _t.strftime('%H:%M:%S', _t.localtime(h['time'])),
                     h['ip'],
-                    'known LAN' if h.get('known') else 'external',
+                    'known LAN' if h.get('known') else (('your network' if getattr(hp, '_es', '').startswith('https://') else 'via Docker') if h.get('masked') else 'external'),
                     '%s/%s' % (h['port'], h.get('proto', 'tcp')),
                     h['service'],
                     h.get('tool', ''),
@@ -22576,6 +29218,19 @@ class EtherApeWindow:
             import time as _t2
             _stuck = (' \u00b7 %d stuck now' % sm['tarpit_active']
                       if sm.get('tarpit_active') else '')
+            if sm.get('source') == 'tpot':
+                if not sm.get('connected'):
+                    state.set('T-Pot not answering \u2014 ' + (sm.get('error') or '')[:90])
+                    return
+                _ty = ', '.join('%s %d' % kv for kv in sorted(sm.get('types', {}).items(), key=lambda kv: -kv[1])[:4])
+                if sm['total'] == 0:
+                    state.set('T-Pot connected \u00b7 no attacks yet \u2014 quiet is normal on a clean network')
+                else:
+                    _s = int(_t2.time() - sm['last_hit']) if sm.get('last_hit') else 0
+                    state.set('T-Pot \u00b7 %d events from %d source(s) \u00b7 last %s ago%s'
+                              % (sm['total'], sm['unique_ips'], ('%ds' % _s if _s < 90 else '%dm' % (_s // 60)),
+                                 (' \u00b7 ' + _ty) if _ty else ''))
+                return
             if sm['total'] == 0 and sm.get('started'):
                 _mins = int((_t2.time() - sm['started']) / 60)
                 state.set('running \u00b7 %d ports bound \u00b7 no hits yet '
@@ -22609,16 +29264,17 @@ class EtherApeWindow:
                 _db = getattr(_mon, '_db', None) if _mon else None
             if _db is None:
                 _db = _nm_store()
-            _NM_HONEYPOT = _NMHoneypot(on_hit=on_hit, exclude_ips=excl, db=_db,
+            _NM_HONEYPOT = _nm_hp_make(on_hit=on_hit, exclude_ips=excl, db=_db,
                                        tarpit=_NM_HP_TARPIT['on'])
             bound = _NM_HONEYPOT.start()
             if bound == 0:
                 self._show_error_dialog(
                     'Honeypot could not start',
-                    'No decoy ports could be bound. On Windows some ports may '
-                    'be in use; on Linux ports below 1024 need root.\n\n'
-                    'Run elevated, or the honeypot will use only the high ports '
-                    'it can bind.')
+                    _nm_hp_start_error(_NM_HONEYPOT) + (
+                        '' if isinstance(_NM_HONEYPOT, _NMTpotHoneypot) else
+                        '\n\nOn Windows some ports may be in use; on Linux ports below 1024 need root.'))
+                state.set('stopped')
+                return
             state.set('running')
             refresh()
 
@@ -23104,7 +29760,8 @@ class EtherApeWindow:
             _exc_debug('_open_honeypot')
         # Scheme has to match what the server is actually serving - see
         # _nm_web_scheme's docstring (ssl_cert/ssl_key make it HTTPS-only).
-        url = '%s://localhost:%d/honeypot' % (_nm_web_scheme(getattr(self, '_monitor', None)), port)
+        url = '%s://localhost:%d/%s' % (_nm_web_scheme(getattr(self, '_monitor', None)), port,
+                                         'tpot' if _nm_hp_prefs()['source'] == 'tpot' else 'honeypot')
         import socket as _sk
         try:
             _s = _sk.create_connection(('127.0.0.1', port), timeout=1.5)
@@ -23114,6 +29771,32 @@ class EtherApeWindow:
             return
         if not _nm_open_path(url):
             self._open_honeypot_window()
+
+    def _open_livemap(self):
+        """Open the Live Threat Map web page (Radware's map with this app's traffic on top)."""
+        port = 8765
+        try:
+            port = int(getattr(self, '_monitor', None)
+                       and self._monitor.config.get('web_port', 8765) or 8765)
+        except Exception:
+            _exc_debug('_open_livemap')
+        url = '%s://localhost:%d/livemap' % (_nm_web_scheme(getattr(self, '_monitor', None)), port)
+        import socket as _sk
+        try:
+            _s = _sk.create_connection(('127.0.0.1', port), timeout=1.5)
+            _s.close()
+        except Exception:
+            self._show_error_dialog(
+                'Live threat map unavailable',
+                'Nothing is listening on port %d.\n\n'
+                'The built-in web server starts with the main window - make sure '
+                'the app is fully started, or check the web port in Settings.' % port)
+            return
+        if not _nm_open_path(url):
+            self._show_error_dialog(
+                'Could not open a browser',
+                'The live threat map is running at:\n\n    %s\n\n'
+                'but no browser could be launched automatically.' % url)
 
     def _open_threat_radar(self):
         """Open the threat radar web view - geo-located threats only."""
@@ -24104,6 +30787,7 @@ class _EtherApeGeoWindow:
         _tbtn('⟳  Refresh', self._refresh)
         _tbtn('⊘  Clear Cache', self._clear_cache, '#ff6b6b')
         _tbtn('⊙  Reset Zoom',  self._zoom_reset,  '#6a9ab8')
+        _tbtn('🌐  Live Threat Map', lambda: self._ea._open_livemap(), '#ff9f43')
         self._show_private_var = tk.BooleanVar(value=False)
         self._arcs_var         = tk.BooleanVar(value=True)
         self._labels_var       = tk.BooleanVar(value=True)
@@ -25336,7 +32020,7 @@ class _EtherApeScanWindow:
         def _worker():
             import concurrent.futures as _cf
             try:
-                gw = _nm_default_gateway()
+                gw = _nm_lan_gateway()
                 self._gateway_ip = gw
                 network_cidr, my_ip = _nm_local_subnet()
                 self._my_ip = my_ip or ''
@@ -29699,6 +36383,7 @@ class UserGuideWindow:
             ('bullet', 'Legend — toggle the protocol colour key'),
             ('bullet', '⊕ GEO MAP — open the global geographic map window (uses the sharp NASA night map once '
                        'the 3D globe has downloaded it; zooming in loads a full-resolution crop)'),
+            ('bullet', '\U0001f310 LIVE THREAT MAP (button in the Geo Map window, also on your phone at /livemap) \u2014 Radware\u2019s live threat map shown as a page, with your own traffic and your honeypot visitors drawn on top of it as dots and arcs. Line the layer up once with Calibrate overlay: tick Reference pins and move the sliders until the pins sit on London, New York, Tokyo and Sydney (the setting is remembered in that browser). Radware\u2019s page is theirs, shown as they serve it, and no data from it is read. If their site refuses to be shown inside another page, press App map (the app\u2019s own world map under the same layer) or open Radware\u2019s map in its own tab'),
             ('bullet', '🖧 LAN SCAN — open the live LAN network map (see LAN Scan section below)'),
             ('bullet', '⊛ SPREAD — redistribute nodes into a clean radial layout'),
             ('bullet', '⇉ SANKEY / ◎ RADIAL — switch between the bipartite ribbon layout '
@@ -29841,6 +36526,27 @@ class UserGuideWindow:
 
         'honeypot': [
             ('h1', 'Honeypot'),
+            ('h2', 'The T-Pot window'),
+            ('p',  'The HONEYPOT button now opens the T-Pot window (a page of its own, also on your phone at /tpot). Top row: status (RUNNING / STARTING / STOPPED / DOCKER OFF), Start T-Pot and Stop T-Pot (these work from this PC only), and links to T-Pot\u2019s own portal, Kibana dashboards and live attack map. Then the numbers for the last 24 hours: events per hour, which honeypots were hit, ports probed, passwords and user names tried, commands typed and web paths requested, and a live feed of every event. At the bottom, every T-Pot container with its state. The classic hit list (with Block selected and Auto-block) is one button away.'),
+            ('bullet', 'The app now reads T-Pot by itself in the background, so alerts and phone alerts work without pressing START anywhere. Stop T-Pot in this window and the app stops reading until you start it again.'),
+            ('h2', 'T-Pot in a virtual machine (real visitor addresses)'),
+            ('p',  'Docker Desktop hides who really connected, so the better place for T-Pot is a small Linux virtual machine (VMware Workstation, Debian 13, the T-Pot installer) with a bridged network card. It then has its own address on your network and sees the real source address of every visitor. The T-Pot page has a card called Where T-Pot runs: type the VM\u2019s address (for example 192.168.1.146) and the portal web user and password you chose in the T-Pot installer, then press Connect to the VM.'),
+            ('step', 'Use a web user made just for this app, with its own password (the portal login). Never reuse a Windows or router password'),
+            ('step', 'On the T-Pot page press Connect to the VM. The app checks the address, remembers the VM\u2019s certificate and tests the login. Only then is anything saved'),
+            ('bullet', 'The login is stored protected by Windows (only your Windows user can read it back). It is never shown again, never sent to your phone, and the card only appears when you open the page on this PC'),
+            ('bullet', 'The VM\u2019s certificate is pinned on first connect. If it ever changes (for example after reinstalling T-Pot) the app refuses to send the login and the page says the VM is not answering until you press Connect again'),
+            ('bullet', 'Only addresses on your own network are accepted (a private address or a short local name), never a public host'),
+            ('bullet', 'In VM mode the Start and Stop buttons are hidden (the VM runs T-Pot itself) and sources show their real address. Addresses from your own network are shown but never auto-blocked. Press Use Docker on this PC to go back'),
+            ('bullet', 'Reserve a fixed address for the VM on the router (its network card address is 00:50:56:2A:7E:10), and do not port-forward T-Pot'),
+            ('h2', 'T-Pot now does the catching'),
+            ('p',  'The Honeypot window no longer opens decoy ports of its own. T-Pot (20+ honeypots running in Docker, in C:\\tpotce-master) catches the visitors, and this window reads what it caught: every event shows up as a row, on the threat radar, in the alerts and on your phone, and Auto-block still works. Press START to connect to T-Pot. If T-Pot is not running the window tells you how to start it.'),
+            ('step', 'One time: run tpot_make_login.ps1 in C:\\tpotce-master and choose a web user name and password (for T-Pot\u2019s own portal)'),
+            ('step', 'Start T-Pot with tpot_start.ps1 (it starts Docker Desktop first). Give it one to three minutes, check with tpot_status.ps1, stop it with tpot_stop.ps1'),
+            ('step', 'Press START in this window. Events from the last hour appear, then new ones every few seconds'),
+            ('bullet', 'T-Pot\u2019s own pages are local to this PC: all of it through the portal at https://127.0.0.1:64297 (log in with the name you chose), Kibana at https://127.0.0.1:64297/kibana/, the attack map at https://127.0.0.1:64297/map/ (the browser warns about the certificate: it is T-Pot\u2019s own, continue anyway)'),
+            ('bullet', 'Limit of running T-Pot in Docker Desktop on Windows: Docker hides who really connected. Every visit is recorded as coming from one of Docker\u2019s own internal addresses (172.x.x.x or 192.168.x.1), shown as "via Docker". So you see WHAT was probed (service, port, passwords tried, commands, URLs) and WHEN, but not the real source address. Those rows are never auto-blocked (that would cut Docker off, not the attacker) and have no map position. To see real source addresses, run T-Pot on a Linux machine or a bridged Linux VM and point this window at it'),
+            ('bullet', 'T-Pot opens many decoy ports on this PC. Do NOT port-forward them on the router. Three were moved because this PC already uses them: fake RDP is on 13389, fake WordPress on 8081, and Windows RPC (135) is not decoyed'),
+            ('bullet', 'To go back to the old built-in decoy ports, put {"source": "builtin"} in honeypot_prefs.json (in the app\u2019s data folder) \u2014 the sections below describe those built-in decoys. The receiver boards\u2019 own decoy ports are unchanged'),
             ('p',  'The \U0001f36f HONEYPOT button opens a low-interaction honeypot: it binds a set '
                    'of decoy ports on this machine and records everyone who connects. There is no '
                    'real service behind any port, so a connection is almost always a scan or an '
@@ -29922,6 +36628,7 @@ class UserGuideWindow:
             ('bullet', 'Hosts with no geolocation park on the inner ring \u2014 visible, '
                        'but clearly not located'),
             ('bullet', 'Hover any blip for city, ISP and what it did'),
+            ('bullet', 'A visitor on your own network (for example a test from another PC, 192.168.x.x) has no place in the world, so it is plotted on your home pin and labelled Your network (LAN). Set your exact home position in the file .nm_home_location in your user folder (latitude, longitude) if the pin is in the wrong place. Docker\u2019s own gateway address is not a visitor and is not plotted.'),
             ('h2', 'Controls'),
             ('bullet', '\U0001f30d MAP toggles the world-map backdrop'),
             ('bullet', '\u25d8 SWEEP toggles the rotating sweep'),
@@ -30418,6 +37125,9 @@ class UserGuideWindow:
             ('bullet', 'Setup: pick a receiver for each floor in the Floor Detection window and press Connect. A floor’s receiver can be on USB (choose its COM port) or on Wi-Fi (press "Find Wi-Fi boards" and choose its 192.168.x.x address). Both floors can be wireless — each is told apart by its board address — so neither board needs a cable to the PC. The board can be a Heltec ESP32-S3 (Wi-Fi LoRa 32 V3); the receiver firmware runs on it unchanged.'),
             ('bullet', 'Calibrate once: (1) "Learn empty room" with the house still for 20 s, then (2) walk upstairs for 25 s and (3) walk downstairs for 25 s. The app learns how each floor splits the two links, because every house splits them differently.'),
             ('bullet', 'After that the two floor plans show which floor moved (red frame, plus a red zone along that floor\'s board-to-board link once you have marked the Tx and Rx spots), the strip above them reads UPSTAIRS, DOWNSTAIRS, BOTH FLOORS or QUIET, and (if the tick is on) a phone alert names the floor that moved. Before calibration it still shows a best-guess floor, marked "uncalibrated".'),
+            ('bullet', 'To narrow it from a floor to a place, use "Teach a place" under the plans: name a spot, click it on the plan and stand or walk slowly there for 15 s. Do this for a few spots on each floor. Live movement is then matched to the closest taught place and shown on the plan, in the strip and in the phone alert. The app reports how well it can tell your spots apart after each teach.'),
+            ('bullet', 'History: "Weekly history…" opens a slider for each floor covering the last 7 days (see What\'s New). Keep "Keep recording the weekly history in the background" ticked so it fills in while the window is closed.'),
+            ('bullet', 'On your phone: the /csi page shows this window too (plans, verdict, calibration steps, weekly history sliders). See What\'s New.'),
             ('bullet', 'Both receivers must be on the same 2.4 GHz channel as the transmitter (one transmitter can only sit on one channel). A USB receiver uses its set channel; a Wi-Fi receiver uses the channel of the router/disc it joins — if a floor reads "no data" while the other works, that is almost always a channel mismatch.'),
             ('bullet', 'The Floor window shares the downstairs board with "Keep watching" and the CSI tab, so they can all run at the same time — you no longer have to disconnect one to use the other.'),
             ('h2', 'Networks tab'),
@@ -30478,7 +37188,7 @@ class UserGuideWindow:
                        'Default 921600 baud. Close any other program using that port first.'),
             ('bullet', 'Breathing level and saved calibration — the box next to the breathing readout picks Normal, High (default) or Maximum. Higher levels listen for 60 s and accept weaker rhythms, so they find fainter breathing but can occasionally show a wrong rate; they need you to sit or lie still within a couple of metres of the line between the boards. The empty-room calibration is now remembered for each board across restarts; press Clear calibration (and calibrate again) after you move a board or the furniture. Save raw (60 s) writes the last minute of raw data to a file so a real capture can be examined.'),
             ('bullet', 'Keep watching with this board — tick it in the CSI tab (with the receiver\'s port chosen) and the boards feed the same away-mode alerts and Activity history as your PC\'s Wi-Fi card: movement near the boards becomes a MOVEMENT event ("ESP32 boards: movement detected"), raises a real alert while Away mode is on (at most one every 5 minutes) and adds to the day-by-hour heatmap. It keeps running with the Wi-Fi window closed. While the tab itself is connected to that board the tab does the reading and the calibration carries over. If the board goes silent for 90 s you get one event saying why. The simulated demo never triggers anything. It cannot tell people from pets or a fan, and it only sees movement near the line between the two boards.'),
-            ('bullet', 'Flash ESP32… — the button in the CSI tab sets up a new board without editing any files: plug in ONLY that board, press the button, type the Wi-Fi name (capitals matter) and password, and press Flash. Choose Receiver for the board that joins your Wi-Fi, Transmitter for the other one. The channel no longer has to match: the receiver sends a small beacon and the transmitter searches the channels for it and follows it, so a router or Wi-Fi disc changing channel no longer breaks the pair (both boards need flashing once with this version). Needs PlatformIO on this PC (python -m pip install platformio). If it says it cannot connect, hold the board\'s BOOT button while it starts writing. The password is used only to build that board and is not saved.'),
+            ('bullet', 'Flash ESP32… — the button in the CSI tab sets up a new board without editing any files: plug in ONLY that board, press the button, type the Wi-Fi name (capitals matter) and password, and press Flash. Choose Receiver for the board that joins your Wi-Fi, Transmitter for the other one, and give both of a floor\'s boards the same floor number. It works out whether the board is a classic ESP32 or an ESP32-S3 (Heltec V3) by itself. The channel no longer has to match: the receiver sends a small beacon and the transmitter searches the channels for it and follows it, so a router or Wi-Fi disc changing channel no longer breaks the pair (both boards need flashing once with this version). Needs PlatformIO on this PC (python -m pip install platformio). If it says it cannot connect, hold the board\'s BOOT button while it starts writing. The password is used only to build that board and is not saved.'),
             ('bullet', 'Receiver over Wi-Fi — if the receiver cannot be next to this PC, set it up with the Flash ESP32… button (no file editing), or put your Wi-Fi name and '
                        'password in its csi_config.h yourself, re-flash it, plug it into any phone charger where you want it, '
                        'and choose the "wifi" entry at the end of the list. The board announces itself on your '
@@ -30515,19 +37225,87 @@ class UserGuideWindow:
                        'the boards really send. Copy board messages — the board\'s own boot and error text.'),
             ('bullet', 'Try demo (simulated) — a made-up room so you can see the tab working without hardware. It is '
                        'labelled SIMULATED and is never real data.'),
+            ('bullet', 'On your phone or another computer: the /csi page (phone dashboard menu, MONITOR group, "CSI Sensing") shows this '
+                       'whole tab: heat map, movement level, signal shape, breathing, calibration and the recorded history you can scrub '
+                       'and play back, plus the floors. See What\'s New for what it can and cannot change.'),
             ('tip', 'If nothing arrives, the tab says what it can tell: wrong port or baud, board not running '
                     'csi_recv, or the transmitter off. A charge-only USB cable shows no port at all.'),
+            ('tip', 'LD14P lidars (separate boards) are not part of the CSI tab: see the Lidar window / page and What\'s New.'),
             ('tip', 'The firmware source for the two boards, with a build-and-flash script, is in the esp32_csi '
                     'folder of the project (not part of the installed app). Attach the antenna to a board before '
                     'powering it.'),
         ],
 
         'whatsnew': [
+            ('h2', 'Ollama no longer gets uninstalled by its own update'),
+            ('bullet', 'The app now launches Ollama through its tray app instead of a loose server, so Ollama\u2019s updater can replace its files. A held-open server made its installer fail, roll back and uninstall Ollama.'),
+            ('h2', 'Visitors on your own network now appear on the map'),
+            ('bullet', 'A honeypot hit from another PC on your network (for example an SSH test) used to be counted but never drawn, because home-network addresses have no location. It is now plotted on your home pin on the Threat Radar and the Live Threat Map, labelled Your network (LAN).'),
             ('h1', 'What\'s New'),
             ('p',  'The recent changes in one place, newest first.'),
+            ('h2', 'Deploy a T-Pot VM on this PC'),
+            ('bullet', 'The T-Pot page has a card, Deploy a T-Pot virtual machine on this PC (shown only on the PC itself). It finds VMware Workstation or VirtualBox, downloads the current Debian installer from cdimage.debian.org and checks its checksum, makes a copy of the install disc that installs itself with your answers, creates the VM, starts it, waits while Debian and then T-Pot install, and finally connects NetSentinel to the VM. Nothing is typed in the VM.'),
+            ('bullet', 'You choose two logins in the card: a user name and password for the VM itself, and a different web user name and password for the T-Pot portal. The VM password is stored only as a hash inside the VM, the portal login is kept in a root-only file that the VM deletes once T-Pot is installed, and the copy of the install disc is ejected and deleted at the end.'),
+            ('bullet', 'Needs about 16 GB of memory in the PC (the VM gets 8 to 16 GB), at least 40 GB of free disk and an internet connection. It downloads about 0.8 GB for Debian and about 3 GB of T-Pot containers, and takes 45 to 90 minutes. You can leave the page; progress stays on it. At the end reserve the VM\u2019s address on your router (the card shows the address and the VM\u2019s MAC) and do not port-forward anything to it.'),
+            ('h2', 'Live Threat Map'),
+            ('bullet', 'New page /livemap (and a Live Threat Map button in the Geo Map window): Radware\u2019s live threat map with your traffic, threats and honeypot visitors drawn on top. Calibrate overlay lines the layer up with their map; App map is the fallback if their site will not be shown inside another page.'),
+            ('h2', 'Deploy a T-Pot VM with one button'),
+            ('bullet', 'The T-Pot page can now build and install a T-Pot virtual machine by itself in VMware Workstation or VirtualBox (Deploy a T-Pot virtual machine on this PC) and connect to it, so another person can use the honeypot on their own PC. See the Honeypot page of this guide.'),
+            ('h2', 'T-Pot can run in a virtual machine'),
+            ('bullet', 'The T-Pot page has a new card, Where T-Pot runs. Enter the address of a T-Pot VM and its portal login and the app reads from there instead of Docker, so visitors show their real addresses. The login is stored protected, the certificate is pinned, and Use Docker on this PC switches back.'),
+            ('h2', 'T-Pot replaces the built-in honeypot'),
+            ('bullet', 'The Honeypot window now reads attacks from T-Pot (about 20 honeypots in Docker, set up in C:\\tpotce-master) instead of opening decoy ports on this PC. The radar, alerts, phone alerts and auto-block use T-Pot\u2019s events. See the Honeypot page of this guide for the start-up steps. The old built-in decoys remain available as a fallback.'),
+            ('h2', 'Wi-Fi receivers are found again when the router gives them a new address'),
+            ('bullet', 'In Floor Detection each floor\'s receiver is chosen by its network address (192.168.x.x). A router can hand a board a different address after a restart or a power cut, and then the app listened to an address nobody was using: that floor read "no data" while the board was fine, until you picked it again. The app now learns each receiver\'s hardware (MAC) address the first time it sees it working, and if the board comes back under a new address it follows it by itself and updates the saved choice. It only follows a board whose hardware address matches, so the other floor\'s receiver is never taken by mistake.'),
+            ('bullet', 'A receiver can only be followed once it has been seen working with this version: open Floor Detection, press Find Wi-Fi boards, pick each floor\'s receiver and Connect once. After that the address no longer matters. If a floor still says "no data", the hint under the link line now says which address it is waiting on.'),
+            ('bullet', 'Belt and braces: ask the router to always give each receiver the same address (on an EE Smart Hub: open 192.168.1.254, Advanced settings, the Advanced LAN / address table, open the board and turn on "Always use this IP address"). Then the address never changes at all. The labels differ a little between hub models.'),
+            ('h2', 'Boards that restart themselves when they get stuck (no more morning resets)'),
+            ('bullet', 'Some boards had to be unplugged and plugged back in most mornings because they showed offline. The records showed the app staying up while the boards went quiet, so the boards themselves were getting stuck (the Wi-Fi address taken back by the router, or the radio or a task hanging), and only a power cycle brought them back. The new receiver and transmitter firmware has a guardian that checks every 2 seconds and restarts the board by itself: the receiver after 3 minutes with no Wi-Fi address, when its network task is stuck, when it cannot send to the app, or after 5 minutes of hearing nothing from its transmitter; the transmitter when it stops sending, when its radio refuses to send, or after 10 minutes without finding the receiver. If it keeps happening the waits double (up to 16 times as long), so a board whose partner is simply switched off does not restart every few minutes. Restarts only happen in Wi-Fi mode; with the USB cable the board is left alone.'),
+            ('bullet', 'To see what happened: the screen now shows how long the board has been running (top line, for example "VANGUARD 3H12M") and what caused its last start (second line, for example "NETSENTINEL WIFI"). PWR = power on, BRN = weak power supply, PAN = crash, WDT = watchdog, EXT = reset button, WIFI / DATA / HUNG / UDP / LONG = the board restarted itself (no Wi-Fi address / nothing heard from the other board / a task got stuck / could not send to the app / never found the receiver). The receiver also tells the app in the "board messages", for example "this start was caused by: no Wi-Fi address for too long; self-restarts since power on: 2". To get this you must flash both boards again with Flash ESP32… (the CSI tab); nothing changes until you do.'),
+            ('h2', 'Devices map: the connection lines come back when a VPN is on'),
+            ('bullet', 'The lines from your router to every device on the Devices map (and the router marked as the router in the network scan) disappeared whenever a VPN such as NordVPN, Tailscale or WireGuard was connected. The app asked Windows for "the" default gateway and took the first one listed, which was the VPN\'s own address (for example 10.5.0.1), not a device on your network, so it never found your router and drew no lines. It now skips VPN adapters and uses your real router. The "Gateway" ping in the latency panel uses the same fix, so it measures your router and not the VPN.'),
+            ('h2', 'Lidar demo: a whole pretend floor, better graphics'),
+            ('bullet', '"Try it without a lidar" (Demo) now builds a pretend copy of your whole downstairs floor: the walls are traced from your floor-plan picture (or, with no picture, a made-up house with rooms, doors and furniture), and the app places as many pretend lidars as it takes to see nearly all of it (usually 2 to 5, each in its own colour). Three pretend people walk from room to room through every part of the floor, stopping now and then. The first few seconds are left empty so the lidars learn the bare floor, exactly as the real ones will.'),
+            ('bullet', 'The live view was redrawn on the PC and on the phone: glowing wall outlines joined up into continuous lines, a tinted area for what each lidar can see (brighter where two overlap), 2/4/6/8 m range rings, a scale bar, and glowing people with heading arrows, fading trails and name tags. On the phone page a radar sweep turns on each live lidar (switched off if your phone is set to reduce motion). "Floor seen by lidars" shows what share of the floor the lidars together can see, a good check on where to put the real ones. The word DEMO is faintly marked on the picture so it is never mistaken for a real reading.'),
+            ('h2', 'Flash ESP32… now sets up the ESP32-S3 (Heltec V3) boards too'),
+            ('bullet', 'Flash ESP32… used to build only for a classic ESP32 board, so a Heltec WiFi LoRa 32 V3 (an ESP32-S3) stopped with "This chip is ESP32-S3, not ESP32". It now reads the chip on the USB port first and builds the right firmware by itself: classic ESP32, or the S3 build that also draws the status screen and shows the battery. If it cannot read the chip it tries the classic build and switches to the S3 build the moment the board says what it is. Nothing to choose.'),
+            ('bullet', 'New "Floor (transmitter number)" box: pick 1 — Downstairs or 2 — Upstairs. Flash a floor\'s transmitter and that floor\'s receiver with the same number, so a receiver only listens to the transmitter with its number and two floors do not mix. The boards no longer need the same Wi-Fi channel; the transmitter finds the receiver by itself.'),
+            ('bullet', 'If a board does not answer, hold its BOOT button (on the Heltec: hold PRG, tap RST, let go of PRG) and press Flash again. The Wi-Fi password is used only to build that board and is not saved. There is still no over-the-air flashing.'),
+            ('h2', 'LD14P lidars: a room map, where people are, and an intruder alert'),
+            ('bullet', 'You can now plug a couple of LD14P 360-degree lidars into the system. Each lidar is wired to its own ESP32 board (firmware in the esp32_csi folder: lidar_node, with set_lidar_wifi.ps1 and flash_lidar.ps1), and the board sends the lidar\'s scan to this PC over your Wi-Fi (UDP port 4220). Nothing is plugged into the PC. The wiring and the firmware are written from the maker\'s documentation and have not yet been run on a real lidar, so check the pins against your lidar\'s label before powering it.'),
+            ('bullet', 'Where to find it: the LIDAR button in the left rail, or the "Lidar…" button in the Wi-Fi window (the tick beside it, "Listen for LD14P lidars", makes the app listen all the time, even with the window closed). On your phone: http://<this PC>:8765/lidar (dashboard menu, MONITOR group, "Lidar"). The window and the phone page show the same things.'),
+            ('bullet', 'Live view and room map: the floor plan with each lidar\'s outline of the empty room (what it measured when nothing was in it), what it sees right now (red dots are something that was not there when it learned the room), and a circle for each person, red while they move, with the taught place they are nearest ("downstairs, near Kitchen"). "Try it without a lidar" (Demo) shows all of this with pretend lidars covering your whole floor and people walking about, so you can see what to expect before the hardware arrives.'),
+            ('bullet', 'Setting up a lidar: it appears in the list by itself once its board is on the Wi-Fi. Place it on the plan ("Place by clicking" on the PC, "Place by tapping" on the phone, then the arrows and turn buttons until its outline lines up with your walls; untick "Scan turns clockwise" if the outline looks like a mirror image). With nobody in the room press "Learn empty room" (15 seconds). If you do not trust where you put the second lidar, "Pair by walking": place the first one, then walk slowly back and forth through the area both can see, and the app works out where the second one is from your path.'),
+            ('bullet', 'Two lidars on the same floor are combined: a person both can see is one circle, not two, and the position is more accurate (and survives furniture hiding someone from one of them). Things bigger than a person (a swinging door) are noticed as movement but not counted as people.'),
+            ('bullet', 'Intruder alert: when a person appears the app logs "Lidar: a person appeared …" and, depending on "Alert when a person appears" (When I am away / Always / Never; default away, the same Away rule as the other movement alerts), sends a phone alert. It says when a lidar goes quiet for a minute, and when it is back. The night alarm (01:00 to 03:00) also listens to the lidars: sustained walking about in that window sounds the klaxon.'),
+            ('bullet', 'Limits: the lidar sees shapes, not who they are. It sees only one height (mount it about waist high and flat), glass and mirrors fool it, and someone standing very still is still counted but not "moving". If you move furniture, press "Learn empty room" again (things taken away are picked up by themselves after a couple of seconds). Changing placement or learning from another device needs "Allow switching off from other devices" ticked on the PC, the same rule as the CSI calibration.'),
+            ('h2', 'Night alarm: a klaxon when something moves between 1 am and 3 am'),
+            ('bullet', 'New row in the Wi-Fi window (under "Let other devices\u2026"): "Night alarm: sound a klaxon on sustained movement between 01:00 and 03:00". It is on by default. If the boards (or the two floor links) see sustained movement in that window, the PC plays a loud klaxon on a loop, a topmost "NIGHT ALARM" box appears (click OK to silence it), and a critical phone alert is sent whether or not Away mode is on. The times are 24-hour and can be changed (a window that crosses midnight, such as 22:00 to 06:00, works too). It stops by itself after 2 minutes and then waits 2 minutes before it can sound again.'),
+            ('bullet', '"Sustained" means movement in at least 8 different seconds of the last 20 (Low sensitivity: 14, High: 4), so a twitch, a fan or one noisy reading never sets it off but a person walking about does. It uses the receiver board and the floor links, not the PC\'s Wi-Fi card. "Test klaxon" plays it for 3 seconds so you can check the speakers; "Silence" stops it. The app never changes the PC\'s volume: if the speakers are muted or off the alarm is silent (the phone alert still goes out), so test it once.'),
+            ('bullet', 'It can only sound while something is reading the boards: tick "Keep watching with this board" in the CSI tab, or let the Floor window\'s weekly history record in the background, and keep the app running (it starts with Windows if you set that). The same switch, a red banner with a Silence button and a Test button are on the /csi page. Silencing or switching it off from another device needs "Allow switching off from other devices" ticked on the PC, so a stranger on your Wi-Fi cannot silence it; switching it on is allowed from anywhere. If you are up at night yourself, untick it or move the window, because your own movement counts.'),
+            ('h2', 'The whole CSI tab, Floor Detection and the weekly history now work on your phone'),
+            ('bullet', 'New page at http://<this PC>:8765/csi (phone dashboard menu, MONITOR group, "CSI Sensing"; also a link at the top of the Wi-Fi & Boards page). It has everything the CSI tab shows: a feed picker (the board, the downstairs link, the upstairs link), the live heat map of what is changing by channel group over the last minute, the movement level with its threshold, the signal shape against the empty room, the breathing spectrum and the movement / room / breathing chips.'),
+            ('bullet', 'Board history: the same week of recordings as the CSI tab, as a graph you tap to look at that moment. "Earlier movement" and "Later movement" hop between events, plus minus 10 s and 1 min, Play at 1x / 4x / 16x, and a blue banner reminds you that you are looking at the past until you press "Back to live". It fills in even with the CSI tab closed, as long as "Keep watching with this board" is on, and it is shared with the CSI tab (same history file).'),
+            ('bullet', 'Floors: both floor plans with the Tx / Rx marks, the red zone while a floor is disturbed, the places you taught, the verdict chip (for example "DOWNSTAIRS \u00b7 near Kitchen"), packets per second, battery lines and the three calibration steps. The Weekly history section has a slider for each floor (tick "Move both sliders together" to compare), a timeline of the week, and the plan showing what was happening at that moment.'),
+            ('bullet', 'Safety: any device on your Wi-Fi can look. Starting a calibration or clearing it from another device needs "Allow switching off from other devices" ticked on the PC (Wi-Fi window, Controls), the same rule as the other switches; the PC itself can always do it. The page can also switch on "Keep watching with the board" and "Keep recording the weekly floor history". Still PC-only: flashing and picking boards, copy / save raw data, marking boards, and Teach a place. The breathing analysis for a background board only runs while the page is open, to save CPU.'),
+            ('h2', 'Floor history: a week of movement, with a slider for each floor'),
+            ('bullet', 'The Floor window has a new "Weekly history…" button (top right). It opens a window with both floors side by side: the plan, a timeline of the last 7 days underneath (red = movement, hatched = the app was not watching) and a slider for each floor. Drag a slider back in time and that floor\'s plan shows what was happening then: a red frame and red zone for movement, and the place you taught it lights up if it was recognised. Click the timeline to jump to a time, use "Earlier movement" / "Later movement" to hop between bursts, and tick "Move both sliders together" to compare the floors at the same moment.'),
+            ('bullet', 'To have a whole week, the app has to keep watching with the Floor window closed. The first time you press Connect in the Floor window it now switches on "Keep recording the weekly history in the background" (untick it any time). The app then connects to both boards by itself using the receivers you picked, restores your saved calibration and taught places, and records one-minute summaries per floor: seconds of movement, peak strength and the place. It needs no window, starts with the app and keeps only 7 days (about a few hundred kB).'),
+            ('bullet', 'Your calibration is now remembered between runs too, so you no longer have to learn the empty room and walk both floors every time you reopen the app. While the Floor window is connected it takes over from the background recorder (a USB receiver can only be opened once) and hands the boards back when you disconnect. Gaps appear hatched when the PC was off, asleep or a board was unplugged. History is only as good as the detection behind it: it shows what the app concluded at the time.'),
+            ('h2', 'Floor Detection can now say WHERE, using places you teach it'),
+            ('bullet', 'Under the floor plans there is a new "Teach a place" row. Type a name (for example Kitchen), press Teach, click that spot on the plan, then stand there or walk slowly around it for 15 seconds. The app records what the signal looks like when someone is there, across both links. Teach every spot you care about (a few per floor works best, a metre or more apart).'),
+            ('bullet', 'After that, while movement is detected, the app compares what it sees with every place you taught on the floor that moved and picks the closest. The matching spot lights up orange on the plan with a ring, the big strip reads for example "DOWNSTAIRS · near Kitchen", and the phone alert says "near Kitchen". The place stays shown for 8 seconds after the movement stops. If the movement does not look like any taught place it shows nothing rather than guess.'),
+            ('bullet', 'Be realistic: this is a nearest-match against places you taught it, not a tracker. It can only answer with those places, rooms that look alike to the signal can be confused, and moving large furniture or the boards can spoil it. After each teach the app checks itself honestly (it trains on half of each capture and tests on the other half) and tells you what percentage it got right and which two spots it mixed up. A low figure means teach the spots further apart or retake them. Learn the empty room first, and re-teach places if you move a board. "Forget" removes the chosen place, "Forget all" removes every place.'),
+            ('h2', 'Boards now say what they are, and each floor has its own transmitter'),
+            ('bullet', 'Every Heltec board\'s little screen now shows VANGUARD / NETSENTINEL and its role: RECEIVER (with the transmitter ID it listens to, e.g. "RECEIVER  TX 02" plus the link state) or TRANSMITTER (with its ID, the channel it found and "SENDING 100/S", or "SEARCHING..." while it looks for its receiver). The older plain ESP32 boards have no screen, so they show nothing.'),
+            ('bullet', 'Each floor now has its own transmitter ID so the floors cannot be confused whatever channel the router picks: downstairs uses transmitter 01 and its receiver, upstairs uses transmitter 02 (the new Heltec) and the upstairs receiver. A receiver ignores every transmitter except its own, so each floor\'s reading comes only from its own link. Re-run "Learn empty room" and walk each floor once after moving or re-flashing boards.'),
+            ('bullet', 'Battery gauge for the Heltec boards. Each one measures its own battery and shows it on its screen (receiver: RXBAT and TXBAT lines, transmitter: BAT, as percent and volts). The transmitter sends its level to the receiver inside its packets and the receiver passes both to the app, so the Floor window now shows "Upstairs boards: receiver 87% (4.05 V) · transmitter 85% (4.02 V)" under the link lines. When either board falls to 20% (or 10%) you get a phone alert telling you which one to charge; the alert repeats at most every 6 hours (hourly under 10%). The percentage is a rough guide from the cell voltage, and a board on charge reads a little high. A board with no battery fitted says "no battery", and the plain ESP32 boards have no gauge at all, so they show "no reading". Re-flash a Heltec board over USB to add this to it. A flat battery makes a Wi-Fi board drop off the network at random, so keep both upstairs boards on a USB charger.'),
             ('h2', 'Floor Detection now shows the floors, not just a word'),
             ('bullet', 'The Floor window shows your Downstairs and Upstairs floor-plan heat maps side by side (the ones from the Wi-Fi Signal survey, router marker included). When movement is attributed to a floor, that floor\'s panel gets a thick red frame and a "MOVEMENT" banner, so you can see it from across the room.'),
             ('bullet', 'Press "Downstairs Tx / Rx" and "Upstairs Tx / Rx" under the plans, then click where each board sits. After that, a red zone is drawn along the line between that floor\'s transmitter and receiver while it is disturbed. Be aware this is a rough plot: one transmitter-to-receiver link can say "something moved along this path", not exactly where on it. Without board marks the whole floor tints red instead.'),
+            ('bullet', 'When you press one of the Tx / Rx buttons it turns yellow, the cursor becomes a crosshair and a yellow line under the buttons tells you which plan to click. "Clear marks" removes them and "Reload plans" re-reads the plans and survey from the Wi-Fi Signal window.'),
+            ('h2', 'A new look for the installer'),
+            ('bullet', 'Setup now draws a full-screen artwork backdrop behind its window, with matching panels on the Welcome / Finish pages and the header strip. It is purely cosmetic: the same components and options as before.'),
             ('h2', 'Devices: a live 3D map of everything on your network'),
             ('bullet', 'The Devices tab (Monitor → Devices) is now a 3D isometric map instead of a plain list. Your router sits at the top with every device below it, colour-coded by what it is: EE gear (cyan), your ESP / NetSentinel boards (green), cameras and smart-home kit (purple), computers (amber) and phones (teal). It refreshes itself every few seconds, so a device that joins the network appears and one that leaves drops off — no button to press. Only devices online right now are shown (network noise like multicast addresses is filtered out); tick "Show offline / history" to also see everything the app has ever seen, faded.'),
             ('bullet', 'Click any device for the full picture: IP, MAC, vendor, best-guess type, online status, when it was first and last seen, and — with "Scan ports" — its open ports. "Rename" gives it a friendly name used everywhere the app shows that address. The type is a best-effort guess from the MAC maker and open ports, never a claim of fact.'),
@@ -30592,6 +37370,7 @@ class UserGuideWindow:
         'trouble': [
             ('h1', 'Troubleshooting'),
             ('h2', 'Gauges stuck at zero / no data'),
+            ('bullet', 'One floor says "no data" while the other works (Floor Detection) — the router may have given that floor\'s receiver a new address. Press Find Wi-Fi boards, pick the receiver again and Connect once; after that the app follows the board if its address changes.'),
             ('bullet', 'Check the console window for error messages from the background test thread'),
             ('bullet', 'Verify speedtest.exe path in Settings — click Test to confirm it runs'),
             ('bullet', 'Ensure speedtest.exe has internet access (try running it manually)'),
@@ -30613,6 +37392,7 @@ class UserGuideWindow:
             ('h2', 'AI Query returns an error'),
             ('bullet', 'AI runs locally via Ollama by default — no API key needed. Install Ollama from ollama.com and pull a model (default is deepseek-r1:7b — ollama pull deepseek-r1:7b — or a faster non-reasoning model like llama3.2)'),
             ('bullet', 'The app starts Ollama automatically on launch; if that fails, run "ollama serve" manually, and make sure the model name matches one from "ollama list"'),
+            ('bullet', 'On Windows the app now starts Ollama through its own tray app (the same way Windows does at sign-in), so Ollama owns its server and its updater can stop it. Before, the app started a loose "ollama serve" that Ollama could not stop; an Ollama update then failed with "file in use" and its installer rolled back and uninstalled Ollama. If Ollama has already gone, run the NetSentinel installer again (it reinstalls Ollama) or install it from ollama.com.'),
             ('bullet', '"Has no model" errors name the Ollama endpoint actually being asked, the build, and what that endpoint has installed — if the named model IS in that installed list, this app already retries once with Ollama\'s own exact name before giving up, so a genuine recurrence points at Ollama itself rather than a typo or stale setting'),
             ('bullet', '"Ollama is broken, not missing a model" / "llama-server.exe" errors mean Ollama\'s own inference engine binary has gone missing from its install — re-pulling the model will not fix this. The most common cause on Windows is an antivirus (Windows Defender included) quarantining llama-server.exe, since it is a large, unsigned native binary; check your antivirus\'s quarantine history and restore or exclude it, or failing that uninstall and reinstall Ollama fresh'),
             ('bullet', 'Only if you switch the provider to Anthropic: check your API key and that the machine has outbound HTTPS access to api.anthropic.com'),
@@ -31627,6 +38407,58 @@ def _nm_default_gateway():
     return ''
 
 
+_NM_VPN_IFACE = r'nord|vpn|\btap\b|\btun\d|wireguard|wintun|tailscale|zerotier|openvpn|\bwg\d|proton|mullvad|express|anyconnect|hamachi|\bppp|\bzt'
+
+
+def _nm_parse_lan_gateway(text, windows=True):
+    """The router's address from `ipconfig` (Windows) or `ip route` (Linux) output, skipping VPN adapters. With a VPN on
+    (NordVPN, Tailscale, WireGuard...) the first 'Default Gateway' listed can be the VPN's own address, which is not
+    a device on the LAN, so the Devices map found no router and drew no connection lines. '' if nothing usable."""
+    import re
+    rx_ip = r'(\d{1,3}(?:\.\d{1,3}){3})'
+    vpn = re.compile(_NM_VPN_IFACE, re.I)
+    found = []
+    if windows:
+        name, field = '', False
+        for ln in text.splitlines():
+            if ln and not ln[0].isspace():
+                name, field = ln.strip().rstrip(':'), False
+                continue
+            if re.search(r'Default Gateway', ln):
+                field = True
+            elif re.match(r'\s*[A-Za-z]', ln):
+                field = False
+            if field:
+                for m in re.finditer(r'(?<![\d.])' + rx_ip + r'(?![\d.])', ln.split(':', 1)[-1] if 'Default Gateway' in ln else ln):
+                    found.append((name, m.group(1)))
+    else:
+        for ln in text.splitlines():
+            m = re.search(r'default via ' + rx_ip + r'(?: dev (\S+))?', ln)
+            if m:
+                found.append((m.group(2) or '', m.group(1)))
+    for name, ip in found:
+        if not vpn.search(name) and not ip.startswith('0.'):
+            return ip
+    return ''
+
+
+def _nm_lan_gateway():
+    """The home router's address, even with a VPN connected (see _nm_parse_lan_gateway); falls back to the plain default."""
+    import subprocess, os
+    try:
+        if os.name == 'nt':
+            out = subprocess.run(['ipconfig'], capture_output=True, text=True, timeout=8).stdout
+            g = _nm_parse_lan_gateway(out, True)
+        else:
+            out = subprocess.run(['ip', 'route'], capture_output=True, text=True, timeout=8).stdout
+            g = _nm_parse_lan_gateway(out, False)
+        if g:
+            return g
+    except Exception:
+        _exc_debug('_nm_lan_gateway')
+    return _nm_default_gateway()
+
+
 def _nm_ping(host, count=5):
     """Return (rtt_ms, loss_pct, jitter_ms). rtt is None if unreachable."""
     import subprocess, os, re
@@ -31656,7 +38488,7 @@ def _nm_ping(host, count=5):
 
 def _nm_latency_targets(monitor):
     tgts = []
-    gw = _nm_default_gateway()
+    gw = _nm_lan_gateway()
     if gw: tgts.append(('Gateway', gw))
     tgts.append(('Cloudflare', '1.1.1.1'))
     tgts.append(('Google DNS', '8.8.8.8'))
@@ -33229,6 +40061,19 @@ def _nm_ensure_model(base, exe=None):
         log.info('[ollama] keeping user-selected model %r', current)
 
 
+def _nm_ollama_tray_exe(exe):
+    """Ollama's tray app ('ollama app.exe', the one Windows starts at sign-in) next to the given ollama.exe, or None.
+    Windows only: elsewhere Ollama is started with `ollama serve`."""
+    import os
+    try:
+        if os.name != 'nt' or not exe:
+            return None
+        t = os.path.join(os.path.dirname(os.path.abspath(exe)), 'ollama app.exe')
+        return t if os.path.isfile(t) else None
+    except Exception:
+        return None
+
+
 def _nm_ensure_ollama():
     """Best-effort: if the AI provider is local Ollama and its server isn't
     already listening, launch `ollama serve` in the background so the app's AI
@@ -33277,8 +40122,16 @@ def _nm_ensure_ollama():
                                    getattr(subprocess, 'DETACHED_PROCESS', 0))
         else:
             kw['start_new_session'] = True
-        subprocess.Popen([exe, 'serve'], **kw)
-        log.info('[ollama] launched `ollama serve`')
+        tray = _nm_ollama_tray_exe(exe)
+        if tray:
+            # Start it the way Windows does at sign-in: through Ollama's own tray app, which then owns the server. A
+            # loose `ollama serve` started from here is not Ollama's to stop, so its updater could not replace
+            # ollama.exe ("in use"), its installer rolled back and uninstalled Ollama.
+            subprocess.Popen([tray], **kw)
+            log.info('[ollama] launched Ollama through its tray app (%s)', tray)
+        else:
+            subprocess.Popen([exe, 'serve'], **kw)
+            log.info('[ollama] launched `ollama serve`')
     except Exception:
         _exc('[ollama] auto-start')
         return
@@ -33566,7 +40419,7 @@ class MonitorWindow:
         self._dev_gw = None
         self._dev_myip = None
         try:
-            self._dev_gw = _nm_default_gateway()
+            self._dev_gw = _nm_lan_gateway()
         except Exception:
             pass
         try:
@@ -42572,7 +49425,7 @@ $('aiBtn').addEventListener('click',async function(){
 (function(){
  var W=[
   {t:'TOPOLOGY',ic:'nodes',items:[{l:'3D Topology',s:'Interactive network globe',h:'/3d'},{l:'Flow Talkers',s:'Top bandwidth flows',h:'/sankey'},{l:'Top Talkers',s:'Busiest hosts by bytes',h:'/talkers'}]},
-  {t:'MONITOR',ic:'bell',items:[{l:'Remote Agents',s:'Other sites reporting in',h:'/agents'},{l:'Alerts & Devices',s:'Alerts, devices, latency',h:'/monitor'},{l:'VDI Sessions',s:'Blast / PCoIP / RDP',h:'/vdi'},{l:'Wi-Fi & Boards',s:'Live sensing, activity, signal map',h:'/wifi'},{l:'Honeypot',s:'Who is probing you',h:'/honeypot'},{l:'Threat Radar',s:'Where threats come from',h:'/threats'}]},
+  {t:'MONITOR',ic:'bell',items:[{l:'Remote Agents',s:'Other sites reporting in',h:'/agents'},{l:'Alerts & Devices',s:'Alerts, devices, latency',h:'/monitor'},{l:'VDI Sessions',s:'Blast / PCoIP / RDP',h:'/vdi'},{l:'Wi-Fi & Boards',s:'Live sensing, activity, signal map',h:'/wifi'},{l:'CSI Sensing',s:'Heat map, floors, weekly history',h:'/csi'},{l:'Lidar',s:'Room map, people, intruders',h:'/lidar'},{l:'Honeypot',s:'T-Pot: who is probing you',h:'/tpot'},{l:'Threat Radar',s:'Where threats come from',h:'/threats'},{l:'Live Threat Map',s:'Radware map + your traffic',h:'/livemap'}]},
   {t:'ANALYTICS',ic:'chart',items:[{l:'Analytics & AI',s:'Stats and AI briefing',h:'/analytics'},{l:'Full HTML Report',s:'Self-contained report',h:'/api/report'}]},
   {t:'EXPORT',ic:'download',items:[{l:'Download CSV',s:'Speed & DNS history',h:'/api/export?fmt=csv'},{l:'Download JSON',s:'Raw history data',h:'/api/export?fmt=json'}]},
   {t:'RUN TESTS',ic:'play',items:[{l:'Run Speed Test',s:'Trigger a test now',post:'/api/run_test'},{l:'Run DNS Check',s:'Resolve timing now',post:'/api/run_dns'}]}
@@ -42838,7 +49691,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 <body>
 <header><a class="back" href="/">&#8592;</a><h1>Wi-Fi &amp; Boards</h1><span class="chip" id="chip">&hellip;</span><div class="dot" id="dot"></div></header>
 <div class="sub" id="sub">Loading&hellip;</div>
-<nav class="jump"><a href="#boards">Boards</a><a href="#link">Wi-Fi link</a><a href="#activity">Activity</a><a href="#map">Signal map</a><a href="#nets">Networks</a><a href="#ctl">Controls</a></nav>
+<nav class="jump"><a href="/csi">CSI &amp; floors &#8250;</a><a href="/lidar">Lidar &#8250;</a><a href="#boards">Boards</a><a href="#link">Wi-Fi link</a><a href="#activity">Activity</a><a href="#map">Signal map</a><a href="#nets">Networks</a><a href="#ctl">Controls</a></nav>
 
 <div class="card" id="boards">
  <h2>Boards (ESP32): movement level</h2>
@@ -43050,7 +49903,8 @@ function renderNets(d){
 }
 
 /* ---------- controls ---------- */
-var SW=[['away','Away mode','Alert me when the boards or the Wi-Fi see movement while I am not at the PC.'],
+var SW=[['night_alarm','Night alarm (klaxon)','A klaxon on the PC and a phone alert on sustained movement between the night times set on the PC (default 01:00 to 03:00). Needs the boards being watched.'],
+        ['away','Away mode','Alert me when the boards or the Wi-Fi see movement while I am not at the PC.'],
         ['auto_away_min','Away when the PC is idle 10 minutes','Switches away mode on by itself.'],
         ['background','Keep watching when the Wi-Fi window is closed','The watcher runs in the app in the background.'],
         ['csi_bg','Keep watching with the ESP32 boards','Movement near the boards counts for alerts and the history. Needs a receiver chosen in the CSI tab on the PC.']];
@@ -43562,6 +50416,196 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
         _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
 
+    def _build_livemap_html(self):
+        _html = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live Threat Map</title>
+<meta name="theme-color" content="@@BG@@">
+<style>
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--dim:@@TEXT2@@;--acc:@@ACCENT@@;--red:#ff5c4d;--grn:#2fe07a;--amb:#ff9f43;--vio:#b38cff;}
+ *{box-sizing:border-box;margin:0;padding:0}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;padding:0 16px 32px;max-width:1500px;margin:0 auto;-webkit-font-smoothing:antialiased}
+ header{display:flex;align-items:center;gap:12px;padding:14px 0 8px;flex-wrap:wrap}
+ header a.back{color:var(--dim);text-decoration:none;font-size:24px;line-height:1}
+ header h1{font-size:17px;font-weight:650}
+ header .sub{color:var(--dim);font-size:12px;flex:1;min-width:160px}
+ .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:4px 0 10px}
+ button,.lnk{font:inherit;font-size:12px;font-weight:650;padding:7px 13px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;text-decoration:none}
+ button:hover,.lnk:hover{border-color:var(--acc)}
+ button.on{border-color:var(--acc);color:var(--acc)}
+ .seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:7px 0 0 7px}.seg button:last-child{border-radius:0 7px 7px 0}
+ label.tg{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);cursor:pointer}
+ .note{font-size:12px;color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:10px;line-height:1.5}
+ #cal{display:none;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 14px;margin-bottom:10px}
+ #cal.open{display:block}
+ #cal .g{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 18px;margin:8px 0}
+ #cal label{display:block;font-size:11px;color:var(--dim);margin-bottom:2px}
+ #cal input[type=range]{width:100%}
+ #cal select{font:inherit;font-size:12px;padding:5px 8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+ #stage{position:relative;width:100%;height:calc(100vh - 250px);min-height:380px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#05080f}
+ #stage iframe,#stage img{position:absolute;inset:0;width:100%;height:100%;border:0;background:#05080f}
+ #stage img{object-fit:fill;opacity:.95}
+ #ov{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+ .stats{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+ .kpi{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:8px 12px;min-width:120px}
+ .kpi b{display:block;font-size:20px;font-variant-numeric:tabular-nums;font-weight:650}
+ .kpi span{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+ .lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;margin-top:6px}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px;min-width:0;overflow-x:auto}
+ .card h2{font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;margin-bottom:8px}
+ table{width:100%;border-collapse:collapse;font-size:12px}
+ td{padding:4px 8px 4px 0;border-bottom:1px solid var(--line);white-space:nowrap;max-width:240px;overflow:hidden;text-overflow:ellipsis}
+ tr:last-child td{border-bottom:0}
+ .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+ .empty{color:var(--dim);font-size:12px;padding:4px 0}
+ .leg{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--dim);margin:6px 0}
+ #msg{font-size:12px;color:var(--dim)}
+</style></head><body>
+<header>
+  <a class="back" href="/">&#8592;</a>
+  <h1>Live Threat Map</h1>
+  <span class="sub" id="sub">loading&#8230;</span>
+</header>
+<div class="bar">
+  <span class="seg"><button id="mRad" onclick="setMap('radware')">Radware&#8217;s map</button><button id="mApp" onclick="setMap('app')">App map</button></span>
+  <label class="tg"><input type="checkbox" id="tTraf" checked> My traffic</label>
+  <label class="tg"><input type="checkbox" id="tThr" checked> Threats &amp; honeypot</label>
+  <label class="tg"><input type="checkbox" id="tArc" checked> Arcs</label>
+  <label class="tg"><input type="checkbox" id="tLbl" checked> Labels</label>
+  <button id="bCal" onclick="calToggle()">Calibrate overlay</button>
+  <a class="lnk" id="aRad" target="_blank" rel="noopener" href="https://livethreatmap.radware.com/">Open Radware&#8217;s map in its own tab</a>
+  <span id="msg"></span>
+</div>
+<div class="note" id="note">Radware&#8217;s map is their page, shown as they serve it, and it carries no data from this app. The layer on top is drawn here from your own traffic and honeypot visitors. Line it up once with Calibrate overlay. If Radware&#8217;s side stays blank their site is refusing to be shown inside another page: press App map, or open it in its own tab.</div>
+<div id="cal">
+  <div style="font-size:12px;color:var(--dim);line-height:1.5">Turn on the reference pins, then move the sliders until the pins sit on London, New York, Tokyo and Sydney on Radware&#8217;s map. Your settings are remembered in this browser.</div>
+  <div class="g">
+    <div><label>Left <b id="vL"></b></label><input type="range" id="sL" min="-30" max="50" step="0.1"></div>
+    <div><label>Top <b id="vT"></b></label><input type="range" id="sT" min="-30" max="50" step="0.1"></div>
+    <div><label>Width <b id="vW"></b></label><input type="range" id="sW" min="40" max="160" step="0.1"></div>
+    <div><label>Height <b id="vH"></b></label><input type="range" id="sH" min="40" max="160" step="0.1"></div>
+    <div><label>Projection</label><select id="sP"><option value="eq">Flat (equirectangular)</option><option value="merc">Mercator</option></select></div>
+  </div>
+  <div class="bar" style="margin:0"><label class="tg"><input type="checkbox" id="tPin"> Reference pins</label><button onclick="calReset()">Reset</button></div>
+</div>
+<div id="stage">
+  <iframe id="fr" title="Radware live threat map" referrerpolicy="no-referrer" loading="eager" allow="fullscreen" src="about:blank"></iframe>
+  <img id="im" alt="" src="/world-map.jpg" style="display:none">
+  <canvas id="ov"></canvas>
+</div>
+<div class="leg">
+  <span><span class="dot" style="background:#38f0a8"></span>your traffic</span>
+  <span><span class="dot" style="background:#ff9f43"></span>suspicious</span>
+  <span><span class="dot" style="background:#ff5c4d"></span>threat / honeypot visitor</span>
+  <span><span class="dot" style="background:#b38cff"></span>blocked</span>
+  <span><span class="dot" style="background:#ffffff"></span>this PC</span>
+</div>
+<div class="stats">
+  <div class="kpi"><b id="kT">&#8212;</b><span>Hosts on the map</span></div>
+  <div class="kpi"><b id="kH">&#8212;</b><span>Threats located</span></div>
+  <div class="kpi"><b id="kU">&#8212;</b><span>Threats not located</span></div>
+</div>
+<div class="lists">
+  <div class="card"><h2>Threats &amp; honeypot visitors</h2><div id="lThr"></div></div>
+  <div class="card"><h2>Busiest remote hosts</h2><div id="lTr"></div></div>
+</div>
+<script>
+function $(i){return document.getElementById(i);}
+function esc(s){var d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function num(n){return (n||0).toLocaleString();}
+function ago(t){if(!t)return '';var s=Math.max(0,Math.round(Date.now()/1000-t));if(s<90)return s+' s ago';if(s<5400)return Math.round(s/60)+' min ago';if(s<172800)return Math.round(s/3600)+' h ago';return Math.round(s/86400)+' d ago';}
+function bytes(n){n=n||0;var u=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<4){n/=1024;i++;}return (i?n.toFixed(1):n)+' '+u[i];}
+var RAD='https://livethreatmap.radware.com/';
+var DEF={map:'radware',l:0,t:0,w:100,h:100,p:'eq',traf:1,thr:1,arc:1,lbl:1,pin:0};
+var S={};for(var k in DEF)S[k]=DEF[k];
+function load(){try{var j=JSON.parse(localStorage.getItem('nm_livemap')||'{}');for(var k in DEF){if(j[k]!==undefined)S[k]=j[k];}}catch(e){}}
+function save(){try{localStorage.setItem('nm_livemap',JSON.stringify(S));}catch(e){}}
+var DATA={traf:null,thr:null},PINS=[['London',51.5,-0.12],['New York',40.7,-74],['Tokyo',35.7,139.7],['Sydney',-33.9,151.2],['Sao Paulo',-23.5,-46.6]];
+function setMap(m){S.map=m;save();applyMap();}
+function applyMap(){
+  var fr=$('fr'),im=$('im');
+  $('mRad').className=S.map==='radware'?'on':'';$('mApp').className=S.map==='app'?'on':'';
+  if(S.map==='radware'){im.style.display='none';fr.style.display='';if(fr.getAttribute('src')!==RAD)fr.setAttribute('src',RAD);}
+  else{fr.style.display='none';im.style.display='';}
+  $('note').style.display=S.map==='radware'?'':'none';
+}
+function calToggle(){var c=$('cal');c.classList.toggle('open');$('bCal').className=c.classList.contains('open')?'on':'';}
+function calShow(){
+  $('sL').value=S.l;$('sT').value=S.t;$('sW').value=S.w;$('sH').value=S.h;$('sP').value=S.p;$('tPin').checked=!!S.pin;
+  $('vL').textContent=S.l+'%';$('vT').textContent=S.t+'%';$('vW').textContent=S.w+'%';$('vH').textContent=S.h+'%';
+  $('tTraf').checked=!!S.traf;$('tThr').checked=!!S.thr;$('tArc').checked=!!S.arc;$('tLbl').checked=!!S.lbl;
+}
+function calReset(){S.l=DEF.l;S.t=DEF.t;S.w=DEF.w;S.h=DEF.h;S.p=DEF.p;save();calShow();}
+[['sL','l'],['sT','t'],['sW','w'],['sH','h']].forEach(function(p){$(p[0]).addEventListener('input',function(){S[p[1]]=parseFloat(this.value);calShow();save();});});
+$('sP').addEventListener('change',function(){S.p=this.value;save();});
+[['tTraf','traf'],['tThr','thr'],['tArc','arc'],['tLbl','lbl'],['tPin','pin']].forEach(function(p){$(p[0]).addEventListener('change',function(){S[p[1]]=this.checked?1:0;save();});});
+var HOME=null;
+function proj(lat,lon,W,H){
+  var x=(lon+180)/360,y;
+  if(S.p==='merc'){lat=Math.max(-85,Math.min(85,lat));var m=Math.log(Math.tan(Math.PI/4+lat*Math.PI/360)),mx=Math.log(Math.tan(Math.PI/4+85*Math.PI/360));y=0.5-m/(2*mx);}
+  else y=(90-lat)/180;
+  return [(S.l/100+x*S.w/100)*W,(S.t/100+y*S.h/100)*H];
+}
+var cv=$('ov'),cx=cv.getContext('2d'),T0=performance.now();
+function fit(){var r=$('stage').getBoundingClientRect(),d=window.devicePixelRatio||1;cv.width=Math.round(r.width*d);cv.height=Math.round(r.height*d);cx.setTransform(d,0,0,d,0,0);return [r.width,r.height];}
+function arc(a,b,col,al,ph){
+  var mx=(a[0]+b[0])/2,my=(a[1]+b[1])/2,dx=b[0]-a[0],dy=b[1]-a[1],L=Math.sqrt(dx*dx+dy*dy)||1,qx=mx,qy=my-Math.min(L*0.3,140);
+  cx.beginPath();cx.moveTo(a[0],a[1]);cx.quadraticCurveTo(qx,qy,b[0],b[1]);
+  cx.strokeStyle=col;cx.globalAlpha=al;cx.lineWidth=1.2;cx.setLineDash([6,8]);cx.lineDashOffset=-ph;cx.stroke();cx.setLineDash([]);cx.globalAlpha=1;
+}
+function draw(now){
+  var sz=fit(),W=sz[0],H=sz[1],ph=(now-T0)/60;cx.clearRect(0,0,W,H);
+  var home=HOME?proj(HOME.lat,HOME.lon,W,H):null;
+  if(S.pin){cx.font='11px sans-serif';PINS.forEach(function(p){var q=proj(p[1],p[2],W,H);cx.strokeStyle='#ffffff';cx.lineWidth=1.5;cx.beginPath();cx.moveTo(q[0]-7,q[1]);cx.lineTo(q[0]+7,q[1]);cx.moveTo(q[0],q[1]-7);cx.lineTo(q[0],q[1]+7);cx.stroke();cx.fillStyle='#ffffff';cx.fillText(p[0],q[0]+9,q[1]-6);});}
+  if(S.traf&&DATA.traf){
+    DATA.traf.forEach(function(n){var q=proj(n.lat,n.lon,W,H),col=n.blocked?'#b38cff':(n.suspicious?'#ff9f43':'#38f0a8');
+      if(S.arc&&home)arc(home,q,col,0.25+0.5*n.frac,ph);
+      cx.beginPath();cx.arc(q[0],q[1],3+n.frac*5,0,6.283);cx.fillStyle=col;cx.globalAlpha=0.9;cx.fill();cx.globalAlpha=1;cx.strokeStyle='rgba(0,0,0,.6)';cx.lineWidth=1;cx.stroke();
+      if(S.lbl&&n.frac>0.35){cx.font='11px sans-serif';cx.fillStyle='#e8f2ff';cx.fillText((n.flag?n.flag+' ':'')+n.label,q[0]+8,q[1]+4);}});
+  }
+  if(S.thr&&DATA.thr){
+    DATA.thr.forEach(function(n,i){var q=proj(n.lat,n.lon,W,H),pulse=((now/900+i*0.37)%1);
+      if(S.arc&&home)arc(q,home,'#ff5c4d',0.55,-ph);
+      cx.beginPath();cx.arc(q[0],q[1],4+pulse*14,0,6.283);cx.strokeStyle='rgba(255,92,77,'+(0.8*(1-pulse))+')';cx.lineWidth=2;cx.stroke();
+      cx.beginPath();cx.arc(q[0],q[1],4.5,0,6.283);cx.fillStyle='#ff5c4d';cx.fill();cx.strokeStyle='rgba(0,0,0,.7)';cx.lineWidth=1;cx.stroke();
+      if(S.lbl&&i<8){cx.font='11px sans-serif';cx.fillStyle='#ffd5cf';cx.fillText((n.city||n.country||n.ip),q[0]+9,q[1]+4);}});
+  }
+  if(home){cx.beginPath();cx.arc(home[0],home[1],5,0,6.283);cx.fillStyle='#ffffff';cx.fill();cx.strokeStyle='#38b8f0';cx.lineWidth=2;cx.stroke();}
+  requestAnimationFrame(draw);
+}
+function lists(){
+  var th=(DATA.thrAll||[]).slice(0,12);
+  $('lThr').innerHTML=th.length?'<table>'+th.map(function(r){return '<tr><td><span class="dot" style="background:'+(r.sev==='critical'?'#ff5c4d':'#ff9f43')+'"></span>'+esc(r.ip)+'</td><td>'+esc((r.flag?r.flag+' ':'')+(r.city||r.country||'not located'))+'</td><td>'+esc(r.detail||r.kind)+'</td><td>'+ago(r.last)+'</td></tr>';}).join('')+'</table>':'<div class="empty">Nothing has probed you. Quiet is normal.</div>';
+  var tr=(DATA.trAll||[]).slice(0,12);
+  $('lTr').innerHTML=tr.length?'<table>'+tr.map(function(n){return '<tr><td><span class="dot" style="background:'+(n.blocked?'#b38cff':n.suspicious?'#ff9f43':'#38f0a8')+'"></span>'+esc(n.id)+'</td><td>'+esc((n.flag?n.flag+' ':'')+(n.city||n.country||''))+'</td><td>'+esc(n.org||n.label)+'</td><td>'+bytes(n.bytes)+'</td></tr>';}).join('')+'</table>':'<div class="empty">No remote hosts yet. Open the capture window to start watching traffic.</div>';
+}
+function poll(){
+  Promise.all([fetch('/api/topology3d',{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;}),
+               fetch('/api/threats',{cache:'no-store'}).then(function(r){return r.json();}).catch(function(){return null;})]).then(function(a){
+    var t=a[0],h=a[1],ok=function(x){return typeof x.lat==='number'&&typeof x.lon==='number';};
+    if(t){HOME=(t.home&&ok(t.home))?t.home:null;
+      DATA.trAll=(t.nodes||[]).filter(function(n){return !n.local&&!n.attack;}).sort(function(x,y){return (y.bytes||0)-(x.bytes||0);});
+      DATA.traf=DATA.trAll.filter(ok);}
+    if(h){DATA.thrAll=h.threats||[];DATA.thr=DATA.thrAll.filter(ok);$('kU').textContent=num(h.unlocated||0);}
+    $('kT').textContent=DATA.traf?num(DATA.traf.length):'—';$('kH').textContent=DATA.thr?num(DATA.thr.length):'—';
+    $('sub').textContent=(t&&!t.open&&!(t.nodes||[]).length?'Capture is not running, so there is no traffic of yours to plot. ':'')+(HOME?'Home: '+(HOME.city||'set')+'.':'Home position not known yet, so arcs are off.');
+    lists();
+  });
+}
+load();calShow();applyMap();poll();setInterval(function(){if(!document.hidden)poll();},4000);requestAnimationFrame(draw);
+</script>
+</body></html>
+'''
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']), ('@@ACCENT@@', _ui['accent'])):
+            _html = _html.replace(_tok, _val)
+        return _html
+
     def _build_threats_html(self):
         # >>>ASSET:threats.html
         _html = r'''<!DOCTYPE html><html lang="en"><head>
@@ -43836,6 +50880,243 @@ resize(); draw(); load(); setInterval(load,4000);
             _html = _html.replace(_tok, _val)
         _html = _html.replace('</body></html>',
                                self._nm_ai_widget_html() + '</body></html>', 1)
+        return _html
+
+    def _build_tpot_html(self):
+        _html = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>T-Pot Honeypot</title>
+<meta name="theme-color" content="@@BG@@">
+<style>
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--dim:@@TEXT2@@;--acc:@@ACCENT@@;--red:#ff5c4d;--grn:#2fe07a;--amb:#ff9f43;--vio:#b38cff;}
+ *{box-sizing:border-box;margin:0;padding:0}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;padding:0 16px 40px;max-width:1180px;margin:0 auto;-webkit-font-smoothing:antialiased}
+ header{display:flex;align-items:center;gap:12px;padding:16px 0 10px;flex-wrap:wrap}
+ header a.back{color:var(--dim);text-decoration:none;font-size:24px;line-height:1}
+ header h1{font-size:17px;font-weight:650}
+ header .sub{color:var(--dim);font-size:12px;flex:1;min-width:140px}
+ .chip{font-size:11px;font-weight:700;padding:4px 11px;border-radius:7px;letter-spacing:.5px;background:var(--line);color:var(--dim);white-space:nowrap}
+ .chip.run{background:#12482b;color:#c8ffe0}.chip.start{background:#6b3d00;color:#ffe0b0}.chip.off{background:#4a1b16;color:#ffd5cf}
+ .conn{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin:8px 0}
+ .conn label{display:block;font-size:11px;color:var(--dim);margin-bottom:3px}
+ .conn input{width:100%;font:inherit;font-size:13px;padding:7px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+ .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 12px}
+ button,.lnk{font:inherit;font-size:12px;font-weight:650;padding:7px 13px;border-radius:7px;border:1px solid var(--line);background:var(--panel);color:var(--text);cursor:pointer;text-decoration:none}
+ button:hover,.lnk:hover{border-color:var(--acc)}
+ button:disabled{opacity:.4;cursor:default}
+ button.go{border-color:#1f7a47;color:#c8ffe0}button.stop{border-color:#7a2a20;color:#ffd5cf}
+ #msg{font-size:12px;color:var(--dim)}#msg.err{color:var(--red)}
+ .note{font-size:12px;color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-bottom:12px;line-height:1.5}
+ .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:12px}
+ .kpi{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+ .kpi b{display:block;font-size:22px;font-variant-numeric:tabular-nums;font-weight:650}
+ .kpi span{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.6px}
+ .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:12px}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px;min-width:0}
+ .card h2{font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;margin-bottom:9px}
+ .row{display:grid;grid-template-columns:minmax(70px,38%) 1fr auto;gap:8px;align-items:center;font-size:12px;padding:2px 0}
+ .row .n{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .row .t{height:7px;background:var(--line);border-radius:4px;overflow:hidden}.row .t i{display:block;height:100%;background:var(--acc);border-radius:4px}
+ .row .c{color:var(--dim);font-variant-numeric:tabular-nums}
+ .empty{color:var(--dim);font-size:12px;padding:6px 0}
+ .tw{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:9px;margin-bottom:12px}
+ .tw h2{font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;padding:12px 14px 4px}
+ table{width:100%;border-collapse:collapse;font-size:12px;min-width:640px}
+ th{text-align:left;color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:8px 10px;border-bottom:1px solid var(--line)}
+ td{padding:5px 10px;border-bottom:1px solid var(--line);white-space:nowrap;max-width:360px;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+ tr:last-child td{border-bottom:0}
+ .vd{color:var(--vio)}.mk{color:var(--amb)}
+ .ctr{display:flex;flex-wrap:wrap;gap:6px}
+ .ctr span{font-size:11px;padding:3px 8px;border-radius:6px;background:var(--line);color:var(--dim)}.ctr span.up{background:#12482b;color:#c8ffe0}.ctr span.dn{background:#4a1b16;color:#ffd5cf}
+ svg text{fill:var(--dim);font-size:10px}
+ @media (max-width:520px){.kpi b{font-size:19px}}
+</style></head><body>
+<header>
+  <a class="back" href="/">&#8592;</a>
+  <h1>T-Pot Honeypot</h1>
+  <span class="sub" id="sub">connecting&#8230;</span>
+  <span class="chip" id="chip">&#8212;</span>
+</header>
+<div class="bar">
+  <button class="go" id="bStart" onclick="ctl('start')">&#9654; Start T-Pot</button>
+  <button class="stop" id="bStop" onclick="ctl('stop')">&#9632; Stop T-Pot</button>
+  <span id="links"></span>
+  <a class="lnk" href="/honeypot">Classic hit list</a>
+  <span id="msg"></span>
+</div>
+<div class="note" id="note">Docker on Windows hides who really connected: each visit is recorded as coming from one of Docker&#8217;s own internal addresses (shown as &#8220;via Docker&#8221;). You see what was probed and when, not the real source. Do not port-forward T-Pot on the router.</div>
+
+<div class="card" id="connCard" style="margin-bottom:12px;display:none"><h2>Where T-Pot runs</h2>
+  <div id="connNow" style="font-size:12px;color:var(--dim);line-height:1.5"></div>
+  <div class="conn" id="connForm">
+    <div><label for="cHost">VM address</label><input id="cHost" type="text" placeholder="192.168.1.146" autocomplete="off" spellcheck="false"></div>
+    <div><label for="cUser">Portal web user</label><input id="cUser" type="text" autocomplete="off" spellcheck="false"></div>
+    <div><label for="cPass">Portal web password</label><input id="cPass" type="password" autocomplete="new-password"></div>
+  </div>
+  <div class="bar" style="margin:4px 0 0"><button class="go" id="bConn" onclick="conn('remote_set')">Connect to the VM</button><button id="bLocal" onclick="conn('remote_clear')">Use Docker on this PC</button><span id="cmsg"></span></div>
+  <div class="empty" style="margin-top:6px">The login is the web user and password you chose in the T-Pot installer. It is stored protected on this PC, never shown again and never sent to your phone. The VM&#8217;s certificate is pinned the first time you connect.</div>
+</div>
+
+<div class="card" id="depCard" style="margin-bottom:12px;display:none"><h2>Deploy a T-Pot virtual machine on this PC</h2>
+  <div style="font-size:12px;color:var(--dim);line-height:1.5">Builds a Debian VM in VMware Workstation or VirtualBox, installs T-Pot in it with no typing, and connects NetSentinel to it. Visitors then show their real addresses. You choose the two logins below; nothing is shared with anyone.</div>
+  <div class="bar" style="margin:8px 0 0"><button id="dCheck" onclick="depCheck()">Check this PC</button><span id="dInfo" style="font-size:12px;color:var(--dim)"></span></div>
+  <div id="dForm" style="display:none">
+    <div class="conn">
+      <div><label for="dHv">Program</label><select id="dHv" style="width:100%;font:inherit;font-size:13px;padding:7px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text)"></select></div>
+      <div><label for="dDir">Folder for the VM (new, empty)</label><input id="dDir" type="text" autocomplete="off" spellcheck="false"></div>
+      <div><label for="dRam">Memory (MB, at least 8192)</label><input id="dRam" type="number" min="8192" step="1024"></div>
+      <div><label for="dCpu">Processors</label><input id="dCpu" type="number" min="1" max="32"></div>
+      <div><label for="dDisk">Disk (GB, grows as it fills)</label><input id="dDisk" type="number" min="40"></div>
+      <div><label for="dTz">Time zone</label><input id="dTz" type="text" autocomplete="off" spellcheck="false"></div>
+      <div><label for="dKb">Keyboard (gb, us, de ...)</label><input id="dKb" type="text" autocomplete="off" spellcheck="false"></div>
+    </div>
+    <div class="conn">
+      <div><label for="dOu">VM user name</label><input id="dOu" type="text" autocomplete="off" spellcheck="false"></div>
+      <div><label for="dOp">VM password (8+ characters)</label><input id="dOp" type="password" autocomplete="new-password"></div>
+      <div><label for="dWu">T-Pot portal user name</label><input id="dWu" type="text" autocomplete="off" spellcheck="false"></div>
+      <div><label for="dWp">Portal password (letters, digits . _ - @ # % + =)</label><input id="dWp" type="password" autocomplete="new-password"></div>
+    </div>
+    <label class="tg" style="display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--dim);margin:6px 0"><input type="checkbox" id="dOk" style="margin-top:2px"><span id="dConsent">I agree to the downloads.</span></label>
+    <label class="tg" style="font-size:12px;color:var(--dim);margin-bottom:6px"><input type="checkbox" id="dShow" checked> Show the VM window while it installs</label>
+    <div class="bar" style="margin:4px 0"><button class="go" id="dGo" onclick="depStart()">Deploy the VM</button><span id="dMsg"></span></div>
+  </div>
+  <div id="dRun" style="display:none;margin-top:8px">
+    <div id="dSteps" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px"></div>
+    <div style="height:7px;background:var(--line);border-radius:4px;overflow:hidden;margin:6px 0"><i id="dBar" style="display:block;height:100%;width:0;background:var(--acc)"></i></div>
+    <div id="dNow" style="font-size:13px"></div>
+    <div id="dLog" class="empty" style="margin-top:6px;white-space:pre-wrap;line-height:1.6"></div>
+    <div class="bar" style="margin:6px 0 0"><button id="dCancel" onclick="depCancel()">Cancel</button></div>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><b id="kEv">&#8212;</b><span>Events, 24 h</span></div>
+  <div class="kpi"><b id="kTy">&#8212;</b><span>Honeypots hit</span></div>
+  <div class="kpi"><b id="kLast">&#8212;</b><span>Last event</span></div>
+  <div class="kpi"><b id="kAll">&#8212;</b><span>Stored, all time</span></div>
+  <div class="kpi"><b id="kCt">&#8212;</b><span>Containers up</span></div>
+  <div class="kpi"><b id="kFeed">&#8212;</b><span>App feed</span></div>
+</div>
+
+<div class="grid">
+  <div class="card" style="grid-column:1/-1"><h2>Events per hour, last 24 hours</h2><div id="hist"></div></div>
+  <div class="card"><h2>Which honeypots were hit</h2><div id="types"></div></div>
+  <div class="card"><h2>Ports probed</h2><div id="ports"></div></div>
+  <div class="card"><h2>Passwords tried</h2><div id="pws"></div></div>
+  <div class="card"><h2>User names tried</h2><div id="users"></div></div>
+  <div class="card"><h2>Commands typed</h2><div id="cmds"></div></div>
+  <div class="card"><h2>Web paths requested</h2><div id="urls"></div></div>
+</div>
+
+<div class="tw"><h2>Live feed</h2><table><thead><tr><th>Time</th><th>Honeypot</th><th>Port</th><th>What</th><th>Details</th><th>Source</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="empty">Loading&#8230;</td></tr></tbody></table></div>
+
+<div class="card"><h2>Containers</h2><div class="ctr" id="ctr"></div></div>
+
+<script>
+function $(i){return document.getElementById(i);}
+function esc(s){var d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function num(n){return (n||0).toLocaleString();}
+function ago(t){if(!t)return '—';var s=Math.max(0,Math.round(Date.now()/1000-t));if(s<90)return s+' s ago';if(s<5400)return Math.round(s/60)+' min ago';if(s<172800)return Math.round(s/3600)+' h ago';return Math.round(s/86400)+' d ago';}
+function say(t,e){var m=$('msg');m.textContent=t||'';m.className=e?'err':'';}
+function ctl(a){say(a==='start'?'Starting…':'Stopping (can take a minute)…');
+  fetch('/api/tpot/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:a})})
+  .then(function(r){return r.json();}).then(function(j){say(j.ok?(j.message||'Done.'):(j.error||'Could not do that.'),!j.ok);setTimeout(load,1500);})
+  .catch(function(e){say(e.message,true);});}
+var DEP={checked:false,iso:null};
+function dmsg(t,e){var m=$('dMsg');m.textContent=t||'';m.style.color=e?'var(--red)':'var(--dim)';}
+function post(a,extra){var b={action:a};for(var k in (extra||{}))b[k]=extra[k];return fetch('/api/tpot/deploy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json();});}
+function depCheck(){$('dInfo').textContent='Checking…';
+  post('check').then(function(j){
+    if(!j.ok){$('dInfo').textContent=j.error||'Could not check.';return;}
+    DEP.checked=true;DEP.iso=j.iso;var t=j.tools||[],h=j.host||{},d=j.defaults||{};
+    if(!t.length){$('dInfo').textContent='No VMware Workstation or VirtualBox found. Install one (both are free for personal use) and press Check again.';$('dForm').style.display='none';return;}
+    $('dHv').innerHTML=t.map(function(x){return '<option value="'+esc(x.kind)+'">'+esc(x.name)+'</option>';}).join('');
+    $('dDir').value=$('dDir').value||d.dir;$('dRam').value=$('dRam').value||d.ram_mb;$('dCpu').value=$('dCpu').value||d.cpus;$('dDisk').value=$('dDisk').value||d.disk_gb;
+    $('dTz').value=$('dTz').value||d.tz;$('dKb').value=$('dKb').value||d.kb;$('dOu').value=$('dOu').value||d.os_user;$('dWu').value=$('dWu').value||d.web_user;
+    var iso=j.iso||{};
+    $('dConsent').textContent='I agree to download the Debian installer '+(iso.name?iso.name+' ('+(iso.size?Math.round(iso.size/1048576)+' MB':'about 800 MB')+')':'(about 800 MB)')+' from cdimage.debian.org, and that the VM then downloads T-Pot from github.com and its containers (about 3 GB) by itself. It can take 45 to 90 minutes.';
+    $('dInfo').textContent='This PC: '+Math.round((h.ram_mb||0)/1024)+' GB memory, '+(h.cpus||'?')+' processors, '+(h.free_gb||'?')+' GB free.'+(iso.error?' '+iso.error+'.':'');
+    $('dForm').style.display='';if(j.job&&j.job.state&&j.job.state!=='idle')depShow(j.job);
+  }).catch(function(e){$('dInfo').textContent=e.message;});}
+function depStart(){
+  if(!$('dOk').checked){dmsg('Tick the box to agree to the downloads first.',true);return;}
+  dmsg('Checking…');
+  post('start',{hypervisor:$('dHv').value,dir:$('dDir').value,ram_mb:$('dRam').value,cpus:$('dCpu').value,disk_gb:$('dDisk').value,tz:$('dTz').value,kb:$('dKb').value,
+    os_user:$('dOu').value,os_pw:$('dOp').value,web_user:$('dWu').value,web_pw:$('dWp').value,consent:true,show:$('dShow').checked}).then(function(j){
+    $('dOp').value='';$('dWp').value='';
+    if(!j.ok){dmsg(j.error||'Could not start.',true);return;}
+    dmsg('');depPoll();}).catch(function(e){dmsg(e.message,true);});}
+function depCancel(){post('cancel').then(function(){setTimeout(depPoll,600);});}
+function depShow(j){
+  var run=j.state&&j.state!=='idle';$('dRun').style.display=run?'':'none';if(!run)return;
+  $('dSteps').innerHTML=(j.steps||[]).map(function(n,i){var st=(j.state==='done'||i<j.step)?'up':(i===j.step&&j.state==='running'?'':'dn');var mk=(j.state==='done'||i<j.step)?'✓ ':(i===j.step&&j.state==='running'?'… ':'');return '<span class="ctr-s '+st+'" style="font-size:11px;padding:3px 8px;border-radius:6px;background:'+(st==='up'?'#12482b':st===''?'#6b3d00':'var(--line)')+';color:'+(st==='up'?'#c8ffe0':st===''?'#ffe0b0':'var(--dim)')+'">'+mk+esc(n)+'</span>';}).join('');
+  $('dBar').style.width=(j.state==='done'?100:(j.pct==null?Math.round(100*(j.step||0)/((j.steps||[1]).length)):Math.round(j.pct)))+'%';
+  $('dNow').textContent=(j.state==='error'?'Stopped: '+(j.error||''):j.msg||'')+(j.elapsed&&j.state==='running'?'  ('+Math.round(j.elapsed/60)+' min)':'');
+  $('dNow').style.color=j.state==='error'?'var(--red)':(j.state==='done'?'var(--grn)':'');
+  $('dLog').textContent=(j.log||[]).slice().reverse().map(function(l){return new Date(l[0]*1000).toLocaleTimeString()+'  '+l[1];}).join('\n');
+  $('dCancel').style.display=j.state==='running'?'':'none';}
+var depTimer=null;
+function depPoll(){fetch('/api/tpot/deploy',{cache:'no-store'}).then(function(r){return r.json();}).then(function(j){depShow(j);if(j.state==='running'){clearTimeout(depTimer);depTimer=setTimeout(depPoll,2500);}else if(j.state==='done'){load();}}).catch(function(){});}
+(function(){var here=(location.hostname==='localhost'||location.hostname==='127.0.0.1'||location.hostname==='[::1]');if(here){$('depCard').style.display='';depPoll();}})();
+var REM=false;
+function cmsg(t,e){var m=$('cmsg');m.textContent=t||'';m.style.color=e?'var(--red)':'var(--dim)';}
+function conn(a){
+  var body={action:a};
+  if(a==='remote_set'){body.host=$('cHost').value;body.user=$('cUser').value;body.password=$('cPass').value;cmsg('Checking the VM…');}
+  else cmsg('Switching…');
+  fetch('/api/tpot/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  .then(function(r){return r.json();}).then(function(j){$('cPass').value='';cmsg(j.ok?(j.message||'Done.'):(j.error||'Could not do that.'),!j.ok);if(j.ok){setTimeout(load,1200);}})
+  .catch(function(e){cmsg(e.message,true);});}
+function bars(id,list,fmt){
+  var el=$(id);if(!list||!list.length){el.innerHTML='<div class="empty">Nothing yet.</div>';return;}
+  var mx=Math.max.apply(null,list.map(function(x){return x[1];}))||1;
+  el.innerHTML=list.map(function(x){return '<div class="row"><span class="n" title="'+esc(x[0])+'">'+esc(fmt?fmt(x[0]):x[0])+'</span><span class="t"><i style="width:'+Math.max(2,x[1]/mx*100)+'%"></i></span><span class="c">'+num(x[1])+'</span></div>';}).join('');}
+function hist(list){
+  var el=$('hist');if(!list||!list.length){el.innerHTML='<div class="empty">Nothing yet.</div>';return;}
+  var W=1000,H=120,pl=34,pb=18,n=list.length,mx=Math.max(1,Math.max.apply(null,list.map(function(x){return x[1];})));
+  var bw=(W-pl)/n,s='<svg viewBox="0 0 '+W+' '+(H+pb)+'" width="100%" role="img" aria-label="Events per hour">';
+  [0,.5,1].forEach(function(f){var y=H-f*(H-8);s+='<line x1="'+pl+'" x2="'+W+'" y1="'+y+'" y2="'+y+'" stroke="var(--line)"/><text x="0" y="'+(y+3)+'">'+Math.round(f*mx)+'</text>';});
+  list.forEach(function(x,i){var h=Math.max(x[1]?2:0,x[1]/mx*(H-8)),bx=pl+i*bw+1;
+    s+='<rect x="'+bx+'" y="'+(H-h)+'" width="'+Math.max(1,bw-2)+'" height="'+h+'" rx="2" fill="var(--acc)"><title>'+new Date(x[0]*1000).toLocaleString()+': '+x[1]+'</title></rect>';
+    if(i%4===0){var d=new Date(x[0]*1000);s+='<text x="'+bx+'" y="'+(H+13)+'">'+('0'+d.getHours()).slice(-2)+':00</text>';}});
+  el.innerHTML=s+'</svg>';}
+function load(){
+  fetch('/api/tpot',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    if(d.source!=='tpot'){$('sub').textContent='T-Pot is switched off (the built-in honeypot is in use).';return;}
+    var st=d.status||{},ch=$('chip'),m={running:['RUNNING','run'],starting:['STARTING','start'],stopped:['STOPPED',''],docker_off:['DOCKER OFF','off'],unreachable:['VM NOT ANSWERING','off']}[st.state]||['—',''];
+    ch.textContent=m[0];ch.className='chip '+m[1];
+    REM=!!st.remote;var ri=d.remote||{};
+    $('sub').textContent=REM?(st.state==='running'?'T-Pot in the VM at '+st.host+' · '+num(st.events)+' events stored':'Cannot reach T-Pot in the VM at '+st.host+(st.error?' ('+st.error+')':'')):(!st.installed?('T-Pot is not set up in '+st.dir):(st.state==='running'?'Elasticsearch '+st.es+' · '+num(st.events)+' events stored':st.state==='starting'?'Containers are coming up… give it one to three minutes':st.state==='docker_off'?'Docker Desktop is not running — press Start':'Not running — press Start'));
+    $('bStart').style.display=REM?'none':'';$('bStop').style.display=REM?'none':'';
+    $('bStart').disabled=(st.state==='running'||st.state==='starting');$('bStop').disabled=(st.state==='stopped'||st.state==='docker_off');
+    var here=(location.hostname==='localhost'||location.hostname==='127.0.0.1'||location.hostname==='[::1]');
+    $('connCard').style.display='';$('connForm').style.display=here?'':'none';$('bConn').style.display=here?'':'none';$('bLocal').style.display=(here&&ri.configured)?'':'none';
+    $('connNow').textContent=ri.configured?('Reading T-Pot in the VM at '+ri.host+(ri.port&&ri.port!==64297?':'+ri.port:'')+' as "'+ri.user+'"'+(ri.pinned?' (certificate pinned).':'.')):'Reading T-Pot in Docker on this PC. Visitors then appear as Docker addresses. Run T-Pot in a VM to see their real addresses.'+(here?'':' (Change this on the PC itself.)');
+    $('note').innerHTML=REM?'T-Pot runs in a VM, so each visit shows the real address that connected. Addresses from your own network are shown but never auto-blocked. Do not port-forward T-Pot on the router.':'Docker on Windows hides who really connected: each visit is recorded as coming from one of Docker&#8217;s own internal addresses (shown as &#8220;via Docker&#8221;). You see what was probed and when, not the real source. Do not port-forward T-Pot on the router.';
+    $('links').innerHTML=(d.links||[]).map(function(l){return '<a class="lnk" target="_blank" rel="noopener" href="'+esc(l.url)+'">'+esc(l.name)+'</a>';}).join(' ');
+    var s=d.stats||{};
+    $('kEv').textContent=s.total==null?'—':num(s.total);$('kTy').textContent=s.types?s.types.length:'—';
+    var r=d.recent||[];$('kLast').textContent=r.length?ago(r[0].time):'—';$('kAll').textContent=st.es?num(st.events):'—';
+    $('kCt').textContent=REM?'in VM':(st.expected?(st.running+' / '+st.expected):'—');
+    var f=d.feed||{};$('kFeed').textContent=f.running?(f.connected?'live':'down'):'idle';$('kFeed').style.color=f.running&&f.connected?'var(--grn)':'var(--amb)';
+    hist(s.hist);bars('types',s.types);bars('ports',s.ports);bars('pws',s.pws);bars('users',s.users);bars('cmds',s.cmds);bars('urls',s.urls);
+    $('rows').innerHTML=r.length?r.map(function(e){return '<tr><td>'+new Date(e.time*1000).toLocaleTimeString()+'</td><td class="mk">'+esc(e.type)+'</td><td>'+esc(e.port||'')+'</td><td class="vd">'+esc(e.what)+'</td><td title="'+esc(e.sample)+'" style="color:var(--dim)">'+esc(e.sample)+'</td><td>'+(e.masked?(REM?esc(e.ip)+' (your network)':'via Docker'):esc(e.ip))+'</td></tr>';}).join(''):'<tr><td colspan="6" class="empty">No attacks yet. Quiet is normal on a clean network.</td></tr>';
+    $('ctr').innerHTML=REM?'<div class="empty">T-Pot&#8217;s containers run inside the VM. See them in the portal or with dps in the VM.</div>':((st.containers||[]).map(function(c){return '<span class="'+(c.up?'up':'dn')+'" title="'+esc(c.status)+'">'+esc(c.name)+'</span>';}).join('')||'<div class="empty">No T-Pot containers found.</div>');
+  }).catch(function(e){$('sub').textContent='The app on the PC is not reachable.';});}
+load();setInterval(function(){if(!document.hidden)load();},4000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)load();});
+</script>
+</body></html>
+'''
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']), ('@@ACCENT@@', _ui['accent'])):
+            _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
         return _html
 
     def _build_honeypot_html(self):
@@ -44129,8 +51410,11 @@ function load(quiet){
     cs.style.color=run?'var(--mint)':'var(--dim)';
     document.getElementById('c-total').textContent=d.total||0;
     document.getElementById('c-uniq').textContent=d.unique_ips||0;
-    document.getElementById('c-ports').textContent=
-      (d.ports||[]).length+(d.udp_ports||[]).length;
+    var tp=(d.source==='tpot');
+    document.getElementById('c-ports').textContent=tp?Object.keys(d.types||{}).length:(d.ports||[]).length+(d.udp_ports||[]).length;
+    document.getElementById('c-ports').nextElementSibling.textContent=tp?'T-Pot honeypots hit':'Decoys';
+    ['c-stuck','c-tarpitsec'].forEach(function(id){document.getElementById(id).parentNode.style.display=tp?'none':'';});
+    document.getElementById('cTarpit').parentNode.style.display=tp?'none':'';
     document.getElementById('c-life').textContent=(d.persisted||{}).total||0;
     document.getElementById('c-stuck').textContent=d.tarpit_active||0;
     document.getElementById('c-tarpitsec').textContent=fmtSecs(d.tarpit_seconds);
@@ -44139,9 +51423,19 @@ function load(quiet){
     document.getElementById('bStart').disabled=run;
     document.getElementById('bStop').disabled=!run;
     document.getElementById('bTest').disabled=!run;
+    if(tp){
+      var ty=Object.keys(d.types||{}).map(function(k){return k+' '+d.types[k];}).join(', ');
+      document.getElementById('ports').textContent=
+        (d.remote?'Source: T-Pot in a VM':'Source: T-Pot (20+ honeypots in Docker)')+(d.connected===false?' \u2014 NOT ANSWERING: '+(d.error||''):'')
+        +(ty?'   \u00b7   '+ty:'')
+        +(d.remote?'   \u00b7   real visitor addresses; sources on your own network are never auto-blocked':'   \u00b7   Docker hides the real visitor address, so rows say "via Docker"');
+    }else if(d.source==='tpot'||(!d.ports&&d.source)){
+      document.getElementById('ports').textContent='Source: T-Pot. Press START to connect.';
+    }else{
     document.getElementById('ports').textContent=
       'TCP ('+(d.ports||[]).length+'): '+(d.ports||[]).join(', ')+
       '   \u00b7   UDP ('+(d.udp_ports||[]).length+'): '+(d.udp_ports||[]).join(', ');
+    }
 
     var counts={};(d.top||[]).forEach(function(t){counts[t[0]]=t[1];});
     var rows=(d.hits||[]).slice().reverse();
@@ -44152,7 +51446,8 @@ function load(quiet){
     }else{
       tb.innerHTML=rows.map(function(h){
         var origin=h.known?'<span style="color:#6a9ab8">known LAN</span>'
-                          :'<span style="color:#ff9f43">external</span>';
+                          :(h.masked?(d.remote?'<span style="color:#b38cff" title="An address on your own network; never auto-blocked">your network</span>':'<span style="color:#b38cff" title="Docker hides the real visitor address">via Docker</span>')
+                                    :'<span style="color:#ff9f43">external</span>');
         return '<tr data-ip="'+esc(h.ip)+'" class="'+(selected[h.ip]?'sel':'')+'">'
           +'<td>'+fmt(h.time)+'</td><td>'+esc(h.ip)+'</td><td>'+origin+'</td>'
           +'<td>'+esc(h.port)+'/'+esc(h.proto||'tcp')+'</td>'
@@ -45504,8 +52799,11 @@ ol.steps li{margin:6px 0}
                                             'status': ''},
                                     'csi_hist': [], 'csi_moves': [], 'away': False, 'at_pc': False, 'events': [],
                                     'aps': [], 'health': None, 'findings': [], 'advice': [],
+                                    'night': {'on': bool(p.get('night_alarm', True)), 'from': p.get('night_from') or '01:00',
+                                              'to': p.get('night_to') or '03:00', 'active': False, 'watching': False},
                                     'prefs': {k: p.get(k) for k in ('away', 'auto_away_min', 'background', 'csi_bg',
-                                                                    'csi_port', 'alert_away', 'web_control')},
+                                                                    'csi_port', 'floor_bg', 'night_alarm', 'alert_away',
+                                                                    'web_control')},
                                     'local': local, 'can_disarm': local})
                 return
             if qs.get('lite'):
@@ -45668,10 +52966,965 @@ ol.steps li{margin:6px 0}
             ok, msg = w.web_set(str(req.get('key') or ''), bool(req.get('value')), self._peer_is_local(handler))
             handler._json(200 if ok else 403, {'ok': ok, 'message': msg if ok else '', 'error': '' if ok else msg,
                                                'prefs': {k: w.prefs.get(k) for k in ('away', 'auto_away_min', 'background',
-                                                                                     'csi_bg', 'csi_port', 'web_control')}})
+                                                                                     'csi_bg', 'csi_port', 'floor_bg', 'night_alarm',
+                                                                                     'web_control')}})
         except Exception as e:
             _exc('_post_wifi_set')
             handler._json(500, {'ok': False, 'error': str(e)})
+
+    def _serve_csi_api(self, handler, path):
+        """GET /api/csi/*: the data behind the /csi page (see _NMCsiWeb). Reading is open; changes go through
+        POST /api/csi/act."""
+        try:
+            from urllib.parse import urlparse, parse_qs
+            if not _NM_IS_WIN and not os.environ.get('NM_WIFI_TEST'):
+                handler._json(200, {'ok': False, 'error': 'The CSI page needs the Windows version of the app.'}); return
+            q = {k: v[0] for k, v in parse_qs(urlparse(handler.path).query).items() if v}
+            w = self._wifi_web_watcher(handler, start=True)
+            if w is None:
+                return
+            cw = w.csi_web()
+
+            def num(k, d=None):
+                try:
+                    return float(q.get(k))
+                except (TypeError, ValueError):
+                    return d
+            sub = path[len('/api/csi/'):].strip('/')
+            if sub == 'feeds':
+                d = cw.feeds()
+                local = self._peer_is_local(handler)
+                d['local'] = local
+                d['can_act'] = bool(local or w.prefs.get('web_control'))
+            elif sub == 'live':
+                d = cw.live(q.get('feed') if q.get('feed') in ('board', 'down', 'up') else 'board')
+            elif sub == 'floor':
+                d = cw.floor_view()
+            elif sub == 'fhist':
+                d = cw.fhist(q.get('floor', ''), num('t0'), num('t1'), int(num('n', 240)))
+            elif sub == 'fhist/at':
+                d = cw.fhist_at(q.get('floor', ''), num('t', time.time()))
+            elif sub == 'fhist/nav':
+                d = cw.fhist_nav(q.get('floor', ''), num('t', time.time()), 1 if num('dir', 1) > 0 else -1)
+            elif sub == 'hist/overview':
+                d = cw.hist_overview(num('range', 3600.0), int(num('n', 300)))
+            elif sub == 'hist/at':
+                d = cw.hist_at(num('t', time.time()))
+            elif sub == 'hist/nav':
+                d = cw.hist_nav(num('t', time.time()), 1 if num('dir', 1) > 0 else -1)
+            else:
+                handler._json(404, {'ok': False, 'error': 'Unknown request.'}); return
+            handler._json(200, d)
+        except Exception as e:
+            _exc('_serve_csi_api')
+            handler._json(200, {'ok': False, 'error': str(e)})
+
+    def _post_csi_act(self, handler, req):
+        """POST /api/csi/act {action, feed, floor}: calibration from the page. Same-origin only; _NMCsiWeb.act applies
+        the safety rule (the PC itself, or the 'allow switching off from other devices' tick)."""
+        try:
+            from urllib.parse import urlparse
+            origin = handler.headers.get('Origin') or ''
+            if origin and urlparse(origin).netloc != (handler.headers.get('Host') or ''):
+                handler._json(403, {'ok': False, 'error': 'Not allowed from another web page.'}); return
+            w = self._wifi_web_watcher(handler, start=True)
+            if w is None:
+                return
+            ok, msg = w.csi_web().act(req, self._peer_is_local(handler))
+            handler._json(200 if ok else 403, {'ok': ok, 'message': msg if ok else '', 'error': '' if ok else msg})
+        except Exception as e:
+            _exc('_post_csi_act')
+            handler._json(500, {'ok': False, 'error': str(e)})
+
+    def _build_csi_html(self):
+        _html = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>CSI Sensing</title>
+<meta name="theme-color" content="@@BG@@">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;--acc:@@ACCENT@@;--red:#ff5c4d;--grn:#2fe07a;--amb:#ff9f43;}
+ *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+   padding:env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 28px);min-height:100vh;max-width:860px;margin:0 auto;-webkit-font-smoothing:antialiased;}
+ header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
+ header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
+ header h1{font-size:16px;font-weight:650;flex:1;}
+ .chip{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:7px;letter-spacing:.5px;white-space:nowrap;background:var(--line);color:var(--tick);}
+ .chip.moving{background:#7a1d12;color:#ffd5cf;}
+ .chip.quiet{background:#12482b;color:#c8ffe0;}
+ .chip.warn{background:#6b3d00;color:#ffe0b0;}
+ .chip.past{background:#12384f;color:#bfe6ff;}
+ .dot{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
+ .dot.live{background:#39ff14;box-shadow:0 0 8px #39ff14;}
+ .sub{font-size:11.5px;color:var(--tick);padding:0 2px 10px;line-height:1.5;}
+ nav.jump{display:flex;gap:6px;overflow-x:auto;padding:2px 0 12px;position:sticky;top:0;background:var(--bg);z-index:3;}
+ nav.jump a{flex:0 0 auto;font-size:12px;color:var(--tick);text-decoration:none;border:1px solid var(--line);border-radius:16px;padding:5px 12px;}
+ nav.jump a:active{background:var(--panel);color:var(--text);}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:14px;margin-bottom:12px;scroll-margin-top:44px;}
+ .card h2{font-size:13px;font-weight:650;letter-spacing:.3px;margin-bottom:2px;}
+ .card h3{font-size:12px;font-weight:650;margin:12px 0 2px;}
+ .note{font-size:11px;color:var(--tick);line-height:1.5;margin:2px 0 8px;}
+ canvas{display:block;width:100%;}
+ .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px;}
+ .tabs button,.btn{font:inherit;font-size:12px;border:1px solid var(--line);background:transparent;color:var(--tick);border-radius:14px;padding:6px 12px;min-height:32px;}
+ .tabs button.on,.btn.on{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:650;}
+ .btn:disabled{opacity:.4;}
+ .btn.pri{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:650;}
+ .btns{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;}
+ .chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 8px;}
+ .stats{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--tick);margin-top:6px;font-variant-numeric:tabular-nums;}
+ .stats b{color:var(--text);font-weight:650;}
+ .msg{font-size:12px;margin-top:8px;min-height:16px;color:var(--amb);line-height:1.5;}
+ .banner{display:none;align-items:center;gap:10px;background:#12384f;color:#bfe6ff;border-radius:10px;padding:8px 12px;font-size:12px;margin:6px 0;}
+ .banner.on{display:flex;}
+ .banner span{flex:1;}
+ .empty{color:var(--tick);text-align:center;padding:22px 12px;font-size:13px;line-height:1.7;}
+ .two{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+ @media (max-width:640px){.two{grid-template-columns:1fr;}}
+ .fl{border:1px solid var(--line);border-radius:12px;padding:10px;min-width:0;}
+ .fl h4{font-size:12.5px;font-weight:650;margin-bottom:4px;display:flex;align-items:center;gap:8px;}
+ .fl h4 i{font-style:normal;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;background:var(--line);color:var(--tick);}
+ .fl h4 i.mv{background:#7a1d12;color:#ffd5cf;}
+ input[type=range]{width:100%;height:30px;accent-color:var(--acc);margin:2px 0;}
+ label.ck{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--tick);margin:8px 0;}
+ label.ck input{width:18px;height:18px;accent-color:var(--acc);}
+ .sw{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);}
+ .sw:last-of-type{border-bottom:0;}
+ .sw .tx{flex:1;font-size:13px;line-height:1.4;} .sw .tx small{display:block;color:var(--tick);font-size:11px;}
+ .sw button{flex:0 0 auto;width:50px;height:28px;border-radius:14px;border:0;background:#2a3550;position:relative;transition:.2s;}
+ .sw button::after{content:'';position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#c9d4ea;transition:.2s;}
+ .sw button.on{background:var(--grn);} .sw button.on::after{left:25px;background:#fff;}
+ .sw button:disabled{opacity:.4;}
+ .steps{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;}
+ .alarm{display:none;position:sticky;top:0;z-index:5;align-items:center;gap:10px;background:#b3261e;color:#fff;border-radius:12px;padding:10px 12px;margin:0 0 10px;font-size:13px;line-height:1.4;}
+ .alarm.on{display:flex;}
+ .alarm span{flex:1;}
+ .alarm .btn{background:#fff;color:#7a1d12;border-color:#fff;font-weight:700;}
+ footer{text-align:center;color:var(--tick);font-size:11px;margin-top:16px;opacity:.65;line-height:1.6;}
+ :focus-visible{outline:2px solid var(--acc);outline-offset:2px;}
+</style>
+</head>
+<body>
+<header><a class="back" href="/wifi" aria-label="Back to Wi-Fi and boards">&#8592;</a><h1>CSI Sensing</h1><span class="chip" id="chip">&hellip;</span><div class="dot" id="dot"></div></header>
+<div class="sub" id="sub">Loading&hellip;</div>
+<div class="alarm" id="alarm" role="alert"><span><b>NIGHT ALARM</b> <span id="alarmTx"></span></span><button class="btn" id="alarmOff">Silence</button></div>
+<nav class="jump"><a href="#live">Live</a><a href="#bh">Board history</a><a href="#floors">Floors</a><a href="#wk">Weekly history</a><a href="#ctl">Controls</a></nav>
+
+<div class="card" id="live">
+ <h2>Live</h2>
+ <div class="tabs" id="feedTabs"></div>
+ <div class="banner" id="banner"><span id="bannerTx"></span><button class="btn pri" id="bannerLive">Back to live</button></div>
+ <div class="chips"><span class="chip" id="lChip">&hellip;</span><span class="chip" id="lRoom"></span><span class="chip" id="lBreath"></span></div>
+ <div class="empty" id="lOff" style="display:none"></div>
+ <div id="lBody">
+  <h3>What is changing, by channel group</h3>
+  <div class="note">Each row is a band of Wi-Fi channels, the last minute runs left to right. Dark means steady; orange and white mean the signal there is changing.</div>
+  <canvas id="cHeat" height="150"></canvas>
+  <h3>Movement level</h3>
+  <div class="note">The dashed line is the movement threshold. The red part of the line is above it.</div>
+  <canvas id="cTurb" height="120"></canvas>
+  <h3>Signal shape</h3>
+  <div class="note">How strong each channel is right now (bright line) against the empty room (dashed). A big difference means something in the room has changed.</div>
+  <canvas id="cShape" height="110"></canvas>
+  <h3>Breathing</h3>
+  <div class="note" id="brNote">Looks for a slow regular rhythm in the signal; only meaningful when someone sits very still.</div>
+  <canvas id="cBreath" height="90"></canvas>
+  <div class="stats" id="lStats"></div>
+  <div class="btns" id="calBtns"></div>
+  <div class="msg" id="calMsg"></div>
+ </div>
+</div>
+
+<div class="card" id="bh">
+ <h2>Board history</h2>
+ <div class="note">What the single board saw, kept for a week. Tap the graph to look at that moment in the Live section above.</div>
+ <div class="tabs" id="bhRange"></div>
+ <canvas id="cOv" height="110"></canvas>
+ <div class="stats" id="bhInfo"></div>
+ <div class="btns" id="bhBtns"></div>
+ <div class="msg" id="bhMsg"></div>
+</div>
+
+<div class="card" id="floors">
+ <h2>Floors</h2>
+ <div class="note">Two pairs of boards, one pair per floor, work out which floor someone moved on. The red zone is the stretch between that floor's transmitter (Tx) and receiver (Rx).</div>
+ <div class="chips"><span class="chip" id="fChip">&hellip;</span><span class="chip" id="fCal"></span></div>
+ <div class="two" id="fPlans"></div>
+ <div class="stats" id="fLinks"></div>
+ <div class="stats" id="fBatt"></div>
+ <h3>Calibration</h3>
+ <div class="note" id="fStatus"></div>
+ <div class="steps" id="fSteps"></div>
+ <div class="msg" id="fMsg"></div>
+</div>
+
+<div class="card" id="wk">
+ <h2>Weekly history</h2>
+ <div class="note">A week of which floor moved, and where. Drag a slider to go back in time, one per floor.</div>
+ <label class="ck"><input type="checkbox" id="wkLink" checked> Move both sliders together</label>
+ <div class="two" id="wkFloors"></div>
+ <div class="btns"><button class="btn" id="wkNow">Back to now</button></div>
+ <div class="msg" id="wkMsg"></div>
+</div>
+
+<div class="card" id="ctl">
+ <h2>Controls</h2>
+ <div class="note" id="ctlNote"></div>
+ <div id="sws"></div>
+ <div class="note" id="nightInfo"></div>
+ <div class="btns"><button class="btn" id="nightTest">Test the klaxon</button></div>
+ <div class="msg" id="ctlMsg"></div>
+ <div class="note" style="margin-top:10px">Still done on the PC only: flashing and picking the boards, copying or saving the raw signal, marking which board is which, and teaching the app a place on the plan.</div>
+</div>
+<footer>Everything here is read from the app on your PC. The signal sees that something moved, not who.<br>Use it in your own home, with the people there aware.</footer>
+
+<script>
+var DPR=Math.min(2,window.devicePixelRatio||1);
+function $(i){return document.getElementById(i);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function prep(cv,h){var w=cv.clientWidth||300;h=h||parseInt(cv.getAttribute('data-h')||cv.getAttribute('height'),10)||120;cv.setAttribute('data-h',h);cv.style.height=h+'px';
+  cv.width=Math.round(w*DPR);cv.height=Math.round(h*DPR);var c=cv.getContext('2d');c.setTransform(DPR,0,0,DPR,0,0);return {c:c,w:w,h:h};}
+function getJSON(u){return fetch(u,{cache:'no-store'}).then(function(r){return r.json();});}
+function postJSON(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json();});}
+function pad(n){return ('0'+n).slice(-2);}
+function clock(t,secs){var d=new Date(t*1000);return pad(d.getHours())+':'+pad(d.getMinutes())+(secs?':'+pad(d.getSeconds()):'');}
+function dayClock(t,secs){var d=new Date(t*1000),now=new Date();var same=d.toDateString()===now.toDateString();
+  return (same?'today':['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()]+' '+d.getDate()+'/'+(d.getMonth()+1))+' '+clock(t,secs);}
+function dur(s){s=Math.round(s);if(s<60)return s+' s';if(s<3600)return Math.floor(s/60)+' min '+pad(s%60)+' s';if(s<172800)return (s/3600).toFixed(1)+' h';return (s/86400).toFixed(1)+' days';}
+
+/* ---------- colours ---------- */
+function rgb(h){h=String(h||'').trim();if(h[0]==='#'){h=h.slice(1);if(h.length===3)h=h.split('').map(function(x){return x+x;}).join('');
+  return [parseInt(h.substr(0,2),16)||0,parseInt(h.substr(2,2),16)||0,parseInt(h.substr(4,2),16)||0];}
+  var m=h.match(/(\d+)[ ,]+(\d+)[ ,]+(\d+)/);return m?[+m[1],+m[2],+m[3]]:[20,30,50];}
+function mix(a,b,t){return [Math.round(a[0]+(b[0]-a[0])*t),Math.round(a[1]+(b[1]-a[1])*t),Math.round(a[2]+(b[2]-a[2])*t)];}
+function rgbs(a){return 'rgb('+a[0]+','+a[1]+','+a[2]+')';}
+var LUT=null;
+function buildLut(){var P=rgb(css('--panel')),A=rgb(css('--acc'));
+  var S=[[0,P],[0.25,mix(P,A,0.32)],[0.5,[255,138,61]],[0.75,[255,210,63]],[1,[255,251,230]]];LUT=[];
+  for(var i=0;i<=100;i++){var t=i/100,k=1;while(k<S.length-1&&t>S[k][0])k++;var a=S[k-1],b=S[k],u=(t-a[0])/(b[0]-a[0]);LUT.push(rgbs(mix(a[1],b[1],u)));}}
+
+/* ---------- state ---------- */
+var S={feed:null,feeds:null,doc:null,T:null,play:0,busy:false,can:false,local:false,ov:null,range:3600,fview:null,names:{down:'Downstairs',up:'Upstairs'},
+  wk:{span:null,t:{down:null,up:null},data:{},at:{}}};
+
+/* ---------- live ---------- */
+function loadFeeds(){return getJSON('/api/csi/feeds').then(function(d){
+  if(!d||!d.ok){$('sub').textContent=(d&&d.error)||'The app is not reachable.';return;}
+  S.feeds=d;S.can=!!d.can_act;S.local=!!d.local;S.names=d.names||S.names;
+  if(d.theme){}
+  var shown=d.feeds.filter(function(f){return f.show||f.live;});
+  if(!shown.length)shown=[d.feeds[0]];
+  if(!S.feed||!shown.some(function(f){return f.id===S.feed;})){var lv=shown.filter(function(f){return f.live;});S.feed=(lv[0]||shown[0]).id;}
+  var h='';shown.forEach(function(f){h+='<button data-f="'+f.id+'" class="'+(f.id===S.feed?'on':'')+'">'+esc(f.label)+(f.live?'':' (off)')+'</button>';});
+  $('feedTabs').innerHTML=h;
+  var any=d.feeds.some(function(f){return f.live;});
+  $('dot').className='dot'+(any?' live':'');
+  $('sub').textContent=any?'Boards are sending. Updates every second.':'No board is sending right now.';
+  renderControls();
+  renderAlarm(d.night);
+}).catch(function(){$('sub').textContent='The app on the PC is not reachable.';});}
+$('feedTabs').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;S.feed=b.getAttribute('data-f');S.T=null;S.play=0;renderBhBtns();
+  [].forEach.call($('feedTabs').children,function(x){x.classList.toggle('on',x===b);});pollLive();});
+
+function setChip(el,text,tone){el.textContent=text;el.className='chip'+(tone?' '+tone:'');}
+function pollLive(){
+  if(S.T!=null)return;
+  getJSON('/api/csi/live?feed='+encodeURIComponent(S.feed||'board')).then(function(d){if(S.T==null)renderLive(d);}).catch(function(){});
+}
+function renderLive(d){
+  S.doc=d;if(!d)return;
+  var past=!!d.past;
+  $('banner').classList.toggle('on',past);
+  if(past)$('bannerTx').textContent='Looking at '+dayClock(d.t,true)+(d.kind==='sim'?' (simulated data)':'')+'.';
+  if(!d.ok){$('lOff').style.display='';$('lOff').textContent=d.error||'Could not read this feed.';$('lBody').style.display='none';return;}
+  if(!d.live&&!past){setChip($('chip'),d.chip||'NOT CONNECTED','');setChip($('lChip'),d.chip||'NOT CONNECTED','');setChip($('lRoom'),'','');setChip($('lBreath'),'','');
+    $('lRoom').style.display=$('lBreath').style.display='none';
+    $('lOff').style.display='';$('lOff').innerHTML=esc(d.why||'')+(d.status?'<br><small>'+esc(d.status)+'</small>':'');$('lBody').style.display='none';return;}
+  $('lOff').style.display='none';$('lBody').style.display='';$('lRoom').style.display=$('lBreath').style.display='';
+  var tone=past?'past':(d.tone||'');
+  setChip($('lChip'),d.chip,tone==='moving'?'moving':(tone==='quiet'?'quiet':(past?'past':'')));
+  setChip($('chip'),d.chip.replace('PAST · ','')+(past?' (past)':''),tone==='moving'?'moving':(tone==='quiet'?'quiet':''));
+  setChip($('lRoom'),d.room?d.room.text:'',d.room&&d.room.tone==='warn'?'warn':'');
+  setChip($('lBreath'),d.breath_text||'','');
+  drawHeat(d);drawTurb(d);drawShape(d);drawBreath(d);
+  var st=d.stats||{},h='';
+  if(st.rate!=null)h+='<span><b>'+st.rate+'</b> packets/s</span>';
+  if(st.rssi!=null)h+='<span>signal <b>'+st.rssi+'</b> dBm</span>';
+  if(st.n_sc)h+='<span><b>'+st.n_sc+'</b> channels</span>';
+  if(st.bad)h+='<span style="color:var(--amb)"><b>'+st.bad+'</b> bad lines</span>';
+  if(d.owner)h+='<span>read by '+(d.owner==='tab'?'the CSI tab on the PC':(d.owner==='window'?'the Floor window on the PC':'the app in the background'))+'</span>';
+  $('lStats').innerHTML=h+(d.hint?'<span style="flex-basis:100%;color:var(--amb)">'+esc(d.hint)+'</span>':'');
+  renderCal(d);
+}
+function drawHeat(d){
+  var P=prep($('cHeat')),c=P.c,w=P.w,h=P.h,L=28,B=16,T=2;if(!LUT)buildLut();
+  c.fillStyle=css('--panel');c.fillRect(0,0,w,h);
+  var H=d.heat;
+  c.fillStyle=css('--tick');c.font='10px system-ui,sans-serif';c.textAlign='right';c.fillText('high',L-4,T+10);c.fillText('low',L-4,h-B-3);
+  c.textAlign='center';c.fillText('−60 s',L+14,h-3);c.fillText('−30 s',L+(w-L)/2,h-3);c.fillText('now',w-14,h-3);
+  if(!H){c.fillStyle=css('--text');c.font='12px system-ui,sans-serif';c.fillText(d.learning?'Learning the baseline…':'Nothing recorded here',L+(w-L)/2,(h-B)/2);return;}
+  var nb=H.length,nc=H[0].length,cw=(w-L-2)/nc,ch=(h-B-T)/nb;
+  for(var b=0;b<nb;b++){var row=H[nb-1-b];for(var i=0;i<nc;i++){var q=row[i];
+    c.fillStyle=q<0?'rgba(128,128,128,0.10)':LUT[Math.max(0,Math.min(100,q))];c.fillRect(L+i*cw,T+b*ch,Math.ceil(cw)+0.5,Math.ceil(ch)+0.5);}}
+}
+function drawTurb(d){
+  var P=prep($('cTurb')),c=P.c,w=P.w,h=P.h,L=34,R=6,T=6,B=16,pw=w-L-R,ph=h-T-B;
+  var pts=d.turb||[];c.fillStyle='rgba(255,255,255,0.025)';c.fillRect(L,T,pw,ph);
+  c.fillStyle=css('--tick');c.font='10px system-ui,sans-serif';c.textAlign='center';c.fillText('−60 s',L+14,h-3);c.fillText('now',w-R-12,h-3);
+  if(!pts.length){c.fillText('no readings yet',L+pw/2,T+ph/2);return;}
+  var ymax=0;pts.forEach(function(p){ymax=Math.max(ymax,p[1]);});if(d.thr)ymax=Math.max(ymax,d.thr*1.5);ymax=ymax*1.1||1;
+  function X(x){return L+(x+60)/60*pw;}function Y(y){return T+(1-y/ymax)*ph;}
+  c.strokeStyle='rgba(255,255,255,0.07)';c.lineWidth=1;c.textAlign='right';
+  for(var k=0;k<=2;k++){var yy=ymax*k/2;c.beginPath();c.moveTo(L,Y(yy));c.lineTo(L+pw,Y(yy));c.stroke();c.fillText(yy.toFixed(yy<10?2:0),L-4,Y(yy)+3);}
+  var ta=d.thr_arr;
+  function thAt(i){return ta&&ta[i]!=null?ta[i]:d.thr;}
+  c.lineWidth=1.8;c.lineJoin='round';
+  for(var i=1;i<pts.length;i++){var th=thAt(i);var hot=th!=null&&pts[i][1]>=th;c.strokeStyle=hot?'#ff5c4d':css('--acc');
+    c.beginPath();c.moveTo(X(pts[i-1][0]),Y(pts[i-1][1]));c.lineTo(X(pts[i][0]),Y(pts[i][1]));c.stroke();}
+  if(ta){c.strokeStyle='rgba(255,255,255,0.55)';c.setLineDash([5,4]);c.lineWidth=1;c.beginPath();var st=false;
+    for(var j=0;j<pts.length;j++){if(ta[j]==null)continue;if(!st){c.moveTo(X(pts[j][0]),Y(ta[j]));st=true;}else c.lineTo(X(pts[j][0]),Y(ta[j]));}c.stroke();c.setLineDash([]);}
+  else if(d.thr!=null){c.strokeStyle='rgba(255,255,255,0.55)';c.setLineDash([5,4]);c.lineWidth=1;c.beginPath();c.moveTo(L,Y(d.thr));c.lineTo(L+pw,Y(d.thr));c.stroke();c.setLineDash([]);}
+}
+function drawShape(d){
+  var P=prep($('cShape')),c=P.c,w=P.w,h=P.h,L=30,R=6,T=6,B=16,pw=w-L-R,ph=h-T-B;
+  c.fillStyle='rgba(255,255,255,0.025)';c.fillRect(L,T,pw,ph);
+  var s=d.shape;c.fillStyle=css('--tick');c.font='10px system-ui,sans-serif';c.textAlign='center';
+  if(!s||!s.now){c.fillText('waiting for data',L+pw/2,T+ph/2);return;}
+  var lo=1e9,hi=-1e9;[s.now,s.ref||[]].forEach(function(a){a.forEach(function(v){if(v!=null){lo=Math.min(lo,v);hi=Math.max(hi,v);}});});
+  if(lo>=hi){lo-=1;hi+=1;}var m=(hi-lo)*0.08;lo-=m;hi+=m;var n=s.now.length;
+  function X(i){return L+i/Math.max(1,n-1)*pw;}function Y(v){return T+(1-(v-lo)/(hi-lo))*ph;}
+  function line(a,col,dash,wd){c.strokeStyle=col;c.lineWidth=wd;c.setLineDash(dash);c.beginPath();var on=false;
+    for(var i=0;i<a.length;i++){if(a[i]==null){on=false;continue;}if(!on){c.moveTo(X(i),Y(a[i]));on=true;}else c.lineTo(X(i),Y(a[i]));}c.stroke();c.setLineDash([]);}
+  if(s.ref)line(s.ref,'rgba(255,255,255,0.55)',[5,4],1.2);
+  line(s.now,css('--acc'),[],1.8);
+  c.fillText('channel 1',L+22,h-3);c.fillText('channel '+n,w-R-26,h-3);
+  c.textAlign='right';c.fillText(hi.toFixed(0),L-4,T+8);c.fillText(lo.toFixed(0),L-4,T+ph);
+}
+function drawBreath(d){
+  var P=prep($('cBreath')),c=P.c,w=P.w,h=P.h,L=34,R=6,T=6,B=16,pw=w-L-R,ph=h-T-B;
+  c.fillStyle='rgba(255,255,255,0.025)';c.fillRect(L,T,pw,ph);
+  var b=d.breath||{};$('brNote').textContent=b.why||'Looks for a slow regular rhythm in the signal; only meaningful when someone sits very still.';
+  c.fillStyle=css('--tick');c.font='10px system-ui,sans-serif';c.textAlign='center';
+  if(!b.freqs||!b.freqs.length){c.fillText('not measured here',L+pw/2,T+ph/2);return;}
+  var f=b.freqs,p=b.power,mx=0;p.forEach(function(v){if(v!=null)mx=Math.max(mx,v);});mx=mx||1;
+  var f0=f[0],f1=f[f.length-1];function X(v){return L+(v-f0)/(f1-f0||1)*pw;}function Y(v){return T+(1-v/mx)*ph;}
+  c.strokeStyle=css('--acc');c.lineWidth=1.6;c.beginPath();var on=false;
+  for(var i=0;i<f.length;i++){if(p[i]==null){on=false;continue;}if(!on){c.moveTo(X(f[i]),Y(p[i]));on=true;}else c.lineTo(X(f[i]),Y(p[i]));}c.stroke();
+  if(b.bpm){c.strokeStyle='#ff9f43';c.setLineDash([3,3]);c.beginPath();c.moveTo(X(b.bpm),T);c.lineTo(X(b.bpm),T+ph);c.stroke();c.setLineDash([]);c.fillStyle='#ff9f43';c.fillText(b.bpm.toFixed(0)+'/min',Math.min(w-30,Math.max(L+20,X(b.bpm))),T+10);}
+  c.fillStyle=css('--tick');c.fillText(f0.toFixed(0)+' per min',L+24,h-3);c.fillText(f1.toFixed(0)+' per min',w-R-30,h-3);
+}
+
+/* ---------- calibration ---------- */
+function renderCal(d){
+  var f=S.feed,h='',cal=d.cal||{},past=!!d.past;
+  if(past){$('calBtns').innerHTML='';$('calMsg').textContent='';return;}
+  var off=!S.can;
+  if(f==='board'){
+    if(cal.after!=null)h+='<span class="chip warn">Leave the room — starting in '+Math.ceil(cal.after)+' s</span>';
+    else if(cal.progress!=null&&cal.progress>0&&cal.progress<1)h+='<span class="chip warn">Learning the empty room: '+Math.round(cal.progress*100)+'%</span>';
+    h+='<button class="btn pri" data-a="cal_empty" data-f="board"'+(off?' disabled':'')+'>Calibrate empty room</button>';
+    h+='<button class="btn" data-a="cal_clear" data-f="board"'+(off?' disabled':'')+'>Clear calibration</button>';
+    if(cal.when)h+='<span class="note" style="flex-basis:100%">Calibrated '+dayClock(cal.when,false)+'.</span>';
+  }else{
+    h+='<span class="note">The floor links are calibrated together in the Floors section below.</span>';
+  }
+  $('calBtns').innerHTML=h;
+  if(off&&f==='board')$('calMsg').textContent='Changing the calibration from this device needs "Allow switching off from other devices" ticked on the PC.';
+  else if($('calMsg').textContent.indexOf('Allow switching')===0)$('calMsg').textContent='';
+}
+function act(a,feed,floor,msgEl){
+  msgEl.textContent='…';
+  postJSON('/api/csi/act',{action:a,feed:feed,floor:floor||''}).then(function(j){msgEl.textContent=j.ok?(j.message||'Done.'):(j.error||'Could not do that.');pollLive();pollFloors();})
+   .catch(function(){msgEl.textContent='The app on the PC is not reachable.';});
+}
+$('calBtns').addEventListener('click',function(e){var b=e.target.closest('button');if(!b||b.disabled)return;act(b.getAttribute('data-a'),b.getAttribute('data-f'),'',$('calMsg'));});
+$('fSteps').addEventListener('click',function(e){var b=e.target.closest('button');if(!b||b.disabled)return;act(b.getAttribute('data-a'),'floor',b.getAttribute('data-fl')||'',$('fMsg'));});
+
+/* ---------- board history ---------- */
+var RANGES=[['1 hour',3600],['6 hours',21600],['24 hours',86400],['Everything',0]];
+function renderRanges(){var h='';RANGES.forEach(function(r){h+='<button data-r="'+r[1]+'" class="'+(S.range===r[1]?'on':'')+'">'+r[0]+'</button>';});$('bhRange').innerHTML=h;}
+$('bhRange').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;S.range=parseInt(b.getAttribute('data-r'),10);renderRanges();loadOv();});
+function loadOv(){getJSON('/api/csi/hist/overview?range='+S.range+'&n=300').then(function(d){S.ov=d;drawOv();}).catch(function(){});}
+function drawOv(){
+  var d=S.ov,P=prep($('cOv')),c=P.c,w=P.w,h=P.h,L=8,R=8,T=6,B=16,pw=w-L-R,ph=h-T-B;
+  c.fillStyle='rgba(255,255,255,0.025)';c.fillRect(L,T,pw,ph);c.font='10px system-ui,sans-serif';c.fillStyle=css('--tick');c.textAlign='center';
+  if(!d||!d.ok){c.fillText((d&&d.error)||'…',w/2,h/2);return;}
+  if(d.empty){c.fillText('Nothing recorded yet. It fills in while a board is connected.',w/2,h/2);$('bhInfo').textContent='';return;}
+  var n=d.real.length,mx=10;d.real.concat(d.sim).forEach(function(v){if(v!=null)mx=Math.max(mx,v);});mx*=1.1;
+  var bw=pw/n;
+  for(var i=0;i<n;i++){var v=d.real[i],sm=false;if(v==null){v=d.sim[i];sm=true;}if(v==null)continue;
+    var bh=Math.max(1,v/mx*ph);c.fillStyle=sm?'#ffa43a':css('--acc');c.fillRect(L+i*bw,T+ph-bh,Math.max(1,bw-0.5),bh);}
+  S.ovGeo={L:L,pw:pw,t0:d.t0,t1:d.t1};
+  c.fillStyle=css('--tick');c.textAlign='left';c.fillText(dayClock(d.t0,false),L,h-3);c.textAlign='right';c.fillText(dayClock(d.t1,false),w-R,h-3);
+  if(S.T!=null&&S.T>=d.t0&&S.T<=d.t1){var x=L+(S.T-d.t0)/(d.t1-d.t0)*pw;c.strokeStyle='#38b8f0';c.lineWidth=2;c.beginPath();c.moveTo(x,T);c.lineTo(x,T+ph);c.stroke();}
+  $('bhInfo').innerHTML='<span>recorded from <b>'+dayClock(d.lo,false)+'</b> to <b>'+dayClock(d.hi,false)+'</b></span><span><b>'+(d.size/1048576).toFixed(1)+'</b> MB on the PC</span>';
+}
+$('cOv').addEventListener('click',function(e){var g=S.ovGeo;if(!g)return;var r=$('cOv').getBoundingClientRect();var u=(e.clientX-r.left-g.L)/g.pw;u=Math.max(0,Math.min(1,u));goTo(g.t0+u*(g.t1-g.t0));});
+var BH=[['− 1 min',-60],['− 10 s',-10],['+ 10 s',10],['+ 1 min',60]];
+function renderBhBtns(){
+  var h='<button class="btn" data-m="prev">◀ Earlier movement</button><button class="btn" data-m="next">Later movement ▶</button>';
+  BH.forEach(function(b){h+='<button class="btn" data-s="'+b[1]+'">'+b[0]+'</button>';});
+  h+='<button class="btn'+(S.play?' on':'')+'" data-m="play">'+(S.play?'⏸ Pause ('+S.play+'×)':'▶ Play')+'</button>';
+  if(S.play)h+='<button class="btn" data-m="speed">Speed</button>';
+  h+='<button class="btn pri" data-m="live">Live</button>';
+  $('bhBtns').innerHTML=h;
+}
+$('bhBtns').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var m=b.getAttribute('data-m'),s=b.getAttribute('data-s');
+  if(s){var t=(S.T!=null?S.T:(S.ov&&S.ov.hi)||Date.now()/1000)+parseFloat(s);goTo(t);return;}
+  if(m==='live'){goLive();return;}
+  if(m==='play'){if(S.play){S.play=0;}else{if(S.T==null){$('bhMsg').textContent='Pick a moment on the graph first.';return;}S.play=1;}renderBhBtns();return;}
+  if(m==='speed'){S.play=S.play===1?4:(S.play===4?16:1);renderBhBtns();return;}
+  if(m==='prev'||m==='next'){var from=S.T!=null?S.T:((S.ov&&S.ov.hi)||Date.now()/1000);
+    getJSON('/api/csi/hist/nav?t='+from+'&dir='+(m==='next'?1:-1)).then(function(j){if(j.ok&&j.t!=null){$('bhMsg').textContent='';goTo(j.t-3);}else $('bhMsg').textContent='No more movement recorded '+(m==='next'?'after':'before')+' this moment.';});}
+});
+function goTo(t){
+  S.feed='board';[].forEach.call($('feedTabs').children,function(x){x.classList.toggle('on',x.getAttribute('data-f')==='board');});
+  if(S.ov&&!S.ov.empty&&S.ov.hi){t=Math.min(t,S.ov.hi);}
+  S.T=t;
+  getJSON('/api/csi/hist/at?t='+t).then(function(d){if(S.T===t||S.play){renderLive(d);drawOv();}}).catch(function(){});
+}
+function goLive(){S.T=null;S.play=0;renderBhBtns();$('bhMsg').textContent='';drawOv();pollLive();}
+$('bannerLive').addEventListener('click',goLive);
+setInterval(function(){
+  if(!S.play||S.T==null||S.busy)return;S.busy=true;var nt=S.T+0.5*S.play;
+  if(S.ov&&S.ov.hi&&nt>=S.ov.hi){goLive();S.busy=false;return;}
+  S.T=nt;getJSON('/api/csi/hist/at?t='+nt).then(function(d){if(S.T!=null)renderLive(d);S.busy=false;drawOv();}).catch(function(){S.busy=false;});
+},500);
+
+/* ---------- floors ---------- */
+var IMG={};
+function planImg(id,cb){if(IMG[id])return IMG[id].ok?IMG[id].img:null;var im=new Image();IMG[id]={img:im,ok:false};im.onload=function(){IMG[id].ok=true;cb&&cb();};im.onerror=function(){IMG[id].bad=true;};im.src='/api/wifi/plan?floor='+id;return null;}
+function drawPlan(cv,fv,fl,o){
+  o=o||{};var dm=fv.floors[fl],w=cv.clientWidth||300,hh=Math.max(120,Math.min(300,Math.round(w*dm.h/dm.w)));
+  var P=prep(cv,hh),c=P.c;w=P.w;var h=P.h,sc=Math.min(w/dm.w,h/dm.h),ox=(w-dm.w*sc)/2,oy=(h-dm.h*sc)/2;
+  function X(x){return ox+x*sc;}function Y(y){return oy+(dm.h-y)*sc;}
+  c.fillStyle=css('--bg');c.fillRect(0,0,w,h);
+  var img=dm.image?planImg(dm.id,function(){drawPlan(cv,fv,fl,o);}):null;
+  c.fillStyle=img?'#ffffff':css('--panel');c.fillRect(ox,oy,dm.w*sc,dm.h*sc);
+  if(img){c.drawImage(img,ox,oy,dm.w*sc,dm.h*sc);}
+  else{c.strokeStyle='rgba(255,255,255,0.06)';c.lineWidth=1;for(var gx=0;gx<=dm.w;gx+=1){c.beginPath();c.moveTo(X(gx),oy);c.lineTo(X(gx),oy+dm.h*sc);c.stroke();}
+    for(var gy=0;gy<=dm.h;gy+=1){c.beginPath();c.moveTo(ox,Y(gy));c.lineTo(ox+dm.w*sc,Y(gy));c.stroke();}}
+  c.strokeStyle=css('--line');c.lineWidth=1;c.strokeRect(ox+0.5,oy+0.5,dm.w*sc-1,dm.h*sc-1);
+  var lay=fv.layout[fl]||{},tx=lay.tx,rx=lay.rx;
+  if(tx&&rx){var x0=X(tx[0]),y0=Y(tx[1]),x1=X(rx[0]),y1=Y(rx[1]),cx=(x0+x1)/2,cy=(y0+y1)/2,L=Math.max(Math.hypot(x1-x0,y1-y0),0.6*sc),ang=Math.atan2(y1-y0,x1-x0);
+    if(o.moving){var it=Math.max(0.25,Math.min(1,o.inten||0.5));[[1.0,0.22],[0.66,0.3],[0.34,0.4]].forEach(function(k){c.save();c.translate(cx,cy);c.rotate(ang);c.fillStyle='rgba(255,59,48,'+(k[1]*(0.6+0.4*it))+')';
+      c.beginPath();c.ellipse(0,0,(L+(1.2*k[0]+0.6)*sc)/2,Math.max(1.2*sc,0.55*L)*k[0]/2+0.25*sc,0,0,Math.PI*2);c.fill();c.restore();});}
+    c.strokeStyle=o.moving?'#ff3b30':'#38b8f0';c.lineWidth=1.6;c.setLineDash(o.moving?[]:[5,4]);c.beginPath();c.moveTo(x0,y0);c.lineTo(x1,y1);c.stroke();c.setLineDash([]);
+    c.fillStyle='#ffd23f';c.strokeStyle='#000';c.lineWidth=1;c.fillRect(x0-5,y0-5,10,10);c.strokeRect(x0-5,y0-5,10,10);
+    c.beginPath();c.arc(x1,y1,5.5,0,Math.PI*2);c.fillStyle='#38f0a8';c.fill();c.stroke();
+    c.font='bold 10px system-ui,sans-serif';c.textAlign='center';c.fillStyle='#ffd23f';c.fillText('Tx',x0,y0-9);c.fillStyle='#38f0a8';c.fillText('Rx',x1,y1-9);}
+  else if(o.moving){c.fillStyle='rgba(255,59,48,0.22)';c.fillRect(ox,oy,dm.w*sc,dm.h*sc);}
+  if(dm.router){c.fillStyle=css('--acc');c.strokeStyle='#fff';c.lineWidth=1;c.beginPath();c.moveTo(X(dm.router[0]),Y(dm.router[1])-7);c.lineTo(X(dm.router[0])-6,Y(dm.router[1])+5);c.lineTo(X(dm.router[0])+6,Y(dm.router[1])+5);c.closePath();c.fill();c.stroke();}
+  (fv.spots||[]).forEach(function(s){if(s.floor!==fl)return;c.fillStyle='rgba(255,255,255,0.75)';c.strokeStyle='rgba(0,0,0,0.6)';c.beginPath();c.arc(X(s.x),Y(s.y),3.5,0,Math.PI*2);c.fill();c.stroke();});
+  var pl=o.place;
+  if(pl&&pl.floor===fl){c.fillStyle='#ff3b30';c.strokeStyle='#fff';c.lineWidth=2;c.beginPath();c.arc(X(pl.x),Y(pl.y),7,0,Math.PI*2);c.fill();c.stroke();
+    c.font='bold 11px system-ui,sans-serif';c.textAlign='center';c.lineWidth=3;c.strokeStyle='rgba(0,0,0,0.75)';c.strokeText(pl.name,X(pl.x),Y(pl.y)-11);c.fillStyle='#fff';c.fillText(pl.name,X(pl.x),Y(pl.y)-11);}
+  return P;
+}
+function pollFloors(){getJSON('/api/csi/floor').then(function(v){var first=!S.fview;S.fview=v;renderFloors();if(first)wkAtAll();}).catch(function(){});}
+function renderFloors(){
+  var v=S.fview;if(!v||!v.ok)return;S.names=v.names||S.names;
+  setChip($('fChip'),v.chip,v.tone==='moving'?'moving':(v.tone==='quiet'?'quiet':''));
+  setChip($('fCal'),v.active?(v.calibrated?'CALIBRATED':'NOT CALIBRATED'):'',v.calibrated?'quiet':'warn');
+  if(!$('fPlans').children.length){var h='';['down','up'].forEach(function(f){h+='<div class="fl"><h4>'+esc(S.names[f])+' <i id="fi_'+f+'"></i></h4><canvas id="fp_'+f+'" height="170"></canvas><div class="note" id="fn_'+f+'"></div></div>';});$('fPlans').innerHTML=h;}
+  ['down','up'].forEach(function(f){
+    var lk=v.links[f]||{},mv=v.verdict&&(v.verdict.floor===f||v.verdict.floor==='both')&&v.verdict.moving;
+    var pr=drawPlan($('fp_'+f),v,f,{moving:mv,inten:Math.min(1,(lk.score||0)/100),place:v.place});
+    $('fi_'+f).textContent=v.active?(mv?'MOVEMENT':'quiet'):'';$('fi_'+f).className=mv?'mv':'';
+    $('fn_'+f).textContent=v.active?(lk.rate!=null?lk.rate+' packets/s · '+(lk.rssi!=null?lk.rssi+' dBm':''):'waiting for data'):'';
+  });
+  $('fLinks').innerHTML=v.active?'<span>read by <b>'+(v.owner==='window'?'the Floor window on the PC':'the app in the background')+'</b></span>':'';
+  $('fBatt').innerHTML=(v.battery||[]).map(function(b){return '<span>'+esc(b)+'</span>';}).join('');
+  $('fStatus').textContent=v.status||'';
+  var off=!S.can||!v.active,h='';
+  var ed=v.empty_done;
+  h+='<button class="btn pri" data-a="cal_empty" data-fl=""'+(off?' disabled':'')+'>1 · Learn empty room</button>';
+  h+='<button class="btn" data-a="cal_floor" data-fl="up"'+(off||!ed?' disabled':'')+'>2 · Walk '+esc(S.names.up).toLowerCase()+'</button>';
+  h+='<button class="btn" data-a="cal_floor" data-fl="down"'+(off||!ed?' disabled':'')+'>3 · Walk '+esc(S.names.down).toLowerCase()+'</button>';
+  h+='<button class="btn" data-a="cal_clear" data-fl=""'+(off?' disabled':'')+'>Clear</button>';
+  $('fSteps').innerHTML=h;
+  if(S.feeds&&v.active&&!S.can&&!$('fMsg').textContent)$('fMsg').textContent='Changing the calibration from this device needs "Allow switching off from other devices" ticked on the PC.';
+}
+
+/* ---------- weekly history ---------- */
+function wkInit(){
+  var h='';['down','up'].forEach(function(f){h+='<div class="fl"><h4>'+esc(S.names[f])+' <i id="wi_'+f+'"></i></h4><canvas id="wp_'+f+'" height="150"></canvas>'
+    +'<canvas id="ws_'+f+'" height="46" style="margin-top:6px"></canvas><input type="range" id="wr_'+f+'" min="0" max="1000" value="1000" aria-label="'+esc(S.names[f])+' time">'
+    +'<div class="stats" id="wt_'+f+'"></div><div class="stats" id="wsum_'+f+'"></div>'
+    +'<div class="btns"><button class="btn" data-w="prev" data-fl="'+f+'">◀ Earlier movement</button><button class="btn" data-w="next" data-fl="'+f+'">Later movement ▶</button></div></div>';});
+  $('wkFloors').innerHTML=h;
+}
+function wkLoad(){
+  var f0=wkFetch('down'),f1=wkFetch('up');return Promise.all([f0,f1]).then(function(){wkDraw();wkAtAll();});
+}
+function wkFetch(f){return getJSON('/api/csi/fhist?floor='+f+'&n=240').then(function(d){if(!d.ok)return;S.wk.data[f]=d;S.wk.span=d.span;if(S.wk.t[f]==null)S.wk.t[f]=d.t1;});}
+function wkT(f){var d=S.wk.data[f];if(!d)return null;var r=$('wr_'+f);return d.t0+(parseInt(r.value,10)/1000)*(d.t1-d.t0);}
+function wkSet(f,t){var d=S.wk.data[f];if(!d)return;S.wk.t[f]=Math.max(d.t0,Math.min(d.t1,t));$('wr_'+f).value=Math.round((S.wk.t[f]-d.t0)/(d.t1-d.t0)*1000);}
+function wkDraw(){
+  ['down','up'].forEach(function(f){var d=S.wk.data[f];if(!d)return;
+    var P=prep($('ws_'+f),46),c=P.c,w=P.w,h=P.h,n=d.cov.length,bw=w/n,mx=1;d.mv.forEach(function(v){mx=Math.max(mx,v);});
+    c.fillStyle='rgba(255,255,255,0.04)';c.fillRect(0,0,w,h);
+    for(var i=0;i<n;i++){if(d.cov[i]>0){c.fillStyle='rgba(120,150,200,0.28)';c.fillRect(i*bw,h-6,Math.max(1,bw-0.3),6);}
+      if(d.mv[i]>0){var bh=Math.max(3,Math.min(1,d.mv[i]/mx)*(h-10));c.fillStyle='#ff5c4d';c.fillRect(i*bw,h-6-bh,Math.max(1,bw-0.3),bh);}}
+    var t=S.wk.t[f];if(t!=null){var x=(t-d.t0)/(d.t1-d.t0)*w;c.strokeStyle='#38b8f0';c.lineWidth=2;c.beginPath();c.moveTo(x,0);c.lineTo(x,h);c.stroke();}
+    var sm=d.summary;$('wsum_'+f).innerHTML='<span><b>'+sm.episodes+'</b> bursts of movement</span><span><b>'+dur(sm.sec)+'</b> in total</span>'+(sm.place?'<span>mostly near <b>'+esc(sm.place)+'</b></span>':'');
+  });
+}
+function wkAt(f){var t=S.wk.t[f];if(t==null)return;
+  getJSON('/api/csi/fhist/at?floor='+f+'&t='+t).then(function(a){if(!a.ok)return;S.wk.at[f]=a;wkInfo(f);}).catch(function(){});}
+function wkAtAll(){wkAt('down');wkAt('up');}
+function wkInfo(f){
+  var a=S.wk.at[f],t=S.wk.t[f];if(!a)return;var now=Date.now()/1000;
+  var tx=(Math.abs(now-t)<90?'now':dayClock(t,false));
+  $('wt_'+f).innerHTML='<span><b>'+tx+'</b></span><span>'+(!a.covered?'nothing recorded then':(a.moving?'<b style="color:var(--red)">movement</b> ('+dur(a.sec)+(a.place?', near '+esc(a.place):'')+')':'quiet'))+'</span>';
+  $('wi_'+f).textContent=a.covered?(a.moving?'MOVEMENT':'quiet'):'no data';$('wi_'+f).className=a.moving?'mv':'';
+  var v=S.fview;if(v){var spot=null;if(a.moving&&a.place)(v.spots||[]).forEach(function(s){if(s.name===a.place&&s.floor===f)spot=s;});
+    drawPlan($('wp_'+f),v,f,{moving:a.moving,inten:Math.min(1,(a.peak||0)/100),place:spot});}
+}
+$('wkFloors').addEventListener('input',function(e){var r=e.target;if(r.type!=='range')return;var f=r.id.slice(3);var t=wkT(f);S.wk.t[f]=t;
+  if($('wkLink').checked){var o=f==='up'?'down':'up';if(S.wk.data[o]){wkSet(o,t);}}
+  wkDraw();clearTimeout(S.wkT);S.wkT=setTimeout(wkAtAll,120);});
+$('wkFloors').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;var f=b.getAttribute('data-fl'),dir=b.getAttribute('data-w')==='next'?1:-1;
+  getJSON('/api/csi/fhist/nav?floor='+f+'&t='+(S.wk.t[f]||0)+'&dir='+dir).then(function(j){if(j.ok&&j.t!=null){wkSet(f,j.t);if($('wkLink').checked){wkSet(f==='up'?'down':'up',j.t);}wkDraw();wkAtAll();$('wkMsg').textContent='';}
+    else $('wkMsg').textContent='No more movement recorded '+(dir>0?'after':'before')+' this moment on '+S.names[f]+'.';});});
+$('wkNow').addEventListener('click',function(){['down','up'].forEach(function(f){var d=S.wk.data[f];if(d)wkSet(f,d.t1);});wkDraw();wkAtAll();$('wkMsg').textContent='';});
+
+/* ---------- controls ---------- */
+var SW=[['night_alarm','Night alarm','A klaxon on the PC and a phone alert when the boards see sustained movement in the night window.'],
+        ['csi_bg','Keep watching with the board','Reads the board even with the PC window closed, and fills the board history. Needs the board picked once on the PC.'],
+        ['floor_bg','Keep recording the weekly floor history','Reads both floor links in the background. Needs the Floor window connected once on the PC to choose the receivers.']];
+function renderControls(){
+  var d=S.feeds;if(!d)return;var h='';
+  SW.forEach(function(s){var on=!!d[s[0]];var dis=(!S.can&&on);
+    h+='<div class="sw"><div class="tx">'+esc(s[1])+'<small>'+esc(s[2])+'</small></div><button class="'+(on?'on':'')+'" data-k="'+s[0]+'" '+(dis?'disabled':'')+' aria-label="'+esc(s[1])+'"></button></div>';});
+  $('sws').innerHTML=h;
+  var n=d.night||{};
+  $('nightInfo').textContent=(n.on?'The night alarm is armed for '+n.from+' to '+n.to+' ('+(n.sens||'normal')+' sensitivity'+'). ':'The night alarm is off. ')
+    +(n.on&&!n.watching?'Nothing is being read right now, so it cannot sound: switch on Keep watching with the board, or the weekly floor recording. ':'')
+    +'The times and sensitivity are set on the PC (Wi-Fi window).';
+  renderAlarm(n);
+  $('ctlNote').textContent=S.can?'':'From this device you can switch things on, but not off (the dashboard has no login, so only the PC can).';
+}
+function renderAlarm(n){
+  var on=!!(n&&n.active);$('alarm').classList.toggle('on',on);
+  if(on)$('alarmTx').textContent=(n.why||'Movement in the house.')+' The klaxon is sounding on the PC.';
+}
+$('alarmOff').addEventListener('click',function(){postJSON('/api/csi/act',{action:'night_silence'}).then(function(j){
+  $('ctlMsg').textContent=j.ok?(j.message||''):(j.error||'Could not silence it.');if(!j.ok)$('alarmTx').textContent=j.error||'';loadFeeds();}).catch(function(){});});
+$('nightTest').addEventListener('click',function(){$('ctlMsg').textContent='\u2026';postJSON('/api/csi/act',{action:'night_test'}).then(function(j){
+  $('ctlMsg').textContent=j.ok?(j.message||''):(j.error||'Could not play it.');}).catch(function(){$('ctlMsg').textContent='The app on the PC is not reachable.';});});
+$('sws').addEventListener('click',function(e){var b=e.target.closest('button');if(!b||b.disabled)return;var k=b.getAttribute('data-k'),v=!b.classList.contains('on');b.disabled=true;$('ctlMsg').textContent='';
+  postJSON('/api/wifi/set',{key:k,value:v}).then(function(j){$('ctlMsg').textContent=j.ok?(j.message&&j.message!=='Saved.'?j.message:''):(j.error||'Could not change that.');loadFeeds();pollFloors();})
+   .catch(function(){$('ctlMsg').textContent='The app on the PC is not reachable.';b.disabled=false;});});
+
+/* ---------- start ---------- */
+renderRanges();renderBhBtns();wkInit();
+loadFeeds().then(function(){pollLive();});pollFloors();loadOv();wkLoad();
+setInterval(function(){if(!document.hidden)pollLive();},1000);
+setInterval(function(){if(!document.hidden)pollFloors();},2000);
+setInterval(function(){if(!document.hidden)loadFeeds();},5000);
+setInterval(function(){if(!document.hidden){loadOv();wkFetch('down').then(function(){return wkFetch('up');}).then(function(){wkDraw();});}},30000);
+window.addEventListener('resize',function(){if(S.doc)renderLive(S.doc);drawOv();renderFloors();wkDraw();wkAtAll();});
+document.addEventListener('visibilitychange',function(){if(!document.hidden){loadFeeds();pollLive();pollFloors();loadOv();}});
+</script>
+</body>
+</html>
+'''
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']), ('@@ACCENT@@', _ui['accent'])):
+            _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
+        return _html
+
+# <<LIDAR_SERVER>>
+    def _lidar_state(self, w, hub, handler):
+        d = hub.snapshot()
+        cw = w.csi_web()
+        plan, ids, names = cw.plan()
+        d['ok'] = True
+        d['floors'] = {fl: cw._dims(plan, ids[fl]) for fl in ('down', 'up')}
+        d['spots'] = [{'name': s['name'], 'floor': s['floor'], 'x': s['x'], 'y': s['y']} for s in hub.spots()]
+        local = self._peer_is_local(handler)
+        d['local'] = local
+        d['can_act'] = bool(local or w.prefs.get('web_control'))
+        d['prefs'] = {'lidar_on': bool(w.prefs.get('lidar_on')), 'lidar_alert': str(w.prefs.get('lidar_alert') or 'away'),
+                      'web_control': bool(w.prefs.get('web_control'))}
+        d['night'] = w.night.status()
+        d['port'] = hub.PORT
+        return d
+
+    def _serve_lidar_api(self, handler, path):
+        """GET /api/lidar/*: the data behind the /lidar page (see _NMLidarHub). Reading is open; changes go through
+        POST /api/lidar/act."""
+        try:
+            from urllib.parse import urlparse, parse_qs
+            if not _NM_IS_WIN and not os.environ.get('NM_WIFI_TEST'):
+                handler._json(200, {'ok': False, 'error': 'The lidar page needs the Windows version of the app.'}); return
+            q = {k: v[0] for k, v in parse_qs(urlparse(handler.path).query).items() if v}
+            w = self._wifi_web_watcher(handler, start=True)
+            if w is None:
+                return
+            hub = w.lidar_hub()
+            sub = path[len('/api/lidar/'):].strip('/')
+            if sub == 'state':
+                d = self._lidar_state(w, hub, handler)
+            elif sub == 'map':
+                fl = 'up' if q.get('floor') == 'up' else 'down'
+                cw = w.csi_web()
+                plan, ids, _nm = cw.plan()
+                d = hub.map_view(fl, cw._dims(plan, ids[fl]))
+                d['ok'] = True
+                d['tracks'] = [t for t in hub.snapshot()['tracks'] if t['floor'] == d['floor']]
+            else:
+                handler._json(404, {'ok': False, 'error': 'Unknown request.'}); return
+            handler._json(200, d)
+        except Exception as e:
+            _exc('_serve_lidar_api')
+            handler._json(200, {'ok': False, 'error': str(e)})
+
+    def _post_lidar_act(self, handler, req):
+        """POST /api/lidar/act {action, lid, ...}: placement, learning, pairing, demo. Same-origin only; _NMLidarHub.act applies
+        the safety rule (the PC itself, or the 'allow switching off from other devices' tick)."""
+        try:
+            from urllib.parse import urlparse
+            origin = handler.headers.get('Origin') or ''
+            if origin and urlparse(origin).netloc != (handler.headers.get('Host') or ''):
+                handler._json(403, {'ok': False, 'error': 'Not allowed from another web page.'}); return
+            w = self._wifi_web_watcher(handler, start=True)
+            if w is None:
+                return
+            ok, msg = w.lidar_hub().act(req, self._peer_is_local(handler))
+            handler._json(200 if ok else 403, {'ok': ok, 'message': msg if ok else '', 'error': '' if ok else msg})
+        except Exception as e:
+            _exc('_post_lidar_act')
+            handler._json(500, {'ok': False, 'error': str(e)})
+
+    def _build_lidar_html(self):
+        _html = r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Lidar Room Map</title>
+<meta name="theme-color" content="@@BG@@">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<style>
+ :root{--bg:@@BG@@;--panel:@@PANEL@@;--line:@@BORDER@@;--text:@@TEXT@@;--tick:@@TEXT2@@;--acc:@@ACCENT@@;--red:#ff5c4d;--grn:#2fe07a;--amb:#ff9f43;}
+ *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+   padding:env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 28px);min-height:100vh;max-width:860px;margin:0 auto;-webkit-font-smoothing:antialiased;}
+ header{display:flex;align-items:center;gap:12px;padding:16px 2px 6px;}
+ header a.back{color:var(--tick);text-decoration:none;font-size:25px;line-height:1;padding:2px 4px;}
+ header h1{font-size:16px;font-weight:650;flex:1;}
+ .chip{font-size:10.5px;font-weight:700;padding:4px 10px;border-radius:7px;letter-spacing:.5px;white-space:nowrap;background:var(--line);color:var(--tick);}
+ .chip.moving{background:#7a1d12;color:#ffd5cf;}
+ .chip.quiet{background:#12482b;color:#c8ffe0;}
+ .chip.warn{background:#6b3d00;color:#ffe0b0;}
+ .chip.info{background:#12384f;color:#bfe6ff;}
+ .dot{width:9px;height:9px;border-radius:50%;background:#444;transition:.3s;}
+ .dot.live{background:#39ff14;box-shadow:0 0 8px #39ff14;}
+ .sub{font-size:11.5px;color:var(--tick);padding:0 2px 10px;line-height:1.5;}
+ nav.jump{display:flex;gap:6px;overflow-x:auto;padding:2px 0 12px;position:sticky;top:0;background:var(--bg);z-index:3;}
+ nav.jump a{flex:0 0 auto;font-size:12px;color:var(--tick);text-decoration:none;border:1px solid var(--line);border-radius:16px;padding:5px 12px;}
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:14px;margin-bottom:12px;scroll-margin-top:44px;}
+ .card h2{font-size:13px;font-weight:650;letter-spacing:.3px;margin-bottom:2px;}
+ .note{font-size:11px;color:var(--tick);line-height:1.5;margin:2px 0 8px;}
+ canvas{display:block;width:100%;border-radius:10px;}
+ .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 8px;}
+ .tabs button,.btn{font:inherit;font-size:12px;border:1px solid var(--line);background:transparent;color:var(--tick);border-radius:14px;padding:6px 12px;min-height:32px;}
+ .tabs button.on,.btn.on{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:650;}
+ .btn:disabled{opacity:.4;}
+ .btn.pri{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:650;}
+ .btns{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;}
+ .stats{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--tick);margin-top:6px;font-variant-numeric:tabular-nums;}
+ .stats b{color:var(--text);font-weight:650;}
+ .stats .cov{display:inline-flex;align-items:center;gap:8px;} .stats .cov i{display:inline-block;width:70px;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--c) var(--v),var(--line) var(--v));}
+ .msg{font-size:12px;margin-top:8px;min-height:16px;color:var(--amb);line-height:1.5;}
+ .empty{color:var(--tick);text-align:center;padding:22px 12px;font-size:13px;line-height:1.7;}
+ .lid{border:1px solid var(--line);border-radius:12px;padding:10px;margin:8px 0;}
+ .lid h4{font-size:12.5px;font-weight:650;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+ .lid h4 i{font-style:normal;font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;background:var(--line);color:var(--tick);}
+ .lid h4 i.ok{background:#12482b;color:#c8ffe0;} .lid h4 i.bad{background:#7a1d12;color:#ffd5cf;} .lid h4 i.wait{background:#6b3d00;color:#ffe0b0;}
+ .sw4{width:10px;height:10px;border-radius:3px;display:inline-block;}
+ .frm{display:grid;grid-template-columns:repeat(auto-fit,minmax(86px,1fr));gap:8px;margin:8px 0;}
+ .frm label{font-size:10.5px;color:var(--tick);display:flex;flex-direction:column;gap:3px;}
+ .frm input,.frm select{font:inherit;font-size:13px;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;min-height:32px;width:100%;}
+ label.ck{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--tick);margin:8px 0;}
+ label.ck input{width:18px;height:18px;accent-color:var(--acc);}
+ .sw{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);}
+ .sw .tx{flex:1;font-size:13px;line-height:1.4;} .sw .tx small{display:block;color:var(--tick);font-size:11px;}
+ .sw button{flex:0 0 auto;width:50px;height:28px;border-radius:14px;border:0;background:#2a3550;position:relative;transition:.2s;}
+ .sw button::after{content:'';position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#c9d4ea;transition:.2s;}
+ .sw button.on{background:var(--grn);} .sw button.on::after{left:25px;background:#fff;}
+ .sw button:disabled{opacity:.4;}
+ select.sel{font:inherit;font-size:12px;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;min-height:32px;}
+ ol.ev{list-style:none;font-size:12px;line-height:1.5;color:var(--tick);} ol.ev li{padding:4px 0;border-bottom:1px solid var(--line);} ol.ev li:last-child{border:0;} ol.ev b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums;margin-right:6px;}
+ .alarm{display:none;position:sticky;top:0;z-index:5;align-items:center;gap:10px;background:#b3261e;color:#fff;border-radius:12px;padding:10px 12px;margin:0 0 10px;font-size:13px;line-height:1.4;}
+ .alarm.on{display:flex;} .alarm span{flex:1;}
+ .alarm .btn{background:#fff;color:#7a1d12;border-color:#fff;font-weight:700;}
+ ol.how{font-size:12px;line-height:1.6;color:var(--tick);padding-left:18px;} ol.how li{margin:3px 0;}
+ footer{text-align:center;color:var(--tick);font-size:11px;margin-top:16px;opacity:.65;line-height:1.6;}
+ :focus-visible{outline:2px solid var(--acc);outline-offset:2px;}
+</style>
+</head>
+<body>
+<header><a class="back" href="/wifi" aria-label="Back to Wi-Fi and boards">&#8592;</a><h1>Lidar Room Map</h1><span class="chip" id="chip">&hellip;</span><div class="dot" id="dot"></div></header>
+<div class="sub" id="sub">Loading&hellip;</div>
+<div class="alarm" id="alarm" role="alert"><span><b>NIGHT ALARM</b> <span id="alarmTx"></span></span><button class="btn" id="alarmOff">Silence</button></div>
+<nav class="jump"><a href="#view">Live view</a><a href="#lids">Lidars</a><a href="#pair">Pair</a><a href="#ctl">Controls</a><a href="#how">Set up</a></nav>
+
+<div class="card" id="view">
+ <h2>Live view</h2>
+ <div class="note">The glowing outline is the empty room as each lidar learned it, and the tinted area is what that lidar can see (brighter where two overlap). Red dots are something new in the room; the circles are people, red while they move.</div>
+ <div class="tabs" id="floorTabs"></div>
+ <canvas id="cMap" height="300"></canvas>
+ <div class="stats" id="mapStats"></div>
+ <div class="msg" id="mapMsg"></div>
+</div>
+
+<div class="card" id="lids">
+ <h2>Lidars</h2>
+ <div class="note">Each lidar announces itself once its board is on the Wi-Fi. Say where it stands on the plan and which way it faces, then let it learn the empty room.</div>
+ <div id="lidList"></div>
+</div>
+
+<div class="card" id="pair">
+ <h2>Pair two lidars by walking</h2>
+ <div class="note">Not sure exactly where lidar 2 is or which way it faces? Set lidar 1 right, then walk slowly back and forth through the area both can see. The app lines the two views up and places lidar 2 for you.</div>
+ <div class="frm"><label>First (already placed)<select id="pairA"></select></label><label>Second (to be placed)<select id="pairB"></select></label></div>
+ <div class="btns"><button class="btn pri" id="pairGo">Start walking</button><button class="btn" id="pairDone">Done walking</button><button class="btn" id="pairStop">Cancel</button></div>
+ <div class="msg" id="pairMsg"></div>
+</div>
+
+<div class="card" id="ctl">
+ <h2>Controls</h2>
+ <div class="note" id="ctlNote"></div>
+ <div class="sw"><div class="tx">Listen for lidars<small>The app listens on the network for the lidar boards and watches for people. Needed for everything on this page.</small></div><button id="swOn" aria-label="Listen for lidars"></button></div>
+ <div class="sw"><div class="tx">Alert me when a person appears<small id="alertNote"></small></div>
+  <select class="sel" id="alertMode"><option value="away">When I am away</option><option value="always">Always</option><option value="off">Never</option></select></div>
+ <div class="sw"><div class="tx">Try it without a lidar<small>Pretend lidars placed through a whole pretend floor (as many as it takes to see all of it), with people walking from room to room. Nothing is saved.</small></div><button id="swDemo" aria-label="Demo"></button></div>
+ <div class="note" id="nightInfo"></div>
+ <div class="msg" id="ctlMsg"></div>
+ <h3 style="font-size:12px;margin:12px 0 4px">What happened</h3>
+ <ol class="ev" id="events"></ol>
+</div>
+
+<div class="card" id="how">
+ <h2>Setting up</h2>
+ <ol class="how">
+  <li>Wire each LD14P to its own ESP32 and flash it (see the esp32_csi folder, README, "LD14P lidars"). Each board gets its own number.</li>
+  <li>Switch on <b>Listen for lidars</b> above. A lidar appears in the list within a few seconds.</li>
+  <li>Tap <b>Place by tapping</b>, then tap where the lidar stands on the plan. Set which way it faces (turn it until the red outline lines up with the walls).</li>
+  <li>With nobody in the room, press <b>Learn empty room</b>. Do the same for the second lidar.</li>
+  <li>Use <b>Pair by walking</b> if you are not sure about the second lidar's position.</li>
+ </ol>
+ <div class="note">A lidar sees a person as a shape the size of a body in front of the wall. It does not know who. Use it in your own home, with the people there aware.</div>
+</div>
+<footer>Everything here is read from the app on your PC.</footer>
+
+<script>
+var DPR=Math.min(2,window.devicePixelRatio||1);
+function $(i){return document.getElementById(i);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function prep(cv,h){var w=cv.clientWidth||300;cv.style.height=h+'px';cv.width=Math.round(w*DPR);cv.height=Math.round(h*DPR);var c=cv.getContext('2d');c.setTransform(DPR,0,0,DPR,0,0);return {c:c,w:w,h:h};}
+function getJSON(u){return fetch(u,{cache:'no-store'}).then(function(r){return r.json();});}
+function postJSON(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(function(r){return r.json();});}
+function pad(n){return ('0'+n).slice(-2);}
+function clock(t){var d=new Date(t*1000);return pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());}
+function setChip(el,text,tone){el.textContent=text;el.className='chip'+(tone?' '+tone:'');}
+var COLS=['#38b8f0','#ffd23f','#a371f7','#39e08a','#ff9f43'];
+var S={floor:null,st:null,map:null,sig:'',placing:null,trails:{},IMG:{},disp:{},anim:0,dt:0.033,rm:false};
+try{S.rm=window.matchMedia('(prefers-reduced-motion: reduce)').matches;}catch(e){}
+
+/* ---------- plan picture ---------- */
+function planImg(id,cb){var r=S.IMG[id];if(r)return r.ok?r.img:null;var im=new Image();S.IMG[id]={img:im,ok:false};im.onload=function(){S.IMG[id].ok=true;cb&&cb();};im.onerror=function(){};im.src='/api/wifi/plan?floor='+id;return null;}
+function geom(cv){var st=S.st;if(!st||!st.floors)return null;var dm=st.floors[S.floor];var w=cv.clientWidth||300,hh=Math.max(180,Math.min(420,Math.round(w*dm.h/dm.w)));
+  var P=prep(cv,hh),sc=Math.min(P.w/dm.w,P.h/dm.h),ox=(P.w-dm.w*sc)/2,oy=(P.h-dm.h*sc)/2;
+  return {c:P.c,w:P.w,h:P.h,sc:sc,ox:ox,oy:oy,dm:dm,X:function(x){return ox+x*sc;},Y:function(y){return oy+(dm.h-y)*sc;}};}
+function rgba(hex,a){var h=hex.replace('#','');return 'rgba('+parseInt(h.substr(0,2),16)+','+parseInt(h.substr(2,2),16)+','+parseInt(h.substr(4,2),16)+','+a+')';}
+function runsOf(bg){var runs=[],cur=null;(bg||[]).forEach(function(p){if(cur&&p[2]-cur[cur.length-1][2]<=2)cur.push(p);else{cur=[p];runs.push(cur);}});
+  if(runs.length>1){var f=runs[0],l=runs[runs.length-1];if(f[0][2]<=2&&l[l.length-1][2]>=357){runs[0]=l.concat(f);runs.pop();}}return runs;}
+function rrect(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath();}
+function pill(c,txt,x,y,font,fg,bgc,bx){c.font=font;var w=c.measureText(txt).width+12;if(bx){x=Math.max(bx[0]+w/2+2,Math.min(bx[2]-w/2-2,x));y=Math.max(bx[1]+11,Math.min(bx[3]-11,y));}rrect(c,x-w/2,y-9,w,16,8);c.fillStyle=bgc;c.fill();c.fillStyle=fg;c.textAlign='center';c.textBaseline='middle';c.fillText(txt,x,y-0.5);c.textBaseline='alphabetic';}
+function drawMap(){
+  var cv=$('cMap'),g=geom(cv);if(!g)return;var c=g.c,dm=g.dm,st=S.st,mp=S.map,T=S.anim||0;
+  var fx=g.ox,fy=g.oy,fw=dm.w*g.sc,fh=dm.h*g.sc;
+  c.fillStyle=css('--bg');c.fillRect(0,0,g.w,g.h);
+  var img=dm.image?planImg(dm.id,drawMap):null,light=!!img;
+  if(light){c.fillStyle='#eef2f7';c.fillRect(fx,fy,fw,fh);c.drawImage(img,fx,fy,fw,fh);}
+  else{var gr=c.createRadialGradient(fx+fw/2,fy+fh/2,Math.min(fw,fh)*0.1,fx+fw/2,fy+fh/2,Math.max(fw,fh)*0.75);gr.addColorStop(0,'#10213a');gr.addColorStop(1,'#070d17');c.fillStyle=gr;c.fillRect(fx,fy,fw,fh);
+    for(var gx=0;gx<=dm.w+0.001;gx+=1){c.strokeStyle=(gx%5===0)?'rgba(130,180,235,0.13)':'rgba(130,180,235,0.055)';c.lineWidth=1;c.beginPath();c.moveTo(Math.round(g.X(gx))+0.5,fy);c.lineTo(Math.round(g.X(gx))+0.5,fy+fh);c.stroke();}
+    for(var gy=0;gy<=dm.h+0.001;gy+=1){c.strokeStyle=(gy%5===0)?'rgba(130,180,235,0.13)':'rgba(130,180,235,0.055)';c.lineWidth=1;c.beginPath();c.moveTo(fx,Math.round(g.Y(gy))+0.5);c.lineTo(fx+fw,Math.round(g.Y(gy))+0.5);c.stroke();}}
+  c.save();c.beginPath();c.rect(fx,fy,fw,fh);c.clip();
+  /* walls of the pretend house */
+  if(mp&&mp.rooms){mp.rooms.forEach(function(r){var x0=g.X(r[0]),x1=g.X(r[2]),y0=g.Y(r[3]),y1=g.Y(r[1]);
+    c.fillStyle=light?'rgba(40,60,90,0.35)':'rgba(120,165,220,0.20)';c.fillRect(x0,y0,x1-x0,y1-y0);
+    c.save();c.shadowColor=light?'rgba(0,0,0,0)':'rgba(130,190,255,0.9)';c.shadowBlur=7;c.strokeStyle=light?'#47607f':'#9cc8f5';c.lineWidth=1.2;c.strokeRect(x0+0.5,y0+0.5,x1-x0-1,y1-y0-1);c.restore();});}
+  (st.spots||[]).forEach(function(s){if(s.floor!==S.floor)return;c.fillStyle='rgba(255,255,255,0.6)';c.strokeStyle='rgba(0,0,0,0.5)';c.beginPath();c.arc(g.X(s.x),g.Y(s.y),3,0,Math.PI*2);c.fill();c.stroke();});
+  var nodes=(mp&&mp.nodes)||[];
+  /* coverage, outlines, rings, sweep */
+  nodes.forEach(function(n,i){
+    var col=COLS[i%COLS.length],lx=g.X(n.x),ly=g.Y(n.y),runs=runsOf(n.bg),R=(mp.range||8)*g.sc;
+    var path=new Path2D();
+    if(n.poly&&n.poly.length>2){n.poly.forEach(function(p,k){if(k)path.lineTo(g.X(p[0]),g.Y(p[1]));else path.moveTo(g.X(p[0]),g.Y(p[1]));});path.closePath();}
+    c.save();c.globalCompositeOperation=light?'source-over':'lighter';c.fillStyle=rgba(col,light?0.13:0.085);c.fill(path);c.restore();
+    c.save();c.setLineDash([2,5]);c.lineWidth=1;[2,4,6,8].forEach(function(m){if(m>(mp.range||8)+0.01)return;c.strokeStyle=rgba(col,light?0.28:0.22);c.beginPath();c.arc(lx,ly,m*g.sc,0,Math.PI*2);c.stroke();});c.restore();
+    if(i===0){c.font='9px system-ui,sans-serif';c.textAlign='left';c.fillStyle=light?'rgba(30,40,60,0.7)':'rgba(190,215,245,0.65)';[2,4,6,8].forEach(function(m){if(m>(mp.range||8)+0.01)return;c.fillText(m+' m',lx+m*g.sc*0.7071+3,ly-m*g.sc*0.7071-2);});}
+    if(n.live&&!S.rm){c.save();c.clip(path);var a=T*3.4+i*2.1,N=16,d=0.05;
+      for(var k=0;k<N;k++){var ak=a-k*d;c.beginPath();c.moveTo(lx,ly);c.arc(lx,ly,R,-ak,-ak+d+0.004,false);c.closePath();var al=0.34*Math.pow(1-k/N,2);c.fillStyle=rgba(col,al);c.fill();}
+      c.strokeStyle=rgba(col,0.9);c.lineWidth=1.4;c.beginPath();c.moveTo(lx,ly);c.lineTo(lx+Math.cos(-a)*R,ly+Math.sin(-a)*R);c.stroke();c.restore();}
+    c.save();c.shadowColor=col;c.shadowBlur=light?0:9;c.strokeStyle=light?rgba(col,0.95):rgba(col,0.95);c.lineWidth=light?2.2:1.8;c.lineJoin='round';c.lineCap='round';
+    runs.forEach(function(r){c.beginPath();var pen=false,pp=null;r.forEach(function(p){var X=g.X(p[0]),Y=g.Y(p[1]);
+      if(pp&&Math.hypot(p[0]-pp[0],p[1]-pp[1])<0.6){c.lineTo(X,Y);}else{if(pen)c.stroke();c.beginPath();c.moveTo(X,Y);}pen=true;pp=p;});c.stroke();});c.restore();
+    (n.scan||[]).forEach(function(p){if(!p[2]){c.fillStyle=rgba(col,0.5);c.fillRect(g.X(p[0])-0.6,g.Y(p[1])-0.6,1.6,1.6);}});});
+  /* something new in the room */
+  nodes.forEach(function(n){(n.scan||[]).forEach(function(p){if(p[2]){c.save();c.shadowColor='#ff3b30';c.shadowBlur=8;c.fillStyle='#ff5a4d';c.beginPath();c.arc(g.X(p[0]),g.Y(p[1]),2,0,Math.PI*2);c.fill();c.restore();}});});
+  /* people */
+  var live={};(mp&&mp.tracks||[]).forEach(function(t){live[t.id]=1;var D=S.disp[t.id];if(!D)D=S.disp[t.id]={x:t.x,y:t.y};var k=S.rm?1:Math.min(1,(S.dt||0.033)*5);D.x+=(t.x-D.x)*k;D.y+=(t.y-D.y)*k;});
+  Object.keys(S.disp).forEach(function(k){if(!live[k])delete S.disp[k];});
+  (mp&&mp.tracks||[]).forEach(function(t){
+    var D=S.disp[t.id],tr=S.trails[t.id]||[],px=g.X(D.x),py=g.Y(D.y),r=Math.max(7,0.22*g.sc),hot=t.moving,col=hot?'255,82,66':'255,170,60';
+    for(var q=1;q<tr.length;q++){var al=0.55*q/tr.length;c.strokeStyle='rgba('+col+','+al+')';c.lineWidth=1+2.2*q/tr.length;c.lineCap='round';c.beginPath();c.moveTo(g.X(tr[q-1][0]),g.Y(tr[q-1][1]));c.lineTo(g.X(tr[q][0]),g.Y(tr[q][1]));c.stroke();}
+    var gl=c.createRadialGradient(px,py,0,px,py,r*3.4);gl.addColorStop(0,'rgba('+col+',0.55)');gl.addColorStop(1,'rgba('+col+',0)');c.fillStyle=gl;c.beginPath();c.arc(px,py,r*3.4,0,Math.PI*2);c.fill();
+    if(hot&&!S.rm){var ph=(T*1.2)%1;c.strokeStyle='rgba('+col+','+(0.5*(1-ph))+')';c.lineWidth=2;c.beginPath();c.arc(px,py,r*(1+ph*2.2),0,Math.PI*2);c.stroke();}
+    if(hot&&tr.length>5){var o=tr[Math.max(0,tr.length-6)],dx=t.x-o[0],dy=t.y-o[1],dl=Math.hypot(dx,dy);
+      if(dl>0.25){var ux=dx/dl,uy=-dy/dl,tx=px+ux*(r+10),ty=py+uy*(r+10);c.fillStyle='#fff';c.beginPath();c.moveTo(tx,ty);c.lineTo(px+ux*(r+2)-uy*5,py+uy*(r+2)+ux*5);c.lineTo(px+ux*(r+2)+uy*5,py+uy*(r+2)-ux*5);c.closePath();c.fill();}}
+    c.fillStyle='rgb('+col+')';c.strokeStyle='#fff';c.lineWidth=2;c.beginPath();c.arc(px,py,r,0,Math.PI*2);c.fill();c.stroke();
+    var lab=t.where.replace(/^(downstairs|upstairs|on the .* floor),? ?/i,'')||(t.moving?'moving':'still');
+    pill(c,lab,px,(py-r-11<fy+12)?py+r+12:py-r-11,'bold 10.5px system-ui,sans-serif','#fff','rgba(8,14,24,0.78)',[fx,fy,fx+fw,fy+fh]);});
+  /* the lidars themselves */
+  nodes.forEach(function(n,i){var col=COLS[i%COLS.length],lx=g.X(n.x),ly=g.Y(n.y),a=-n.rot*Math.PI/180,L=Math.max(15,0.42*g.sc);
+    c.save();c.shadowColor=col;c.shadowBlur=light?0:10;c.strokeStyle=col;c.lineWidth=2.4;c.lineCap='round';c.beginPath();c.moveTo(lx,ly);c.lineTo(lx+Math.cos(a)*L,ly+Math.sin(a)*L);c.stroke();
+    c.fillStyle=n.live?col:'#7a8496';c.strokeStyle=light?'#10202f':'#06101b';c.lineWidth=2;c.beginPath();c.arc(lx,ly,6.5,0,Math.PI*2);c.fill();c.stroke();c.restore();
+    if(n.live&&!S.rm){var ph=(T*0.8+i*0.3)%1;c.strokeStyle=rgba(col,0.5*(1-ph));c.lineWidth=1.5;c.beginPath();c.arc(lx,ly,6.5+ph*16,0,Math.PI*2);c.stroke();}
+    pill(c,n.name,lx,(ly+19>fy+fh-10)?ly-17:ly+19,'bold 9.5px system-ui,sans-serif','#fff','rgba(8,14,24,0.7)',[fx,fy,fx+fw,fy+fh]);});
+  c.restore();
+  c.strokeStyle=light?'#47607f':'rgba(150,200,255,0.5)';c.lineWidth=1.5;c.strokeRect(fx+0.75,fy+0.75,fw-1.5,fh-1.5);
+  /* scale bar, coverage, demo mark */
+  var bx=fx+10,by=fy+fh-12;c.strokeStyle=light?'#223':'#dfeaff';c.fillStyle=c.strokeStyle;c.lineWidth=1.5;c.beginPath();c.moveTo(bx,by-4);c.lineTo(bx,by);c.lineTo(bx+g.sc,by);c.lineTo(bx+g.sc,by-4);c.stroke();c.font='9.5px system-ui,sans-serif';c.textAlign='left';c.fillText('1 m',bx+g.sc+5,by);
+  if(st&&st.demo){c.save();c.font='800 '+Math.max(22,Math.min(54,fh*0.2))+'px system-ui,sans-serif';c.textAlign='right';c.fillStyle=light?'rgba(20,30,50,0.10)':'rgba(190,220,255,0.10)';c.fillText('DEMO',fx+fw-12,fy+fh-12);c.restore();}
+  if(S.placing){c.fillStyle='rgba(0,0,0,0.55)';c.fillRect(0,0,g.w,22);c.fillStyle='#fff';c.font='12px system-ui,sans-serif';c.textAlign='center';c.fillText('Tap where '+esc2(S.placing)+' stands',g.w/2,15);}
+}
+function esc2(id){var n=(S.st.nodes||[]).filter(function(x){return x.id===id;})[0];return n?n.name:id;}
+$('cMap').addEventListener('click',function(e){
+  if(!S.placing||!S.st)return;var cv=$('cMap'),g=geom(cv);if(!g)return;var r=cv.getBoundingClientRect();
+  var x=(e.clientX-r.left-g.ox)/g.sc,y=g.dm.h-(e.clientY-r.top-g.oy)/g.sc;
+  if(x<0||y<0||x>g.dm.w||y>g.dm.h)return;
+  var lid=S.placing;S.placing=null;
+  act({action:'pose',lid:lid,x:Math.round(x*100)/100,y:Math.round(y*100)/100,floor:S.floor},$('mapMsg'));});
+
+/* ---------- actions ---------- */
+function act(body,msgEl){msgEl=msgEl||$('ctlMsg');msgEl.textContent='…';
+  return postJSON('/api/lidar/act',body).then(function(j){msgEl.textContent=j.ok?(j.message||'Done.'):(j.error||'Could not do that.');S.sig='';pollState();pollMap();return j;})
+   .catch(function(){msgEl.textContent='The app on the PC is not reachable.';});}
+
+/* ---------- state ---------- */
+function pollState(){getJSON('/api/lidar/state').then(function(d){if(!d||!d.ok){$('sub').textContent=(d&&d.error)||'The app is not reachable.';return;}S.st=d;render();}).catch(function(){$('sub').textContent='The app on the PC is not reachable.';});}
+function pollMap(){if(!S.st||!S.floor)return;getJSON('/api/lidar/map?floor='+S.floor).then(function(m){if(!m||!m.ok)return;S.map=m;
+  var seen={};(m.tracks||[]).forEach(function(t){seen[t.id]=1;var a=S.trails[t.id]||(S.trails[t.id]=[]);a.push([t.x,t.y]);if(a.length>40)a.shift();});
+  Object.keys(S.trails).forEach(function(k){if(!seen[k])delete S.trails[k];});drawMap();}).catch(function(){});}
+function render(){
+  var d=S.st,P=d.prefs||{},can=!!d.can_act;
+  if(!S.floor){var f=(d.nodes||[]).filter(function(n){return n.pose.floor==='up';}).length&&!(d.nodes||[]).filter(function(n){return n.pose.floor==='down';}).length?'up':'down';S.floor=f;}
+  var h='';['down','up'].forEach(function(f){h+='<button data-f="'+f+'" class="'+(f===S.floor?'on':'')+'">'+esc(d.names[f]||f)+'</button>';});$('floorTabs').innerHTML=h;
+  var live=(d.nodes||[]).filter(function(n){return n.live;}).length;
+  $('dot').className='dot'+(live?' live':'');
+  var chip,tone='';
+  if(!P.lidar_on&&!d.demo){chip='NOT LISTENING';tone='warn';}
+  else if(!(d.nodes||[]).length){chip='NO LIDARS YET';tone='warn';}
+  else if(!live){chip='NO DATA';tone='warn';}
+  else if(d.people){chip=d.people+(d.people===1?' PERSON':' PEOPLE')+(d.moving?' · MOVING':'');tone=d.moving?'moving':'info';}
+  else{chip='EMPTY';tone='quiet';}
+  setChip($('chip'),chip,tone);
+  $('sub').textContent=d.error?d.error:(d.demo?'Demo: pretend lidars. Updates every second.':(live?live+(live===1?' lidar is':' lidars are')+' sending. Updates every second.':(P.lidar_on?'Waiting for a lidar board on the Wi-Fi (UDP port '+d.port+').':'Switch on "Listen for lidars" in Controls.')));
+  var al=d.night||{};$('alarm').classList.toggle('on',!!al.active);$('alarmTx').textContent=al.active?(al.why||''):'';
+  var sig=JSON.stringify([(d.nodes||[]).map(function(n){return [n.id,n.name,n.pose,n.calibrated,n.has_bg,n.demo];}),can,S.placing,d.floors&&1]);
+  if(sig!==S.sig){S.sig=sig;renderLids(d,can);renderPairSel(d);}
+  (d.nodes||[]).forEach(function(n){var el=$('ls_'+n.id);if(!el)return;
+    var chipT=n.learning!=null?'LEARNING '+Math.round(n.learning*100)+'%':(n.live?'LIVE':'SILENT'),cls=n.learning!=null?'wait':(n.live?'ok':'bad');
+    var ch=$('lc_'+n.id);ch.textContent=chipT;ch.className=cls;
+    el.innerHTML=(n.live?'<span><b>'+n.rate+'</b> turns/s</span>'+(n.rpm?'<span><b>'+n.rpm+'</b> rpm</span>':''):'')+(n.ip?'<span>board <b>'+esc(n.ip)+'</b></span>':'')+(n.rssi!=null?'<span>Wi-Fi <b>'+n.rssi+'</b> dBm</span>':'')
+      +(n.bad?'<span style="color:var(--amb)"><b>'+n.bad+'</b> damaged</span>':'')+(n.lost?'<span style="color:var(--amb)"><b>'+n.lost+'</b> lost</span>':'')+(n.live&&n.has_bg?'<span><b>'+n.dets+'</b> shapes now</span>':'');});
+  var cvg=(S.map&&typeof S.map.coverage==='number')?S.map.coverage:null;
+  $('mapStats').innerHTML=(cvg!==null?'<span class="cov"><b>Floor seen by lidars</b> '+Math.round(cvg*100)+'%<i style="--v:'+Math.round(cvg*100)+'%;--c:'+(cvg>=0.9?'#2fe07a':(cvg>=0.6?'#ffb340':'#ff6a5c'))+'"></i></span>':'')+(d.tracks||[]).filter(function(t){return t.floor===S.floor;}).map(function(t){return '<span><b>'+esc(t.where)+'</b> · '+(t.moving?'moving':'still')+' · '+Math.round(t.age)+' s</span>';}).join('')||'<span>Nobody seen on this floor.</span>';
+  $('swOn').className=P.lidar_on?'on':'';$('swOn').disabled=false;
+  $('swDemo').className=d.demo?'on':'';$('swDemo').disabled=!can;
+  $('alertMode').value=P.lidar_alert||'away';$('alertMode').disabled=!can;
+  $('alertNote').textContent=({away:'A phone alert if someone shows up while Away mode or your phone says you are out.',always:'A phone alert every time someone shows up.',off:'No phone alert; it is still written in the list below.'})[P.lidar_alert||'away'];
+  $('ctlNote').textContent=can?'':'Changing placement or settings from this device needs "Allow switching off from other devices" ticked on the PC (Wi-Fi window).';
+  $('nightInfo').textContent='The night alarm ('+(al.from||'01:00')+' to '+(al.to||'03:00')+') also listens to the lidars: sustained walking in that window sounds the klaxon.'+(al.on===false?' (The night alarm is switched off.)':'');
+  var ev=(d.events||[]).slice().reverse();$('events').innerHTML=ev.length?ev.map(function(e){return '<li><b>'+clock(e[0])+'</b>'+esc(e[1])+'</li>';}).join(''):'<li>Nothing yet.</li>';
+  var pr=d.pair;$('pairMsg').textContent=pr?('Collecting: '+pr.n+' matching moments so far ('+pr.secs+' s). Keep walking, then press Done.'):(d.pair_msg||'');
+  $('pairGo').disabled=!can||!!pr;$('pairDone').disabled=!can||!pr;$('pairStop').disabled=!can||!pr;
+  if(S.map===null||S.map.floor!==S.floor)pollMap();
+}
+function renderLids(d,can){
+  if(!(d.nodes||[]).length){$('lidList').innerHTML='<div class="empty">No lidar has announced itself yet.<br>Flash a board, power it, and switch on <b>Listen for lidars</b> in Controls. Or try the demo.</div>';return;}
+  var h='';(d.nodes||[]).forEach(function(n,i){var p=n.pose,col=COLS[i%COLS.length],dis=can?'':' disabled';
+    h+='<div class="lid" data-id="'+esc(n.id)+'"><h4><span class="sw4" style="background:'+col+'"></span>'+esc(n.name)+' <i id="lc_'+esc(n.id)+'">&hellip;</i>'+(n.demo?'<i>DEMO</i>':'')+(n.has_bg?(n.calibrated?'<i class="ok">EMPTY ROOM LEARNED</i>':'<i>LEARNED BY ITSELF</i>'):'<i class="wait">NO PICTURE YET</i>')+'</h4>'
+     +'<div class="stats" id="ls_'+esc(n.id)+'"></div>'
+     +'<div class="frm"><label>Name<input data-k="name" value="'+esc(n.name)+'"'+dis+'></label><label>Floor<select data-k="floor"'+dis+'><option value="down"'+(p.floor==='down'?' selected':'')+'>'+esc(d.names.down)+'</option><option value="up"'+(p.floor==='up'?' selected':'')+'>'+esc(d.names.up)+'</option></select></label>'
+     +'<label>x (m)<input data-k="x" type="number" step="0.1" value="'+(+p.x).toFixed(2)+'"'+dis+'></label><label>y (m)<input data-k="y" type="number" step="0.1" value="'+(+p.y).toFixed(2)+'"'+dis+'></label>'
+     +'<label>Facing (°)<input data-k="rot" type="number" step="1" value="'+(+p.rot).toFixed(1)+'"'+dis+'></label></div>'
+     +'<label class="ck"><input type="checkbox" data-k="cw"'+(p.cw?' checked':'')+dis+'> Its scan turns clockwise seen from above (untick if the red outline looks mirrored)</label>'
+     +'<div class="btns"><button class="btn" data-n="-0.1,0,0"'+dis+'>&larr;</button><button class="btn" data-n="0.1,0,0"'+dis+'>&rarr;</button><button class="btn" data-n="0,0.1,0"'+dis+'>&uarr;</button><button class="btn" data-n="0,-0.1,0"'+dis+'>&darr;</button>'
+     +'<button class="btn" data-n="0,0,-5"'+dis+'>&#8634; 5°</button><button class="btn" data-n="0,0,5"'+dis+'>&#8635; 5°</button><button class="btn" data-n="0,0,-1"'+dis+'>&#8634; 1°</button><button class="btn" data-n="0,0,1"'+dis+'>&#8635; 1°</button></div>'
+     +'<div class="btns"><button class="btn'+(S.placing===n.id?' on':'')+'" data-a="place"'+dis+'>Place by tapping</button><button class="btn pri" data-a="learn"'+dis+'>Learn empty room</button>'+(n.has_bg?'<button class="btn" data-a="clear"'+dis+'>Forget picture</button>':'')+'<button class="btn" data-a="forget"'+dis+'>Remove</button></div></div>';});
+  $('lidList').innerHTML=h;
+}
+$('lidList').addEventListener('click',function(e){var b=e.target.closest('button');if(!b||b.disabled)return;var box=b.closest('.lid');if(!box)return;var lid=box.getAttribute('data-id');
+  if(b.hasAttribute('data-n')){var v=b.getAttribute('data-n').split(',').map(Number);act({action:'nudge',lid:lid,dx:v[0],dy:v[1],drot:v[2]},$('mapMsg'));return;}
+  var a=b.getAttribute('data-a');
+  if(a==='place'){S.placing=(S.placing===lid)?null:lid;S.sig='';render();$('view').scrollIntoView({behavior:'smooth',block:'start'});drawMap();return;}
+  if(a==='learn'){act({action:'learn',lid:lid},$('mapMsg'));return;}
+  if(a==='clear'){act({action:'clear',lid:lid},$('mapMsg'));return;}
+  if(a==='forget'){act({action:'forget',lid:lid},$('mapMsg'));}});
+$('lidList').addEventListener('change',function(e){var t=e.target,k=t.getAttribute('data-k');if(!k)return;var box=t.closest('.lid'),lid=box.getAttribute('data-id');var body={action:'pose',lid:lid};
+  body[k]=(t.type==='checkbox')?t.checked:t.value;act(body,$('mapMsg'));});
+function renderPairSel(d){var ns=d.nodes||[],keep=[$('pairA').value,$('pairB').value];var o=ns.map(function(n){return '<option value="'+esc(n.id)+'">'+esc(n.name)+'</option>';}).join('');
+  $('pairA').innerHTML=o;$('pairB').innerHTML=o;if(ns.length>1){$('pairA').value=keep[0]||ns[0].id;$('pairB').value=(keep[1]&&keep[1]!==$('pairA').value)?keep[1]:ns[1].id;}}
+$('pairGo').addEventListener('click',function(){act({action:'pair_begin',a:$('pairA').value,b:$('pairB').value},$('pairMsg'));});
+$('pairDone').addEventListener('click',function(){act({action:'pair_finish'},$('pairMsg'));});
+$('pairStop').addEventListener('click',function(){act({action:'pair_cancel'},$('pairMsg'));});
+$('floorTabs').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;S.floor=b.getAttribute('data-f');S.map=null;render();pollMap();});
+$('swOn').addEventListener('click',function(){var v=!this.classList.contains('on'),b=this;b.disabled=true;$('ctlMsg').textContent='';
+  postJSON('/api/wifi/set',{key:'lidar_on',value:v}).then(function(j){$('ctlMsg').textContent=j.ok?(j.message&&j.message!=='Saved.'?j.message:''):(j.error||'Could not change that.');pollState();})
+   .catch(function(){$('ctlMsg').textContent='The app on the PC is not reachable.';b.disabled=false;});});
+$('swDemo').addEventListener('click',function(){act({action:'demo',on:!this.classList.contains('on')});});
+$('alertMode').addEventListener('change',function(){act({action:'alert',mode:this.value});});
+$('alarmOff').addEventListener('click',function(){postJSON('/api/csi/act',{action:'night_silence'}).then(function(j){$('ctlMsg').textContent=j.ok?(j.message||''):(j.error||'');pollState();});});
+
+pollState();
+setInterval(function(){if(!document.hidden)pollState();},1000);
+setInterval(function(){if(!document.hidden)pollMap();},700);
+window.addEventListener('resize',drawMap);
+(function(){var last=0;function tick(ts){requestAnimationFrame(tick);if(S.rm||document.hidden||!S.map||!S.map.nodes||!S.map.nodes.length)return;if(ts-last<33)return;S.dt=Math.min(0.1,(ts-last)/1000);last=ts;S.anim=ts/1000;drawMap();}requestAnimationFrame(tick);})();
+document.addEventListener('visibilitychange',function(){if(!document.hidden){pollState();pollMap();}});
+</script>
+</body>
+</html>
+'''
+        _ui = _nm_theme_ui(self._monitor)
+        for _tok, _val in (('@@BG@@', _ui['bg']), ('@@PANEL@@', _ui['panel']),
+                            ('@@BORDER@@', _ui['border']), ('@@TEXT@@', _ui['text']),
+                            ('@@TEXT2@@', _ui['text2']), ('@@ACCENT@@', _ui['accent'])):
+            _html = _html.replace(_tok, _val)
+        _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
+        return _html
+# <<END LIDAR_SERVER>>
+
 
     def _serve_heatmap(self, handler):
         """7x24 weekday-by-hour median grid for a metric (NaN cells -> null)."""
@@ -45930,9 +54183,19 @@ ol.steps li{margin:6px 0}
                     elif path == '/threats':
                         self._send(200, 'text/html; charset=utf-8',
                                    server_self._build_threats_html())
+                    elif path == '/livemap':
+                        self._send(200, 'text/html; charset=utf-8',
+                                   server_self._build_livemap_html())
                     elif path == '/honeypot':
                         self._send(200, 'text/html; charset=utf-8',
                                    server_self._build_honeypot_html())
+                    elif path == '/tpot':
+                        self._send(200, 'text/html; charset=utf-8',
+                                   server_self._build_tpot_html())
+                    elif path == '/api/tpot':
+                        self._json(200, _nm_tpot_snapshot())
+                    elif path == '/api/tpot/deploy':
+                        self._json(200, _nm_vm_status())
                     elif path == '/talkers':
                         self._send(200, 'text/html; charset=utf-8',
                                    server_self._build_talkers_html())
@@ -45979,7 +54242,7 @@ ol.steps li{margin:6px 0}
                     elif path == '/api/honeypot':
                         hp = _nm_honeypot()
                         if hp is None:
-                            self._json(200, {'running': False, 'total': 0,
+                            self._json(200, {'running': False, 'total': 0, 'source': _nm_hp_prefs()['source'],
                                              'unique_ips': 0, 'hits': [], 'top': [],
                                              'tarpit_enabled': _NM_HP_TARPIT['on'],
                                              'tarpit_active': 0, 'tarpit_seconds': 0.0})
@@ -46125,6 +54388,14 @@ ol.steps li{margin:6px 0}
                         server_self._serve_wifi_plan(self)
                     elif path == '/wifi':
                         self._send(200, 'text/html; charset=utf-8', server_self._build_wifi_html())
+                    elif path == '/csi':
+                        self._send(200, 'text/html; charset=utf-8', server_self._build_csi_html())
+                    elif path.startswith('/api/csi/'):
+                        server_self._serve_csi_api(self, path)
+                    elif path == '/lidar':
+                        self._send(200, 'text/html; charset=utf-8', server_self._build_lidar_html())
+                    elif path.startswith('/api/lidar/'):
+                        server_self._serve_lidar_api(self, path)
                     elif path == '/api/topology3d':
                         server_self._serve_topology3d(self)
                     elif path.startswith('/vendor/'):
@@ -46200,12 +54471,44 @@ ol.steps li{margin:6px 0}
                 if not self._license_ok():
                     self._json(401, {'ok': False, 'error': 'license required'}); return
                 try:
+                    if path == '/api/lidar/act':
+                        n = int(self.headers.get('Content-Length', 0) or 0)
+                        raw = self.rfile.read(min(n, 4096)) if n else b'{}'
+                        try: req = json.loads(raw.decode() or '{}')
+                        except Exception: req = {}
+                        server_self._post_lidar_act(self, req if isinstance(req, dict) else {})
+                        return
+                    if path == '/api/csi/act':
+                        n = int(self.headers.get('Content-Length', 0) or 0)
+                        raw = self.rfile.read(min(n, 4096)) if n else b'{}'
+                        try: req = json.loads(raw.decode() or '{}')
+                        except Exception: req = {}
+                        server_self._post_csi_act(self, req if isinstance(req, dict) else {})
+                        return
                     if path == '/api/wifi/set':
                         n = int(self.headers.get('Content-Length', 0) or 0)
                         raw = self.rfile.read(min(n, 4096)) if n else b'{}'
                         try: req = json.loads(raw.decode() or '{}')
                         except Exception: req = {}
                         server_self._post_wifi_set(self, req if isinstance(req, dict) else {})
+                        return
+                    if path == '/api/tpot/deploy':
+                        _peer = (self.client_address[0] if self.client_address else '')
+                        n = int(self.headers.get('Content-Length', 0) or 0)
+                        raw = self.rfile.read(min(n, 8192)) if n else b'{}'
+                        try: req = json.loads(raw.decode() or '{}')
+                        except Exception: req = {}
+                        self._json(200, _nm_vm_api(req if isinstance(req, dict) else {},
+                                                   local=_peer in ('127.0.0.1', '::1', 'localhost')))
+                        return
+                    if path == '/api/tpot/control':
+                        _peer = (self.client_address[0] if self.client_address else '')
+                        n = int(self.headers.get('Content-Length', 0) or 0)
+                        raw = self.rfile.read(min(n, 4096)) if n else b'{}'
+                        try: req = json.loads(raw.decode() or '{}')
+                        except Exception: req = {}
+                        self._json(200, _nm_tpot_control(req if isinstance(req, dict) else {},
+                                                         local=_peer in ('127.0.0.1', '::1', 'localhost')))
                         return
                     if path == '/api/honeypot/control':
                         # These actions bind ports, write firewall rules and run
@@ -46401,6 +54704,10 @@ ol.steps li{margin:6px 0}
                          f'{_scheme}://{_lan}:{self._port}/')
             except Exception:
                 _exc_debug('serve')
+            try:
+                _nm_tpot_autofeed_start()
+            except Exception:
+                _exc_debug('tpot autofeed start')
             httpd.serve_forever()
         except Exception:
             _exc('[3D] serve')
@@ -47790,6 +56097,7 @@ class ModernWindow:
         btn('☉', 'PI-HOLE', self._open_pihole, '#38f0a8')
         btn('≈', 'WI-FI',   self._open_wifi,   '#38b8f0')
         btn('⌂', 'FLOOR',   self._open_floor,  '#7ee787')
+        btn('◍', 'LIDAR',   self._open_lidar,  '#74c7ec')
         tk.Frame(sb, bg=self.PANEL2).pack(fill='both', expand=True)
         div()
         btn('⎙', 'REPORT',  self._open_report,   '#ff9f43')
@@ -48736,6 +57044,12 @@ class ModernWindow:
             _nm_open_floor(self._monitor, parent=self.root)
         except Exception as ex:
             _m = str(ex); _exc('_open_floor'); log.error(f'[floor] {_m}')
+
+    def _open_lidar(self):
+        try:
+            _nm_open_lidar(self._monitor, parent=self.root)
+        except Exception as ex:
+            _m = str(ex); _exc('_open_lidar'); log.error(f'[lidar] {_m}')
 
     def _ensure_drop_logging(self):
         """Turn on firewall dropped-connection logging if the user wants it.
