@@ -157,7 +157,9 @@ def _nm_vpn_status():
         import psutil as _ps
         stats = _ps.net_if_stats()
         addrs = _ps.net_if_addrs()
-        io = _ps.net_io_counters(pernic=True)
+        _t_io, io = _nm_netio(pernic=True)
+        if io is None or time.time() - _t_io > 5.0:
+            io = _ps.net_io_counters(pernic=True)
     except Exception:
         out['reason'] = 'psutil unavailable'
         return out
@@ -1876,6 +1878,36 @@ _GUIDE_SHOTS = {
 }
 
 
+def _nm_load_guide_shots():
+    """Merge the extra picture module (nm_guide_shots.py, built from the screenshot tour)
+    into _GUIDE_SHOTS and return its section map. Pictures are optional: a missing or
+    broken module just means the guide has fewer pictures."""
+    try:
+        import nm_guide_shots as _m
+        _GUIDE_SHOTS.update(getattr(_m, 'SHOTS', {}) or {})
+        return dict(getattr(_m, 'SHOT_MAP', {}) or {})
+    except Exception:
+        return {}
+
+
+_GUIDE_SHOT_MAP_EXTRA = _nm_load_guide_shots()
+
+
+def _nm_guide_shot_map():
+    """Section id -> [(picture key, caption), ...]; the picture module's map wins per
+    section, and entries whose picture is missing are dropped."""
+    m = {k: list(v) for k, v in UserGuideWindow.SHOTS.items()}
+    for k, v in _GUIDE_SHOT_MAP_EXTRA.items():
+        m[k] = list(v)
+    out = {}
+    for k, v in m.items():
+        v = [(a, b) for (a, b) in v if a in _GUIDE_SHOTS]
+        if v:
+            out[k] = v
+    return out
+
+
+
 class SpeedDB:
     """Thread-safe SQLite wrapper. One instance per process."""
 
@@ -1943,6 +1975,15 @@ class SpeedDB:
         self.version += 1
 
     # ── Honeypot persistence ────────────────
+
+    def insert_honeypot_hits(self, recs):
+        """Persist many honeypot hits in one transaction (a scan can send thousands at once)."""
+        rows = [(r.get('time'), r.get('ip'), r.get('port'), r.get('proto', 'tcp'), r.get('service'),
+                 1 if r.get('known') else 0, r.get('sample'), r.get('tool')) for r in recs]
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO honeypot_hits (ts, ip, port, proto, service, known, sample, tool)"
+                " VALUES (?,?,?,?,?,?,?,?)", rows)
 
     def insert_honeypot_hit(self, rec):
         """Persist one honeypot hit so history survives a restart."""
@@ -2478,7 +2519,16 @@ def _active_ea():
             ea._closed = False
             log.debug(f'[_active_ea] found: closed={ea._closed} cap={ea._capturing} nodes={len(ea._nodes)}')
             return ea
-    log.warning(f'[_active_ea] no active instance found from {len(_ea_instances)} registered')
+    # Web pages and background feeds ask this many times a second; with the topology window closed that was
+    # ~20,000 identical warnings a day. Say it once in a while, with how many were skipped.
+    _now = time.time()
+    _st = _active_ea.__dict__.setdefault('_warn', [0.0, 0])
+    if _now - _st[0] > 600:
+        log.warning(f'[_active_ea] no active instance found from {len(_ea_instances)} registered'
+                    + (f' ({_st[1]} similar calls skipped)' if _st[1] else ''))
+        _st[0], _st[1] = _now, 0
+    else:
+        _st[1] += 1
     return None
 _MODERN_MODE  = False  # Set True when ModernWindow is active
 _ws_instances = []  # Global registry of open WiresharkWindow instances
@@ -3561,6 +3611,13 @@ class _NMHoneypot:
             if len(self._hits) > self.MAX_HITS:
                 del self._hits[:len(self._hits) - self.MAX_HITS]
             self._hit_counts[ip] = self._hit_counts.get(ip, 0) + 1
+        bulk = getattr(self, '_bulk', None)
+        if bulk is not None:
+            # A burst (a port scan, or catching up after a restart) is filed in one go at the end of the round:
+            # one log line, one database transaction, one alert check and one callback per source, not per event.
+            bulk['recs'].append(rec)
+            bulk['ips'][ip] = (rec, self._hit_counts[ip])
+            return
         log.info('[honeypot] %s hit %s/%s (%s)%s', ip, port, proto,
                  rec['service'],
                  ' [%s]' % rec['tool'] if rec['tool'] else '')
@@ -3596,6 +3653,48 @@ class _NMHoneypot:
                 self._on_hit(rec, self._hit_counts[ip])
             except Exception:
                 _exc_debug('honeypot on_hit')
+
+    def _bulk_begin(self):
+        self._bulk = {'recs': [], 'ips': {}}
+
+    def _bulk_end(self):
+        """File everything gathered since _bulk_begin(): the same effects as _record() has hit by hit, in bulk."""
+        b, self._bulk = getattr(self, '_bulk', None), None
+        if not b or not b['recs']:
+            return 0
+        recs = b['recs']
+        log.info('[honeypot] filed %d hit(s) from %d source(s) in one batch', len(recs), len(b['ips']))
+        if self._db is not None:
+            try:
+                many = getattr(self._db, 'insert_honeypot_hits', None)
+                if many is not None:
+                    many(recs)
+                else:
+                    for r in recs:
+                        self._db.insert_honeypot_hit(r)
+            except Exception:
+                _exc_debug('honeypot persist batch')
+        try:
+            pub = [ip for ip in b['ips'] if not _nm_is_private_ip(ip)]
+            if pub:
+                _ea = _active_ea()
+                if _ea is not None:
+                    if not hasattr(_ea, '_seen_ips'):
+                        _ea._seen_ips = set()
+                    _ea._seen_ips.update(pub)
+        except Exception:
+            _exc_debug('honeypot geo queue batch')
+        for ip, (rec, cnt) in b['ips'].items():
+            try:
+                self._maybe_alert(ip)
+            except Exception:
+                _exc_debug('honeypot alert batch')
+            if self._on_hit:
+                try:
+                    self._on_hit(rec, cnt)
+                except Exception:
+                    _exc_debug('honeypot on_hit batch')
+        return len(recs)
 
     ALERT_PORTS = 5          # distinct ports from one source => sweep
     ALERT_HITS = 12          # sheer volume from one source
@@ -5120,6 +5219,21 @@ class _NMTpotHoneypot(_NMHoneypot):
                 cur = None
             self._ts = float(cur) if cur else _t.time() - self.BACKFILL_S
         n = 0
+        self._bulk_begin()
+        try:
+            n = self._poll_pages()
+        finally:
+            self._bulk_end()
+        try:
+            self._cursor_save(self._ts)
+        except Exception:
+            _exc_debug('tpot cursor save')
+        self.connected = True
+        self.error = ''
+        return n
+
+    def _poll_pages(self):
+        n = 0
         for _page in range(8):
             res = self._fetch(self._es + '/logstash-*/_search', self._query(self._iso(self._ts)))
             hits = ((res or {}).get('hits') or {}).get('hits') or []
@@ -5145,12 +5259,6 @@ class _NMTpotHoneypot(_NMHoneypot):
             self._ts = newest
             if len(hits) < self.PAGE or (not moved and not fresh):
                 break
-        try:
-            self._cursor_save(self._ts)
-        except Exception:
-            _exc_debug('tpot cursor save')
-        self.connected = True
-        self.error = ''
         return n
 
     def _run(self):
@@ -7910,6 +8018,10 @@ def _nm_wifi_parse_networks(text):
     return res
 
 
+_NM_LOC_MSG = ('Windows is blocking Wi-Fi access until Location is allowed: Settings > Privacy & security > Location > '
+               'turn on Location services and let desktop apps access your location, then restart this app.')
+
+
 def _nm_wifi_scan(kind='link'):
     """One poll of Windows' Wi-Fi state. kind='link' = the connected network
     (cheap, ~1 Hz); kind='aps' = every access point in range (cached by the OS).
@@ -7925,7 +8037,9 @@ def _nm_wifi_scan(kind='link'):
         ifs = _nm_wifi_parse_interfaces(out)
         res['link'] = _nm_wifi_link_from_interfaces(ifs)
         res['adapters'] = len(ifs)
-        if rc != 0 and not ifs:
+        if not ifs and 'location' in (out or '').lower():
+            res['error'] = _NM_LOC_MSG
+        elif rc != 0 and not ifs:
             res['error'] = (out.splitlines()[0] if out else 'netsh failed')
         elif not ifs:
             res['error'] = (out.splitlines()[0] if out else 'No Wi-Fi adapter found.')
@@ -7945,9 +8059,7 @@ def _nm_wifi_scan(kind='link'):
     else:
         low = out.lower()
         if 'location' in low:
-            res['error'] = ('Windows is blocking Wi-Fi scans until Location is allowed: Settings > '
-                            'Privacy & security > Location > turn on Location services and let desktop '
-                            'apps access it.')
+            res['error'] = _NM_LOC_MSG
         else:
             res['error'] = (out.splitlines()[0] if out else 'No networks reported.')
     return res
@@ -8810,6 +8922,8 @@ class _NMWifiWatcher:
         self.last_rssi_t = 0.0
         self.last_bss_t = 0.0
         self.api_err = ''
+        self.api_err_t = 0.0
+        self.loc_blocked = False
         self.link = None
         self.link_meta = None
         self.link_t = 0.0
@@ -9614,6 +9728,7 @@ class _NMWifiWatcher:
                     self.event('INFO', 'Using the Windows Wi-Fi API: real dBm readings about 10 times a second, '
                                        'and fresh scans every few seconds.')
                 self.last_rssi_t = now
+                self.loc_blocked = False
                 lk = dict(self.link_meta or {})
                 lk['dbm'] = float(v)
                 lk['pct'] = int(max(0, min(100, round((v + 100) * 2))))
@@ -9621,12 +9736,19 @@ class _NMWifiWatcher:
                 self._process_link(now, lk)
             elif k == 'bss':
                 self.last_bss_t = now
+                self.loc_blocked = False
                 aps = _nm_wifi_api_aps(msg.get('aps'), self.ap_meta)
                 if aps:
                     self.ingest_aps({'t': now, 'ok': True, 'aps': aps, 'raw': ''})
             elif k == 'err':
                 self.api_err = str(msg.get('msg', ''))
-                self.event('INFO', f'Wi-Fi API helper: {self.api_err}')
+                self.api_err_t = now
+                if self.api_err.strip().endswith(' 5'):      # Windows error 5 = access denied (Location is off)
+                    if not self.loc_blocked:
+                        self.event('WARN', 'Windows denied Wi-Fi access. ' + _NM_LOC_MSG)
+                    self.loc_blocked = True
+                else:
+                    self.event('INFO', f'Wi-Fi API helper: {self.api_err}')
         except Exception:
             _exc('wifi api msg')
 
@@ -9769,6 +9891,16 @@ class _NMWifiWatcher:
             self.advice = _nm_wifi_channel_advice(aps, self.link)
 
     # ── read side ──────────────────────────────────────────────────────────
+    def blocked_msg(self):
+        """The Windows-Location message when the OS is refusing Wi-Fi access (from the helper's access-denied error or
+        netsh's own wording), else ''."""
+        if self.loc_blocked:
+            return _NM_LOC_MSG
+        for e in (self.err_link, self.err_aps):
+            if e == _NM_LOC_MSG:
+                return _NM_LOC_MSG
+        return ''
+
     def snapshot(self):
         """Compact state for the web page / 3D layer."""
         with self.lock:
@@ -9779,7 +9911,7 @@ class _NMWifiWatcher:
             ev = [{'t': e['t'], 'kind': e['kind'], 'detail': e['detail']} for e in list(self.events)[-6:]]
             return {'link': lk, 'aps': aps, 'moving': self.move_start is not None,
                     'csi': {'on': self.csi_wanted(), 'moving': self.csi_move_start is not None},
-                    'away': self.is_away(), 'mode': self.mode, 'events': ev,
+                    'away': self.is_away(), 'mode': self.mode, 'events': ev, 'blocked': self.blocked_msg(),
                     'health': ({'score': self.health['score'], 'grade': self.health['grade']}
                                if self.health else None),
                     'findings': [{'sev': f['sev'], 'text': f['text']} for f in self.findings],
@@ -9821,6 +9953,8 @@ class _NMWifiWatcher:
         with self.lock:
             lk = dict(self.link) if self.link else None
             errs = [e for e in (self.err_link, self.err_aps) if e]
+            if self.blocked_msg() and self.blocked_msg() not in errs:
+                errs.insert(0, self.blocked_msg())
             link_hist = [[round(t - now, 1), round(float(v), 1)] for (t, v) in self.link_hist if now - t <= span]
             stds = [[round(t - now, 1), round(float(v), 2)] for (t, v) in self.motion.stds if now - t <= span]
             thr = float(self.motion.thr) if self.motion.thr is not None else None
@@ -22160,12 +22294,12 @@ def _nm_score_flows(db, flows, window_days=7):
             z = (b - st['mean']) / st['sd']
             if z > 2:
                 score += min(4.0, z)
-                why.append(f'volume {z:.1f}sigma above its own norm')
+                why.append(f'volume {z:.1f} sigma above its own norm')
         elif sd > 0:
             z = (b - mean) / sd
             if z > 2.5:
                 score += min(3.0, z - 0.5)
-                why.append(f'{z:.1f}sigma above other flows')
+                why.append(f'{z:.1f} sigma above other flows')
 
         port = f.get('port')
         try:
@@ -23172,7 +23306,9 @@ class SpeedTestMonitor:
                 # Keep Windows Firewall dropped-connection logging on, so the
                 # report can count attempts against your block rules. Enabled by
                 # default; the app re-applies it at startup if the OS reset it.
-                "firewall_drop_logging": True}
+                "firewall_drop_logging": True,
+                # Open the Topology, Heatmap and Floor windows when the app starts.
+                "startup_windows": True}
         if Path(CONFIG_FILE).exists():
             try:
                 with open(CONFIG_FILE) as f:
@@ -23227,7 +23363,7 @@ class SpeedTestMonitor:
                 # survive a restart.
                 # Boolean keys need restoring explicitly for the same reason.
                 for _bkey in ('alerts_enabled', 'debug_logging',
-                              'skip_privilege_warning', 'firewall_drop_logging'):
+                              'skip_privilege_warning', 'firewall_drop_logging', 'startup_windows'):
                     if _bkey in loaded:
                         defs[_bkey] = bool(loaded[_bkey])
             except Exception:
@@ -24129,6 +24265,15 @@ class SpeedTestMonitor:
                        font=(_NM_MONO, 9), highlightthickness=0, bd=0
                        ).grid(row=10, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
 
+        startwin_var = tk.BooleanVar(value=bool(self.config.get('startup_windows', True)))
+        tk.Checkbutton(af, text='Open the Topology, Heatmap and Floor windows when the app starts',
+                       variable=startwin_var,
+                       command=lambda: self.config.__setitem__('startup_windows', bool(startwin_var.get())),
+                       fg=FG, bg=BG2, selectcolor=ENT,
+                       activebackground=BG2, activeforeground=ACC,
+                       font=(_NM_MONO, 9), highlightthickness=0, bd=0
+                       ).grid(row=11, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
+
         lbl(af, 'Alert if below / above:', fg=WARN).grid(
             row=1, column=0, columnspan=4, sticky='w', padx=4, pady=(2, 2))
 
@@ -24278,6 +24423,7 @@ class SpeedTestMonitor:
             self.config['alerts_enabled'] = bool(alerts_var.get())
             self.config['debug_logging']  = bool(debug_var.get())
             self.config['firewall_drop_logging'] = bool(fwlog_var.get())
+            self.config['startup_windows'] = bool(startwin_var.get())
             self.config['license_required'] = bool(lic_req_var.get())
             _nm_set_debug_logging(self.config['debug_logging'])
             self.config['alert_webhook']  = hook_entry.get().strip()
@@ -25697,15 +25843,17 @@ class EtherApeWindow:
             if not self._jpeg_pending or self._jpeg_saving: return
             self._jpeg_pending = False
             try:
-                raw  = bytes(self._canvas.buffer_rgba())  # fast memcopy, no render
-                w, h = self._canvas.get_width_height()
+                # np.array() copies the pixels AND carries the buffer's own (h, w, 4) shape. The old code
+                # paired the bytes with get_width_height(), which is the widget size in logical pixels:
+                # on a scaled display or mid-resize the two disagree and every frame failed to encode.
+                import numpy as _np1
+                _arr0 = _np1.array(self._canvas.buffer_rgba())
                 _lock = self._jpeg_lock
                 self._jpeg_saving = True
-                def _encode(raw=raw, w=w, h=h):
+                def _encode(arr=_arr0):
                     try:
                         from PIL import Image as _Img
-                        import io as _io2, numpy as _np2
-                        arr = _np2.frombuffer(raw, dtype='uint8').reshape(h, w, 4)
+                        import io as _io2
                         img = _Img.fromarray(arr[..., :3], 'RGB')
                         buf = _io2.BytesIO()
                         img.save(buf, format='JPEG', quality=65)
@@ -26598,6 +26746,15 @@ class EtherApeWindow:
             # window in front (e.g. the Wi-Fi window): 2 frames a second. Its full redraws (every label, every
             # ribbon) used to run at full speed behind other windows and took over half of the app's time,
             # which made every other window's animation stutter.
+            if mode == 'full':
+                # Nothing to animate (no capture, replay, drill or traffic on screen): two frames a second is plenty
+                # and it stops an empty window costing a core's worth of drawing at 20 frames a second.
+                try:
+                    if not (self._nodes or self._flows or self._pkt_queue or self._capturing or self._replaying
+                            or _NM_ATTACK_ON):
+                        mode = 'slow'
+                except Exception:
+                    pass
             if mode == 'full' or (mode == 'slow' and now - getattr(self, '_last_render_t', 0.0) >= 0.5):
                 self._last_render_t = now
                 self._render_tick_inner()
@@ -31307,8 +31464,8 @@ class _EtherApeGeoWindow:
                 _susp = getattr(self._ea, '_suspicious_flows', set())
                 _is_s = (fsrc,fdst,proto) in _susp or (fdst,fsrc,proto) in _susp
                 if _is_s:
-                    import time as _t
-                    col = '#ff2222' if int(_t.time()*3) % 2 == 0 else '#ff8888'
+                    import time as _tmod
+                    col = '#ff2222' if int(_tmod.time()*3) % 2 == 0 else '#ff8888'
                     lw  = max(lw, 2.0)
                 pts  = list(zip(ax2, ay2))
                 segs.append(pts);  lwidths.append(lw);    arc_cols.append(col)
@@ -35919,6 +36076,11 @@ class UserGuideWindow:
         ('Colour Themes',            'colours'),
         ('Export Data',              'export'),
         ('Reports & Scheduling',     'report'),
+        ('Alerts & Monitoring',      'monitor'),
+        ('Time-of-Day Heatmap',      'heatmap'),
+        ('Network Quality',          'quality'),
+        ('ISP Evidence Pack',        'evidence'),
+        ('Tools (MobaXterm)',        'tools'),
         ('Wi-Fi Signal & CSI',       'wifi'),
         ('Wireshark Monitor',        'wireshark'),
         ('EtherApe Topology',        'etherape'),
@@ -35942,6 +36104,103 @@ class UserGuideWindow:
         ('Troubleshooting',          'trouble'),
         ('What\'s New',              'whatsnew'),
     ]
+
+    # Sections that used to be web-only: they have a picture but no CONTENT entry.
+    EXTRA = {
+        'monitor': [
+            ('h1', 'Alerts & Monitoring'),
+            ('p', 'The Monitor window gathers alerts, discovered devices, latency events, '
+                  'VDI health and analytics into one tabbed console. Threat-intel counts '
+                  '(known-bad IPs, ranges and countries seen) show along the top.'),
+            ('bullet', 'Alerts — geo, threat-intel, latency and new-device events with '
+                       'severity (INFO / WARN / CRIT) and timestamps'),
+            ('bullet', 'Devices — a live 3D map of hosts on the LAN; click one for full details'),
+            ('bullet', 'Latency / VDI / Analytics — per-area detail tabs'),
+            ('bullet', 'Notify — outbound alert (webhook / toast) configuration'),
+        ],
+        'heatmap': [
+            ('h1', 'Time-of-Day Heatmap'),
+            ('p', 'A 7x24 grid of weekday by hour showing the median of a chosen metric '
+                  'across the selected window. The white-outlined cell is the current hour; '
+                  'hover any cell for its sample count and last reading.'),
+            ('bullet', 'Metric — download, upload, ping or DNS'),
+            ('bullet', 'Window — how many days of history to aggregate'),
+            ('bullet', 'Colours follow your selected theme (Settings) — each metric\'s ramp '
+                       'runs from that theme\'s panel colour up to its own accent colour, '
+                       'and ping\'s ramp runs the other way since lower is better. Changing '
+                       'theme in Settings re-colours the heatmap immediately if it\'s open'),
+            ('tip', 'Reads straight from the history database, so the longer it runs the '
+                    'more reliable the picture.'),
+        ],
+        'quality': [
+            ('h1', 'Connection Quality'),
+            ('p', 'The Quality window grades your line for bufferbloat (latency added under '
+                  'load) and tracks jitter and packet loss over time.'),
+            ('bullet', 'Bufferbloat grade — A+ to F, from the latency added while the link '
+                       'is saturated'),
+            ('bullet', 'Jitter & loss — historical trend charts'),
+            ('bullet', 'Bandwidth / Devices / Anomalies — per-destination usage, device '
+                       'inventory and IsolationForest anomaly scoring'),
+        ],
+        'evidence': [
+            ('h1', 'ISP Evidence Pack'),
+            ('p', 'A one-click PDF for disputes with your ISP: what you actually receive '
+                  'measured against what you pay for, with every outage timestamped over '
+                  'the chosen period. Set the number of days and generate.'),
+            ('h2', 'What is in the pack'),
+            ('bullet', 'Page 1 — availability and download: uptime, outage count, total and '
+                       'longest downtime, median/mean/spread, the full percentile range, and '
+                       'how many tests fell below 90%, 75% and 50% of the advertised speed'),
+            ('bullet', 'Peak-hours comparison — median download during 20:00–22:00 against '
+                       'the rest of the day, the same basis ISPs advertise on'),
+            ('bullet', 'Page 2 — upload and latency: upload percentiles against advertised, '
+                       'ping median/P90/P95/P99 and jitter, plus a plain-English note on method'),
+            ('bullet', 'Pages 3–5 — download, upload and latency plotted over the whole '
+                       'period, with median and advertised reference lines and outages shaded'),
+            ('bullet', 'Page 6 — distribution of every download result, marking the median, '
+                       'the advertised rate and the slowest 10%'),
+            ('bullet', 'Page 7 — daily breakdown: test count and median download, upload and '
+                       'ping for each day'),
+            ('bullet', 'Page 8 — numbered outage log with start, end and duration, and totals'),
+            ('tip', 'Set your advertised speeds in Settings first — without them the pack '
+                    'cannot show the comparison that makes the case.'),
+        ],
+        'tools': [
+            ('h1', 'Tools (MobaXterm)'),
+            ('p', 'The Tools window hosts MobaXterm inside the app so you can open terminals '
+                  'and SSH sessions without leaving the monitor. Restart, Detach (pop out to '
+                  'its own window) and Close control the embed.'),
+            ('tip', 'Set the MobaXterm folder in Settings if auto-detect does not find it.'),
+        ],
+    }
+
+    # Section id -> [(screenshot key, caption), ...]  (keys index _GUIDE_SHOTS)
+    SHOTS = {
+        'dashboard': [('main_screen', 'The main dashboard — gauge strip, charts and the sidebar')],
+        'system':    [('system_tmog', 'Task Manager TMOG — Summary page')],
+        'pentest':   [('pentest_view', 'Pen Test — nmap scan builder, live console and AI Assistant')],
+        'monitor':   [('monitor_view', 'Alerts, Devices, VDI and Analytics in one window')],
+        'heatmap':   [('heatmmap', 'Median download by weekday and hour')],
+        'quality':   [('network_quality', 'Bufferbloat grade with jitter and loss trends')],
+        'report':    [('report', 'Report generator with scheduling')],
+        'evidence':  [('evidence_pack', 'ISP Evidence Pack PDF generator')],
+        'settings':  [('settings', 'Settings — paths, colour themes, schedule and alerts')],
+        'tools':     [('tools', 'MobaXterm hosted inside the app')],
+        'wireshark': [('wireshark_monitor', 'Live packet capture and deep inspection'),
+                      ('wireshark_capture_analysis', 'AI capture analysis in plain English'),
+                      ('wire_shark_ids', 'Intrusion-detection dashboard')],
+        'talkers':   [('etherape_top_talkers', 'Top talkers ranked by traffic volume')],
+        'radar':     [('sonar_radar', 'Sonar scope \u2014 hosts plotted at their real location')],
+        'world':     [('world_view', 'World view \u2014 hosts on the globe, lit by the real sun')],
+        'attack':    [('sonar_radar', 'Hostiles and detonations appear on the same scope')],
+        'scrubber':  [('etherape_sankey_view', 'Rewind the flow view without stopping capture')],
+        'etherape':  [('etherape_3d_view', '3D network view'),
+                      ('etherape_geo_map', 'Geographic flow map'),
+                      ('etherape_radial_view', 'Radial topology'),
+                      ('etherape_sankey_view', 'Sankey traffic flow'),
+                      ('etherape_top_talkers', 'Top flow talkers'),
+                      ('etherape_top_tallkers_with_radar', 'Top talkers with incoming radar')],
+    }
 
     CONTENT = {
         'overview': [
@@ -35976,6 +36235,17 @@ class UserGuideWindow:
                    'sidebar buttons that open those same windows), a ✦ BLOOM toggle, a LIVE badge that switches '
                    'to amber TESTING or DNS CHECK while a check is running (or to red DB READ ERROR if the '
                    'database can\'t be read), and a live clock.'),
+            ('h2', 'CUBE button (top bar)'),
+            ('p',  'The \u2b22 CUBE button, right after BLOOM, opens a window with a rotating block that shows your '
+                   'open windows live on its faces: Main dashboard, Topology, Heatmap and Floor on the four sides, '
+                   'Wi-Fi on the top and Lidar on the bottom. Drag with the mouse to spin it in any direction (let go '
+                   'while moving and it keeps turning for a moment), scroll to zoom, press R to put it back, and click '
+                   'a face to close the cube and bring that window forward. A face for a window that is not open says '
+                   'so; clicking it opens that window. Esc closes the cube. The cube redraws about 20 times a second '
+                   'only while it is open; the windows underneath carry on as normal.'),
+            ('h2', 'Windows that open at start'),
+            ('p',  'The Topology, Heatmap and Floor windows open by themselves when the app starts. Untick "Open the '
+                   'Topology, Heatmap and Floor windows when the app starts" in Settings to stop that.'),
             ('h2', 'BLOOM button (top bar)'),
             ('p',  'A toggle next to Pen Test that turns a soft glow effect on or off for every chart on the '
                    'main dashboard — the gauge-strip sparklines, the four main charts, the DNS chart and the '
@@ -37141,7 +37411,6 @@ class UserGuideWindow:
             ('bullet', 'New-network alarm: for the first 10 minutes on a new setup the window only learns what is '
                        'normal. After that a strong new network that persists raises one alarm.'),
             ('h2', 'Activity tab, away mode and background watching'),
-            ('shot', 'wifi_activity|Activity tab: how often movement was seen by weekday and hour over the last 30 days, minutes of movement per hour over the last 24 hours, and the event list underneath'),
             ('bullet', 'Movement is recorded every minute in the app database. The tab shows a weekday-by-hour '
                        'heatmap of how often movement was detected, the last 24 hours as bars, and the event history.'),
             ('bullet', 'ESP32 boards count too — movement seen by the boards is added to the same minute-by-minute record as your PC\'s own Wi-Fi card (where both saw movement in a minute, the larger value is kept, never added twice). It appears in the heatmap and the 24-hour bars, and every burst is listed as "ESP32 boards: movement detected" (with "— while you are away" when Away mode was on). The simulated demo never adds anything.'),
@@ -37152,7 +37421,6 @@ class UserGuideWindow:
                        'app\'s desktop toast, push and webhook channels (at most one every five minutes).'),
             ('bullet', 'Away mode and you at the PC — a ticked Away mode stays ticked (it is saved) until you untick it, so it is easy to forget. To stop alerts about your own movement, it now only counts as away once the keyboard and mouse have not been used for two minutes. Typing or moving the mouse at the PC means you are treated as at home even with the box ticked, and walking away and leaving the PC idle brings the alerts back. The same two-minute rule applies to the ESP32 "no data" alert. The tick-box says "when I am not at the PC".'),
             ('h2', 'Signal map tab'),
-            ('shot', 'wifi_signal_map|Signal map: the floor plan with the walk-around samples turned into a signal-strength map, floor buttons along the top and the dBm colour scale on the right'),
             ('bullet', 'Walk-around survey: "Floor plan image…" loads a picture of your floor, click on it where you are '
                        'standing, press "Sample here". It builds a smoothed map; "Place router" then a click marks the router.'),
             ('bullet', 'Floors: the buttons along the top of the Signal map switch between Downstairs, Upstairs and any '
@@ -37181,7 +37449,6 @@ class UserGuideWindow:
                    'as text, which this tab reads directly — no extra software to install. The receiver can also '
                    'join your home Wi-Fi and send the readings over the network, so the boards can sit downstairs while '
                    'this PC is in an upstairs office (see Receiver over Wi-Fi below).'),
-            ('shot', 'wifi_csi_tab|CSI tab connected to the receiver over Wi-Fi: movement chips, breathing, the signal-change strip, the movement level, signal shape, breathing and the recorded-movement timeline'),
             ('bullet', 'The walking man — whenever the detector says someone is moving, a glowing dotted figure walks in the space between the signal-change strip and the movement-level graph, standing on top of the movement graph above its -30 s mark. The gap is sized to him, so he never covers either graph, and he is drawn at a high resolution (thousands of fine dots, antialiased) in the style of a 3-D body scan: bright edge, soft blue inside, with a real stride. He hides when movement stops, when you are looking at recorded history, when the board is disconnected and when the tab is not showing. The "Someone walking about" demo makes him walk too.'),
             ('bullet', 'Opening the tab while "Keep watching" is on — the tab connects to the board straight away, takes over from the background watcher (the calibration carries over) and hands it back when you press Disconnect or close the window. You do not need to press Connect.'),
             ('bullet', 'Receiver board — pick the COM port (USB-serial bridges are starred) and press Connect. '
@@ -37237,12 +37504,32 @@ class UserGuideWindow:
         ],
 
         'whatsnew': [
+            ('h1', 'What\'s New'),
+            ('p',  'The recent changes in one place, newest first.'),
+            ('h2', 'Pictures in the guide'),
+            ('bullet', 'The guide now shows real screenshots of the windows (Wi-Fi tabs, Monitor tabs, Quality, Reports, Settings, Agents, Lidar, Floor and the phone pages). Addresses, Wi-Fi names and device names are blurred. Click a picture to see it bigger.'),
+            ('h2', 'Small fixes'),
+            ('bullet', 'Clicking Topology while the topology window is already open now brings that window forward instead of starting a second capture.'),
+            ('bullet', 'The web flow view could fail to refresh on a scaled display (125% or 150%); fixed.'),
+            ('bullet', 'The log no longer fills with thousands of identical "no active instance" lines when the topology window is closed.'),
+            ('h2', 'Cube view'),
+            ('bullet', 'New \u2b22 CUBE button next to BLOOM: your windows live on the faces of a cube you can spin with the mouse (drag to turn, scroll to zoom, click a face to jump to that window, Esc to close).'),
+            ('h2', 'Windows open at start'),
+            ('bullet', 'Topology, Heatmap and Floor now open when the app starts. There is a tick box in Settings to turn it off.'),
+            ('h2', 'Freezes from the network counters'),
+            ('bullet', 'The Windows call that reads network traffic could stall for up to 12 seconds and freeze every window (caught by the new [stall] log lines). It now runs on its own thread, so the screen no longer waits for it.'),
+            ('h2', 'Wi-Fi tells you when Windows Location is off'),
+            ('bullet', 'With Windows Location turned off, Windows refuses all Wi-Fi scans and signal readings. The Wi-Fi pages and the Wi-Fi 3D overlay now say so and how to fix it, instead of showing "waiting for the first scan".'),
+            ('h2', 'Attack sim now shows in the flat 3D view'),
+            ('bullet', 'Every simulated attacker used to be placed at the exact centre of the flat 3D view, in one blob on top of this machine, so the drill looked empty. Each now sits at its own spot around it. World View was already placing them by location. The simulated attackers are drawn in the app only: they are made-up addresses and never reach T-Pot, so T-Pot\u2019s own attack map will not show them.'),
+            ('h2', 'Less lag, and freezes now leave a trace'),
+            ('bullet', 'The main window was redrawing all six charts every couple of seconds, plus the live traffic panel several times a second, even when the window was minimised or behind another program. It now redraws only what changed, and only the live traffic panel when just that moves. Nothing is drawn while the window is minimised, and the live panel slows down while another program is in front. In testing, drawing time fell about tenfold.'),
+            ('bullet', 'The EtherApe view no longer runs at full speed while it has nothing to show.'),
+            ('bullet', 'A watchdog now notes in the log (a line starting [stall]) when the window stops responding for more than a couple of seconds, with where it was stuck, so a freeze can be traced instead of guessed at.'),
             ('h2', 'Ollama no longer gets uninstalled by its own update'),
             ('bullet', 'The app now launches Ollama through its tray app instead of a loose server, so Ollama\u2019s updater can replace its files. A held-open server made its installer fail, roll back and uninstall Ollama.'),
             ('h2', 'Visitors on your own network now appear on the map'),
             ('bullet', 'A honeypot hit from another PC on your network (for example an SSH test) used to be counted but never drawn, because home-network addresses have no location. It is now plotted on your home pin on the Threat Radar and the Live Threat Map, labelled Your network (LAN).'),
-            ('h1', 'What\'s New'),
-            ('p',  'The recent changes in one place, newest first.'),
             ('h2', 'Deploy a T-Pot VM on this PC'),
             ('bullet', 'The T-Pot page has a card, Deploy a T-Pot virtual machine on this PC (shown only on the PC itself). It finds VMware Workstation or VirtualBox, downloads the current Debian installer from cdimage.debian.org and checks its checksum, makes a copy of the install disc that installs itself with your answers, creates the VM, starts it, waits while Debian and then T-Pot install, and finally connects NetSentinel to the VM. Nothing is typed in the VM.'),
             ('bullet', 'You choose two logins in the card: a user name and password for the VM itself, and a different web user name and password for the T-Pot portal. The VM password is stored only as a hash inside the VM, the portal login is kept in a root-only file that the VM deletes once T-Pot is installed, and the copy of the install disc is ejected and deleted at the end.'),
@@ -37389,6 +37676,12 @@ class UserGuideWindow:
             ('bullet', 'Verify the port is not blocked by a firewall on the remote machine'),
             ('bullet', 'Try the /health endpoint in a browser: http://<ip>:<port>/health'),
             ('bullet', 'If using a token, ensure it exactly matches what is set on the agent'),
+            ('h2', 'Wi-Fi shows no networks and no signal'),
+            ('bullet', 'If the Wi-Fi page says Windows is blocking Wi-Fi access, Windows Location is off. Open Settings, Privacy & security, Location, turn on Location services and "Let desktop apps access your location", then restart this app. Without it Windows hides every Wi-Fi scan and signal reading from all programs.'),
+            ('h2', 'The app is slow, laggy or freezes'),
+            ('bullet', 'Close or minimise windows you are not using: the main window redraws only while it is visible, and live panels (Wi-Fi sensing, EtherApe, Live Threat Map) are the busiest.'),
+            ('bullet', 'If it freezes, open speedtest_monitor.log (in the install folder) and look for lines starting [stall]: each names the code the window was stuck in and for how long. Send those lines when reporting it.'),
+            ('bullet', 'Windows Event Viewer, Windows Logs, Application, entries named Application Hang or Application Error for python.exe or speedtest_monitor show whether Windows saw a hang or a crash.'),
             ('h2', 'AI Query returns an error'),
             ('bullet', 'AI runs locally via Ollama by default — no API key needed. Install Ollama from ollama.com and pull a model (default is deepseek-r1:7b — ollama pull deepseek-r1:7b — or a faster non-reasoning model like llama3.2)'),
             ('bullet', 'The app starts Ollama automatically on launch; if that fails, run "ollama serve" manually, and make sure the model name matches one from "ollama list"'),
@@ -37565,15 +37858,103 @@ class UserGuideWindow:
                                         fg=self._TICK, font=(_NM_MONO, 8))
         self._search_result.pack(side='left', padx=8)
 
+    def _content_for(self, key):
+        return self.CONTENT.get(key) or self.EXTRA.get(key) or []
+
+    def _guide_photo(self, sk, maxw):
+        """(PhotoImage fitted to maxw, full-size PIL image) for picture key sk, or None."""
+        try:
+            import base64, io
+            from PIL import Image, ImageTk
+            cache = self.__dict__.setdefault('_img_cache', {})
+            ck = (sk, maxw)
+            if ck in cache:
+                return cache[ck]
+            d = _GUIDE_SHOTS.get(sk)
+            if not d:
+                return None
+            full = Image.open(io.BytesIO(base64.b64decode(d))).convert('RGB')
+            im = full
+            if im.width > maxw:
+                im = im.resize((maxw, max(1, int(im.height * maxw / im.width))), Image.LANCZOS)
+            r = (ImageTk.PhotoImage(im), full)
+            cache[ck] = r
+            return r
+        except Exception:
+            _exc_debug('guide_photo')
+            return None
+
+    def _open_big(self, sk, caption=''):
+        """Click a guide picture to see it full size (fitted to the screen)."""
+        try:
+            import tkinter as _tk
+            from PIL import ImageTk
+            got = self._guide_photo(sk, 100000)
+            if not got:
+                return
+            full = got[1]
+            sw, sh = self._txt.winfo_screenwidth(), self._txt.winfo_screenheight()
+            k = min(1.0, (sw - 80) / full.width, (sh - 140) / full.height)
+            im = full if k >= 1.0 else full.resize((int(full.width * k), int(full.height * k)))
+            top = _tk.Toplevel(self._txt)
+            top.title(caption or sk)
+            top.configure(bg=self._BG)
+            ph = ImageTk.PhotoImage(im)
+            lab = _tk.Label(top, image=ph, bg=self._BG, bd=0)
+            lab.image = ph
+            lab.pack(padx=8, pady=(8, 2))
+            if caption:
+                _tk.Label(top, text=caption, bg=self._BG, fg=self._TEXT,
+                          font=('Segoe UI', 10)).pack(pady=(0, 8))
+            for w in (top, lab):
+                w.bind('<Button-1>', lambda e, t=top: t.destroy())
+            top.bind('<Escape>', lambda e, t=top: t.destroy())
+            top.focus_set()
+        except Exception:
+            _exc_debug('guide_open_big')
+
+    def _put_shots(self, txt, shots, maxw):
+        """Insert pictures (with captions) at the end of the text widget."""
+        n = self.__dict__.setdefault('_shot_n', [0])
+        txt.tag_configure('shot_cap', foreground=self._TICK, font=('Segoe UI', 9, 'italic'),
+                          spacing3=6)
+        for sk, cap in shots:
+            got = self._guide_photo(sk, maxw)
+            if not got:
+                continue
+            n[0] += 1
+            tag = 'shot%d' % n[0]
+            txt.insert('end', '\n', 'p')
+            txt.image_create('end', image=got[0], padx=2, pady=2)
+            txt.tag_add(tag, 'end-2c')
+            txt.tag_bind(tag, '<Button-1>', lambda e, k=sk, c=cap: self._open_big(k, c))
+            txt.tag_bind(tag, '<Enter>', lambda e: txt.config(cursor='hand2'))
+            txt.tag_bind(tag, '<Leave>', lambda e: txt.config(cursor=''))
+            txt.insert('end', '\n' + (cap + '   (click to enlarge)' if cap else '(click to enlarge)') + '\n', 'shot_cap')
+
     def _show_section(self, key):
-        content = self.CONTENT.get(key, [])
+        content = self._content_for(key)
         txt = self._txt
         txt.config(state='normal')
         txt.delete('1.0', 'end')
+        try:
+            w = txt.winfo_width()
+            maxw = max(360, min(1000, (w if w > 200 else 820) - 70))
+        except Exception:
+            maxw = 760
+        self._keep = []          # PhotoImages referenced by the text widget (kept alive in _img_cache)
+        shots = _nm_guide_shot_map().get(key, [])
+        shots_done = False
         for kind, text in content:
             if kind == 'h1':
                 txt.insert('end', text + '\n', 'h1')
                 txt.insert('end', '\u2500' * 55 + '\n', 'rule')
+                if shots and not shots_done:
+                    self._put_shots(txt, shots, maxw)
+                    shots_done = True
+            elif kind == 'shot':
+                sk, _, cap = str(text).partition('|')
+                self._put_shots(txt, [(sk, cap)], maxw)
             elif kind == 'h2':
                 txt.insert('end', '\n' + text + '\n', 'h2')
             elif kind == 'p':
@@ -37597,6 +37978,8 @@ class UserGuideWindow:
             elif kind == 'warn':
                 txt.insert('end', '\n  \u26a0 ', 'warn_icon')
                 txt.insert('end', text + '\n\n', 'warn')
+        if shots and not shots_done:
+            self._put_shots(txt, shots, maxw)
         txt.config(state='disabled')
         txt.yview_moveto(0)
 
@@ -37606,7 +37989,7 @@ class UserGuideWindow:
             return
         # Search all sections, find first match
         for title, key in self.SECTIONS:
-            for kind, text in self.CONTENT.get(key, []):
+            for kind, text in self._content_for(key):
                 if query in text.lower():
                     # Navigate to section and highlight
                     for nav_widget in self.root.winfo_children():
@@ -38164,6 +38547,14 @@ class _NMStore:
             'SELECT * FROM devices ORDER BY online DESC, last_seen DESC')]
 
     # ── alerts ───────────────────────────────────────────────────────────
+    def insert_honeypot_hits(self, recs):
+        c = self._conn()
+        c.executemany('INSERT INTO honeypot_hits(ts,id_placeholder)'.replace('ts,id_placeholder)', 'ts,ip,port,proto,service,known,sample,tool)')
+                      + ' VALUES(?,?,?,?,?,?,?,?)',
+                      [(r.get('time'), r.get('ip'), r.get('port'), r.get('proto', 'tcp'), r.get('service'),
+                        1 if r.get('known') else 0, r.get('sample'), r.get('tool')) for r in recs])
+        c.commit()
+
     def insert_honeypot_hit(self, rec):
         """Persist a honeypot hit so history survives a restart."""
         c = self._conn()
@@ -39361,6 +39752,16 @@ _NM_ATTACK_POOL = [
 _NM_ATTACK_THREAD = None
 
 
+def _nm_attack_xyz(ip):
+    """A fixed spot on a ring around the middle of the flat 3D view for a simulated attacker. They used to all be
+    placed at 0,0,0, so every one of them sat in a single blob on top of this machine and the drill looked empty."""
+    import hashlib as _h, math as _m
+    d = _h.md5(('atk' + str(ip)).encode()).digest()
+    ang = (d[0] | (d[1] << 8)) / 65535.0 * 2 * _m.pi
+    rad = 6.5 + (d[2] / 255.0) * 2.5
+    return (round(rad * _m.cos(ang), 3), round((d[3] / 255.0 - 0.5) * 4, 3), round(rad * _m.sin(ang), 3))
+
+
 def _nm_attack_worker():
     """Advance the drill on its own clock. Previously it only ticked inside the
     topology endpoint, which early-returns when no capture is running — so
@@ -40059,6 +40460,866 @@ def _nm_ensure_model(base, exe=None):
             _exc('[ollama] set default model')
     else:
         log.info('[ollama] keeping user-selected model %r', current)
+
+
+# ── Desktop cube ─────────────────────────────────────────────────────────────
+# A rotating six-sided block that shows this app's windows live on its faces (like the Compiz desktop cube). The four
+# sides are 16:9 (Main, Topology, Heatmap, Floor); the top is Wi-Fi and the bottom Lidar. Windows are read with
+# PrintWindow, so they can be covered by other windows and still show; everything is drawn in software (PIL + numpy)
+# on a thread of its own, so the rest of the app stays responsive while the cube is open.
+#
+#   key        title contains          label      opener on the main window
+import numpy as np   # noqa: E402  (the cube's maths; numpy is loaded by matplotlib at start-up anyway)
+
+_NM_CUBE_FACES = [
+    ('main',     None,                   'Main dashboard', None),
+    ('topology', 'EtherApe',             'Topology',       '_open_etherape'),
+    ('heatmap',  'Time-of-Day Heatmap',  'Heatmap',        '_open_heatmap'),
+    ('floor',    'Floor Detection',      'Floor',          '_open_floor'),
+    ('wifi',     'Wi-Fi Signal',         'Wi-Fi',          '_open_wifi'),
+    ('lidar',    'Lidar',                'Lidar',          '_open_lidar'),
+]
+_NM_CUBE_W, _NM_CUBE_H, _NM_CUBE_D = 1.6, 0.9, 1.6          # half sizes: 3.2 x 1.8 x 3.2 (sides are 16:9)
+_NM_CUBE_GEOM = {
+    # key: (outward normal, corners top-left, top-right, bottom-right, bottom-left as seen from outside, texture size)
+    'main':     ((0, 0, 1),  [(-1, 1, 1), (1, 1, 1), (1, -1, 1), (-1, -1, 1)], (1024, 576)),
+    'topology': ((1, 0, 0),  [(1, 1, 1), (1, 1, -1), (1, -1, -1), (1, -1, 1)], (1024, 576)),
+    'heatmap':  ((0, 0, -1), [(1, 1, -1), (-1, 1, -1), (-1, -1, -1), (1, -1, -1)], (1024, 576)),
+    'floor':    ((-1, 0, 0), [(-1, 1, -1), (-1, 1, 1), (-1, -1, 1), (-1, -1, -1)], (1024, 576)),
+    'wifi':     ((0, 1, 0),  [(-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1)], (768, 768)),
+    'lidar':    ((0, -1, 0), [(-1, -1, 1), (1, -1, 1), (1, -1, -1), (-1, -1, -1)], (768, 768)),
+}
+
+
+def _nm_cube_corners(key):
+    n, pts, size = _NM_CUBE_GEOM[key]
+    s = np.array([_NM_CUBE_W, _NM_CUBE_H, _NM_CUBE_D], dtype=float)
+    return np.array(n, dtype=float), np.array(pts, dtype=float) * s, size
+
+
+def _nm_cube_homography(dst, src):
+    """The eight numbers PIL's PERSPECTIVE transform wants so that output point `dst[i]` samples input point `src[i]`."""
+    A = []; b = []
+    for (x, y), (u, v) in zip(dst, src):
+        A.append([x, y, 1, 0, 0, 0, -x * u, -y * u]); b.append(u)
+        A.append([0, 0, 0, x, y, 1, -x * v, -y * v]); b.append(v)
+    return np.linalg.solve(np.array(A, dtype=float), np.array(b, dtype=float)).tolist()
+
+
+def _nm_cube_rot(ax, ay, az=0.0):
+    cx, sx, cy, sy, cz, sz = np.cos(ax), np.sin(ax), np.cos(ay), np.sin(ay), np.cos(az), np.sin(az)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    return Rx @ Ry @ Rz
+
+
+def _nm_cube_background(size):
+    from PIL import Image
+    w, h = size
+    top = np.array([3, 7, 16], dtype=float); bot = np.array([12, 26, 48], dtype=float)
+    t = np.linspace(0, 1, h)[:, None, None]
+    col = (top * (1 - t) + bot * t) * np.ones((1, w, 1))
+    yy, xx = np.mgrid[0:h, 0:w]
+    vig = 1.0 - 0.35 * (((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2) / 2
+    return Image.fromarray(np.clip(col * vig[..., None], 0, 255).astype('uint8'), 'RGB')
+
+
+def _nm_cube_face_texture(key, label, shot, note=''):
+    """One face's picture: the window's pixels scaled to fit on a dark panel with a name tag, or the tag and a note
+    ('not open', 'minimised') when there is nothing to show."""
+    from PIL import Image, ImageDraw, ImageFont
+    size = _NM_CUBE_GEOM[key][2]
+    img = Image.new('RGB', size, (6, 14, 28))
+    d = ImageDraw.Draw(img)
+    try:
+        f_big = ImageFont.truetype('segoeui.ttf', 30); f_tag = ImageFont.truetype('segoeuib.ttf', 22)
+    except Exception:
+        try:
+            f_big = ImageFont.load_default(size=30); f_tag = ImageFont.load_default(size=22)
+        except Exception:
+            f_big = f_tag = ImageFont.load_default()
+    m = 12
+    if shot is not None:
+        iw, ih = shot.size
+        s = min((size[0] - 2 * m) / float(iw), (size[1] - 2 * m) / float(ih))
+        nw, nh = max(8, int(iw * s)), max(8, int(ih * s))
+        pic = shot.resize((nw, nh), Image.BILINEAR)
+        img.paste(pic, ((size[0] - nw) // 2, (size[1] - nh) // 2))
+    else:
+        txt = note or 'not open'
+        tw = d.textlength(txt, font=f_big)
+        d.text(((size[0] - tw) / 2, size[1] / 2 - 18), txt, fill=(90, 140, 180), font=f_big)
+    tw = d.textlength(label, font=f_tag)
+    d.rounded_rectangle((m + 4, m + 4, m + 4 + tw + 24, m + 4 + 36), 8, fill=(10, 36, 66), outline=(56, 184, 240))
+    d.text((m + 16, m + 8), label, fill=(190, 230, 255), font=f_tag)
+    d.rectangle((0, 0, size[0] - 1, size[1] - 1), outline=(30, 70, 110))
+    return img
+
+
+def _nm_cube_render(size, R, dist, textures, bg, hover=None):
+    """Draw the block. R turns it, `dist` is the camera distance, textures is {key: PIL image}. Returns (image,
+    hits): hits is [(key, polygon)] for the faces showing, nearest last, for telling which face a click landed on."""
+    from PIL import Image, ImageDraw
+    W, H = size
+    frame = bg.copy() if bg.size == size else _nm_cube_background(size)
+    f = 0.62 * H / np.tan(np.radians(24))              # focal length in pixels (about a 48 degree view)
+    cx, cy = W / 2.0, H / 2.0
+    cam = np.array([0.0, 0.0, dist])
+    items = []
+    for key in _NM_CUBE_GEOM:
+        n, pts, tsize = _nm_cube_corners(key)
+        rp = pts @ R.T
+        rn = R @ n
+        center = rp.mean(axis=0)
+        facing = float(rn @ (cam - center))
+        if facing <= 0:
+            continue
+        depth = dist - rp[:, 2]
+        if (depth <= 0.05).any():
+            continue
+        scr = np.stack([cx + f * rp[:, 0] / depth, cy - f * rp[:, 1] / depth], axis=1)
+        items.append((float(dist - center[2]), key, scr, facing / (np.linalg.norm(cam - center) + 1e-9)))
+    items.sort(key=lambda it: -it[0])                  # far to near
+    hits = []
+    for _, key, scr, lit in items:
+        tex = textures.get(key)
+        if tex is None:
+            continue
+        x0 = int(max(0, np.floor(scr[:, 0].min()))); y0 = int(max(0, np.floor(scr[:, 1].min())))
+        x1 = int(min(W, np.ceil(scr[:, 0].max()))); y1 = int(min(H, np.ceil(scr[:, 1].max())))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            continue
+        tw, th = tex.size
+        try:
+            co = _nm_cube_homography([(p[0] - x0, p[1] - y0) for p in scr], [(0, 0), (tw, 0), (tw, th), (0, th)])
+        except Exception:
+            continue
+        warped = tex.transform((x1 - x0, y1 - y0), Image.PERSPECTIVE, co, Image.BILINEAR)
+        poly = [(float(p[0] - x0), float(p[1] - y0)) for p in scr]
+        mask = Image.new('L', (x1 - x0, y1 - y0), 0)
+        ImageDraw.Draw(mask).polygon(poly, fill=255)
+        shade = 0.55 + 0.45 * min(1.0, lit * 1.25)
+        if shade < 0.995:
+            warped = Image.blend(Image.new('RGB', warped.size, (4, 8, 16)), warped, shade)
+        frame.paste(warped, (x0, y0), mask)
+        d = ImageDraw.Draw(frame)
+        edge = (120, 220, 255) if hover == key else (56, 150, 210)
+        d.line([(p[0], p[1]) for p in scr] + [(scr[0][0], scr[0][1])], fill=edge, width=3 if hover == key else 2)
+        hits.append((key, [(float(p[0]), float(p[1])) for p in scr]))
+    return frame, hits
+
+
+def _nm_cube_pick(hits, x, y):
+    """The nearest face whose outline contains the point (x, y), or None."""
+    for key, poly in reversed(hits):
+        inside = False
+        j = len(poly) - 1
+        for i in range(len(poly)):
+            xi, yi = poly[i]; xj, yj = poly[j]
+            if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi:
+                inside = not inside
+            j = i
+        if inside:
+            return key
+    return None
+
+
+def _nm_win_capture(hwnd):
+    """Pixels of one top-level window as a PIL RGB image, or None (minimised, gone, not Windows). PrintWindow with
+    PW_RENDERFULLCONTENT asks Windows to render the window itself, so it works while other windows cover it."""
+    if os.name != 'nt':
+        return None
+    import ctypes
+    from ctypes import wintypes
+    from PIL import Image
+    u32 = ctypes.windll.user32
+    g32 = ctypes.windll.gdi32
+    u32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    u32.GetWindowDC.argtypes = [wintypes.HWND]; u32.GetWindowDC.restype = wintypes.HDC
+    u32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    u32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+    u32.IsIconic.argtypes = [wintypes.HWND]
+    u32.IsWindowVisible.argtypes = [wintypes.HWND]
+    g32.CreateCompatibleDC.argtypes = [wintypes.HDC]; g32.CreateCompatibleDC.restype = wintypes.HDC
+    g32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    g32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    g32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]; g32.SelectObject.restype = wintypes.HGDIOBJ
+    g32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    g32.DeleteDC.argtypes = [wintypes.HDC]
+    g32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
+                              ctypes.c_void_p, wintypes.UINT]
+
+    class _BIH(ctypes.Structure):
+        _fields_ = [('biSize', wintypes.DWORD), ('biWidth', wintypes.LONG), ('biHeight', wintypes.LONG),
+                    ('biPlanes', wintypes.WORD), ('biBitCount', wintypes.WORD), ('biCompression', wintypes.DWORD),
+                    ('biSizeImage', wintypes.DWORD), ('biXPelsPerMeter', wintypes.LONG),
+                    ('biYPelsPerMeter', wintypes.LONG), ('biClrUsed', wintypes.DWORD),
+                    ('biClrImportant', wintypes.DWORD)]
+    r = wintypes.RECT()
+    if not u32.IsWindowVisible(hwnd) or u32.IsIconic(hwnd) or not u32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return None
+    w, h = r.right - r.left, r.bottom - r.top
+    if w < 60 or h < 60 or w > 8000 or h > 8000:
+        return None
+    hdc = u32.GetWindowDC(hwnd)
+    if not hdc:
+        return None
+    mdc = g32.CreateCompatibleDC(hdc)
+    bmp = g32.CreateCompatibleBitmap(hdc, w, h)
+    old = g32.SelectObject(mdc, bmp)
+    try:
+        if not u32.PrintWindow(hwnd, mdc, 2):
+            return None
+        bi = _BIH(ctypes.sizeof(_BIH), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        if not g32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0):
+            return None
+        img = Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1).convert('RGB')
+    finally:
+        g32.SelectObject(mdc, old)
+        g32.DeleteObject(bmp)
+        g32.DeleteDC(mdc)
+        u32.ReleaseDC(hwnd, hdc)
+    try:                                               # trim the invisible resize border Windows adds around a window
+        ext = wintypes.RECT()
+        if ctypes.windll.dwmapi.DwmGetWindowAttribute(wintypes.HWND(hwnd), 9, ctypes.byref(ext), ctypes.sizeof(ext)) == 0:
+            l, t = max(0, ext.left - r.left), max(0, ext.top - r.top)
+            rr, bb = min(w, ext.right - r.left), min(h, ext.bottom - r.top)
+            if rr - l > 60 and bb - t > 60:
+                img = img.crop((l, t, rr, bb))
+    except Exception:
+        pass
+    return img
+
+
+class _NmCube:
+    """The cube window. `owner` is the main ModernWindow (it has the root, and the _open_* methods)."""
+    FPS = 20
+
+    def __init__(self, owner, capture=None, hwnd_of=None):
+        import tkinter as tk
+        from PIL import ImageTk
+        self._tk = tk; self._ImageTk = ImageTk
+        self.owner = owner
+        self.root = owner.root
+        self._capture = capture or _nm_win_capture
+        self._hwnd_of = hwnd_of or self._default_hwnd
+        self._stop = threading.Event()
+        self.R = _nm_cube_rot(np.radians(16), np.radians(-24))
+        self.dist = 15.0; self._dist_goal = 6.8
+        self._spin = np.zeros(2)                        # momentum: radians per tick about screen X and Y
+        self._last_xy = None; self._down = None
+        self._bg = None; self._hits = []; self._hover = None
+        self.textures = {}                              # face key -> PIL image (written by the capture thread)
+        self.targets = {}                               # face key -> (hwnd or None, note) (written by the main thread)
+        self._out = None; self._out_id = 0; self._shown_id = -1
+        self._photo = None
+        self.win = tk.Toplevel(self.root)
+        self.win.title('NetSentinel Cube')
+        self.win.configure(bg='#02060e')
+        try:
+            sw, sh = self.win.winfo_screenwidth(), self.win.winfo_screenheight()
+            self.win.geometry('%dx%d+%d+%d' % (int(sw * 0.86), int(sh * 0.84), int(sw * 0.07), int(sh * 0.06)))
+        except Exception:
+            self.win.geometry('1280x760')
+        self.cv = tk.Canvas(self.win, bg='#02060e', highlightthickness=0, cursor='fleur')
+        self.cv.pack(fill='both', expand=True)
+        self._img_item = self.cv.create_image(0, 0, anchor='nw')
+        self._hint = self.cv.create_text(12, 10, anchor='nw', fill='#4a7a9a', font=(_NM_MONO, 9),
+                                         text='drag to spin  ·  scroll to zoom  ·  click a face to open that window  '
+                                              '·  R resets  ·  Esc closes')
+        self.win.bind('<ButtonPress-1>', self._press)
+        self.win.bind('<B1-Motion>', self._drag)
+        self.win.bind('<ButtonRelease-1>', self._release)
+        self.win.bind('<Motion>', self._motion)
+        self.win.bind('<MouseWheel>', self._wheel)
+        self.win.bind('<Button-4>', lambda e: self._zoom(0.9))
+        self.win.bind('<Button-5>', lambda e: self._zoom(1.1))
+        self.win.bind('<Escape>', lambda e: self.close())
+        self.win.bind('<Key-r>', lambda e: self._reset())
+        self.win.bind('<Key-R>', lambda e: self._reset())
+        self.win.protocol('WM_DELETE_WINDOW', self.close)
+        self._resolve()
+        threading.Thread(target=self._capture_loop, daemon=True, name='nm-cube-capture').start()
+        threading.Thread(target=self._render_loop, daemon=True, name='nm-cube-render').start()
+        self.win.after(40, self._tick)
+        self.win.after(1000, self._resolve_loop)
+        try:
+            self.win.focus_force()
+        except Exception:
+            pass
+
+    # ── which windows are there ──
+    def _default_hwnd(self, w):
+        if os.name == 'nt':
+            import ctypes
+            ctypes.windll.user32.GetParent.argtypes = [ctypes.c_void_p]
+            ctypes.windll.user32.GetParent.restype = ctypes.c_void_p
+            return ctypes.windll.user32.GetParent(w.winfo_id()) or w.winfo_id()
+        return w.winfo_id()
+
+    def _find_windows(self):
+        tk = self._tk
+        found = {'main': self.root}
+        try:
+            for ch in self.root.winfo_children():
+                if not isinstance(ch, tk.Toplevel) or ch is self.win:
+                    continue
+                try:
+                    t = ch.wm_title()
+                except Exception:
+                    continue
+                for key, pref, _lab, _op in _NM_CUBE_FACES:
+                    if pref and pref in t and key not in found:
+                        found[key] = ch
+        except Exception:
+            _exc_debug('cube find windows')
+        return found
+
+    def _resolve(self):
+        found = self._find_windows()
+        tg = {}
+        for key, _pref, _lab, _op in _NM_CUBE_FACES:
+            w = found.get(key)
+            if w is None:
+                tg[key] = (None, 'not open - click to open')
+                continue
+            try:
+                st = str(w.state())
+            except Exception:
+                st = 'normal'
+            if st in ('iconic', 'withdrawn'):
+                tg[key] = (None, 'minimised - click to bring back')
+                continue
+            try:
+                tg[key] = (self._hwnd_of(w), '')
+            except Exception:
+                tg[key] = (None, 'unavailable')
+        self.targets = tg
+        self._found = found
+
+    def _resolve_loop(self):
+        if self._stop.is_set():
+            return
+        try:
+            self._resolve()
+        except Exception:
+            _exc_debug('cube resolve')
+        self.win.after(1000, self._resolve_loop)
+
+    # ── threads ──
+    def _capture_loop(self):
+        n = 0
+        labels = {k: lab for k, _p, lab, _o in _NM_CUBE_FACES}
+        shown = {}
+        while not self._stop.is_set():
+            t0 = time.time()
+            n += 1
+            vis = set(k for k, _ in (self._hits or []))
+            for key in labels:
+                if self._stop.is_set():
+                    return
+                hwnd, note = self.targets.get(key, (None, 'not open'))
+                if hwnd is None:
+                    if shown.get(key) != note:
+                        self.textures[key] = _nm_cube_face_texture(key, labels[key], None, note); shown[key] = note
+                    continue
+                if key not in vis and n % 6 != 0 and key in self.textures and shown.get(key) == 'live':
+                    continue                           # faces out of sight refresh now and then, not every pass
+                try:
+                    shot = self._capture(hwnd)
+                except Exception:
+                    shot = None
+                    _exc_debug('cube capture')
+                if shot is None:
+                    if shown.get(key) != 'gone':
+                        self.textures[key] = _nm_cube_face_texture(key, labels[key], None, 'cannot read this window')
+                        shown[key] = 'gone'
+                else:
+                    self.textures[key] = _nm_cube_face_texture(key, labels[key], shot); shown[key] = 'live'
+            self._stop.wait(max(0.02, 0.09 - (time.time() - t0)))
+
+    def _render_loop(self):
+        while not self._stop.is_set():
+            t0 = time.time()
+            size = getattr(self, '_size', None)
+            if size and self.textures:
+                try:
+                    if self._bg is None or self._bg.size != size:
+                        self._bg = _nm_cube_background(size)
+                    img, hits = _nm_cube_render(size, self.R.copy(), float(self.dist), dict(self.textures), self._bg,
+                                                self._hover)
+                    self._hits = hits
+                    self._out = img; self._out_id += 1
+                except Exception:
+                    _exc_debug('cube render')
+            self._stop.wait(max(0.005, 1.0 / self.FPS - (time.time() - t0)))
+
+    # ── main-thread drawing and motion ──
+    def _tick(self):
+        if self._stop.is_set():
+            return
+        try:
+            cw, ch = max(200, self.cv.winfo_width()), max(150, self.cv.winfo_height())
+            s = min(1.0, 1280.0 / cw, 720.0 / ch)
+            self._size = (max(200, int(cw * s)) // 2 * 2, max(150, int(ch * s)) // 2 * 2)
+            self._scale = (cw / float(self._size[0]), ch / float(self._size[1]))
+            if abs(self.dist - self._dist_goal) > 0.02:
+                self.dist += (self._dist_goal - self.dist) * 0.16
+            if self._down is None and np.abs(self._spin).max() > 0.0004:
+                self.R = _nm_cube_rot(self._spin[0], self._spin[1]) @ self.R
+                self._spin *= 0.94
+            out, oid = self._out, self._out_id
+            if out is not None and oid != self._shown_id:
+                self._shown_id = oid
+                if self._photo is None or self._photo.width() != out.size[0] or self._photo.height() != out.size[1]:
+                    self._photo = self._ImageTk.PhotoImage(out)
+                else:
+                    self._photo.paste(out)
+                self.cv.itemconfigure(self._img_item, image=self._photo)
+                ox = (cw - out.size[0]) // 2; oy = (ch - out.size[1]) // 2
+                self.cv.coords(self._img_item, ox, oy)
+                self._off = (ox, oy)
+                self.cv.tag_raise(self._hint)
+        except Exception:
+            _exc_debug('cube tick')
+        self.win.after(int(1000 / 60), self._tick)
+
+    def _local(self, e):
+        ox, oy = getattr(self, '_off', (0, 0))
+        return e.x - ox, e.y - oy
+
+    def _press(self, e):
+        self._down = (e.x, e.y, time.time())
+        self._last_xy = (e.x, e.y, time.time())
+        self._spin[:] = 0
+
+    def _drag(self, e):
+        if self._last_xy is None:
+            return
+        lx, ly, lt = self._last_xy
+        now = time.time()
+        dx, dy = e.x - lx, e.y - ly
+        k = 0.0075
+        step = np.array([dy * k, dx * k])
+        self.R = _nm_cube_rot(step[0], step[1]) @ self.R
+        dt = max(0.008, now - lt)
+        self._spin = 0.6 * self._spin + 0.4 * step * (1.0 / 60.0 / dt)
+        self._last_xy = (e.x, e.y, now)
+
+    def _release(self, e):
+        d = self._down
+        self._down = None
+        if d is None:
+            return
+        moved = abs(e.x - d[0]) + abs(e.y - d[1])
+        if moved < 6 and time.time() - d[2] < 0.6:
+            self._spin[:] = 0
+            x, y = self._local(e)
+            key = _nm_cube_pick(self._hits, x, y)
+            if key:
+                self.open_face(key)
+        elif time.time() - (self._last_xy[2] if self._last_xy else 0) > 0.12:
+            self._spin[:] = 0                          # let go after holding still: no fling
+
+    def _motion(self, e):
+        if self._down is not None:
+            return
+        x, y = self._local(e)
+        self._hover = _nm_cube_pick(self._hits, x, y)
+        try:
+            self.cv.configure(cursor='hand2' if self._hover else 'fleur')
+        except Exception:
+            pass
+
+    def _wheel(self, e):
+        self._zoom(0.9 if e.delta > 0 else 1.1)
+
+    def _zoom(self, f):
+        self._dist_goal = float(min(15.0, max(4.6, self._dist_goal * f)))
+
+    def _reset(self):
+        self.R = _nm_cube_rot(np.radians(16), np.radians(-24)); self._spin[:] = 0
+        self._dist_goal = 6.8
+
+    def open_face(self, key):
+        """Close the cube and bring that window forward (opening it first if it is not open)."""
+        w = getattr(self, '_found', {}).get(key)
+        opener = {k: o for k, _p, _l, o in _NM_CUBE_FACES}.get(key)
+        self.close()
+        try:
+            if w is None and opener:
+                getattr(self.owner, opener)()
+                return
+            if w is not None:
+                try:
+                    if str(w.state()) in ('iconic', 'withdrawn'):
+                        w.deiconify()
+                except Exception:
+                    pass
+                w.lift(); w.focus_force()
+        except Exception:
+            _exc('cube open face')
+
+    def close(self):
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+        try:
+            self.owner._cube = None
+        except Exception:
+            pass
+
+
+# ── Screenshot tour ──────────────────────────────────────────────────────────
+# Opens each window of the app in turn, waits for it to draw, photographs it (PrintWindow, so it works even when other
+# windows cover it), then closes it again. Used to make the guide's pictures. It only OPENS and LOOKS: it never presses
+# a button inside a window, so nothing is blocked, scanned, started or changed. It runs only when asked from this same
+# PC and only while a file called tour.enable exists in the app's data folder (see /api/tour).
+_NM_MAIN_WINDOW = None
+_NM_TOUR = {'running': False, 'done': 0, 'total': 0, 'last': '', 'errors': [], 'shots': [], 'finished': False}
+
+
+def _nm_tk_hwnd(w):
+    if os.name == 'nt':
+        import ctypes
+        ctypes.windll.user32.GetParent.argtypes = [ctypes.c_void_p]
+        ctypes.windll.user32.GetParent.restype = ctypes.c_void_p
+        return ctypes.windll.user32.GetParent(w.winfo_id()) or w.winfo_id()
+    return w.winfo_id()
+
+
+def _nm_tour_steps(win):
+    """[(key, label, opener, title fragment or None, seconds to wait, look at every tab)]. opener(win) opens it."""
+    def ea():
+        for e in _ea_instances:
+            if not getattr(e, '_closed', True):
+                return e
+        return None
+
+    def sub(name):
+        return lambda w: (lambda e: getattr(e, name)() if e is not None else None)(ea())
+
+    def call(name):
+        return lambda w: getattr(w, name)()
+    return [
+        ('main_dashboard',    'Main dashboard',            None,                        None,        0.5, False),
+        ('topology',          'Topology (EtherApe)',       None,                        'EtherApe',  0.5, True),
+        ('heatmap',           'Heatmap',                   None,                        'Heatmap',   0.5, True),
+        ('floor',             'Floor detection',           None,                        'Floor',     0.5, True),
+        ('pen_test',          'Pen Test',                  call('_open_pen_test'),      None,        3.0, True),
+        ('wireshark',         'Capture (Wireshark)',       call('_open_wireshark'),     None,        4.0, True),
+        ('monitor',           'Monitor',                   call('_open_monitor'),       None,        3.5, True),
+        ('agents',            'Remote agents',             call('_open_agents'),        None,        3.0, True),
+        ('push_agent',        'Push agent',                call('_open_push_agent'),    None,        3.0, True),
+        ('outages',           'Outages',                   call('_open_outages'),       None,        3.0, True),
+        ('quality',           'Connection quality',        call('_open_quality'),       None,        3.5, True),
+        ('evidence',          'ISP evidence pack',         call('_open_evidence'),      None,        3.0, True),
+        ('pihole',            'Pi-hole',                   call('_open_pihole'),        None,        4.0, True),
+        ('wifi',              'Wi-Fi signal',              call('_open_wifi'),          'Wi-Fi Signal', 5.0, True),
+        ('lidar',             'Lidar',                     call('_open_lidar'),         'Lidar',     4.0, True),
+        ('report',            'Report',                    call('_open_report'),        None,        3.0, True),
+        ('export',            'Export',                    call('_open_export'),        None,        3.0, True),
+        ('tools',             'Tools',                     call('_open_tools'),         None,        3.0, True),
+        ('settings',          'Settings',                  call('_open_settings'),      None,        2.5, True),
+        ('topology_geo',      'Topology: geo map',         sub('_open_geo_window'),     None,        4.0, True),
+        ('topology_honeypot', 'Topology: honeypot',        sub('_open_honeypot_window'), None,       4.0, True),
+        ('topology_lan_scan', 'Topology: LAN scan',        sub('_open_lan_scan_window'), None,       3.0, True),
+        ('topology_firewall', 'Topology: firewall rules',  sub('_open_firewall_window'), None,       3.0, True),
+        ('topology_blocked',  'Topology: blocked countries', sub('_open_blocked_countries_window'), None, 3.0, True),
+        ('cube',              'Cube',                      'cube',                      None,        4.0, False),
+    ]
+
+
+def _nm_tour_toplevels(root):
+    import tkinter as tk
+    out = []
+    # the topology window's own pop-ups (honeypot, firewall rules...) hang off that window, not off the main one
+    parents = [root]
+    try:
+        for e in list(_ea_instances):
+            r = getattr(e, 'root', None)
+            if r is not None and not getattr(e, '_closed', True):
+                parents.append(r)
+    except Exception:
+        pass
+    for par in parents:
+        try:
+            for ch in par.winfo_children():
+                if isinstance(ch, tk.Toplevel) and ch not in out and ch is not root:
+                    out.append(ch)
+        except Exception:
+            pass
+    return out
+
+
+def _nm_tour_notebooks(w):
+    from tkinter import ttk
+    found = []
+
+    def walk(x, depth=0):
+        if depth > 8:
+            return
+        try:
+            kids = x.winfo_children()
+        except Exception:
+            return
+        for k in kids:
+            if isinstance(k, ttk.Notebook):
+                found.append(k)
+            walk(k, depth + 1)
+    walk(w)
+    return found
+
+
+def _nm_tour_close(w):
+    try:
+        cb = w.protocol('WM_DELETE_WINDOW')
+        if cb:
+            w.tk.call(cb)
+            return
+    except Exception:
+        pass
+    try:
+        w.destroy()
+    except Exception:
+        pass
+
+
+def _nm_tour_run(win, out_dir):
+    """A generator: each yield is how many seconds to wait before the next step."""
+    import re
+    root = win.root
+    os.makedirs(out_dir, exist_ok=True)
+    steps = _nm_tour_steps(win)
+    _NM_TOUR.update({'running': True, 'finished': False, 'done': 0, 'total': len(steps), 'last': '', 'errors': [],
+                     'shots': []})
+
+    def shoot(key, w, note=''):
+        try:
+            img = _nm_win_capture(_nm_tk_hwnd(w))
+        except Exception as ex:
+            img = None
+            _NM_TOUR['errors'].append('%s: capture failed: %s' % (key, ex))
+        if img is None:
+            _NM_TOUR['errors'].append('%s: nothing captured (%s)' % (key, note or 'window not readable'))
+            return False
+        fn = re.sub(r'_+', '_', re.sub(r'[^a-z0-9_]+', '_', key.lower())).strip('_') + '.png'
+        img.save(os.path.join(out_dir, fn))
+        try:
+            title = w.wm_title()
+        except Exception:
+            title = ''
+        _NM_TOUR['shots'].append({'key': key, 'file': fn, 'title': title, 'w': img.size[0], 'h': img.size[1]})
+        return True
+
+    # Pop-up questions and errors must not wait for a click while the tour runs: note what they said and carry on.
+    import tkinter.messagebox as _mb
+    _saved_mb = {n: getattr(_mb, n) for n in ('showinfo', 'showwarning', 'showerror', 'askyesno', 'askokcancel',
+                                              'askretrycancel', 'askquestion', 'askyesnocancel')}
+
+    def _note(kind, ret):
+        def f(title=None, message=None, **kw):
+            _NM_TOUR.setdefault('dialogs', []).append('%s: %s | %s' % (kind, title, str(message)[:300]))
+            return ret
+        return f
+    for n, r in (('showinfo', 'ok'), ('showwarning', 'ok'), ('showerror', 'ok'), ('askyesno', False),
+                 ('askokcancel', False), ('askretrycancel', False), ('askquestion', 'no'), ('askyesnocancel', None)):
+        setattr(_mb, n, _note(n, r))
+    yield 0.3
+    for key, label, opener, frag, wait, tabs in steps:
+        _NM_TOUR['last'] = key
+        before = set(_nm_tour_toplevels(root))
+        cube = None
+
+        def _do_open(opener=opener, key=key):
+            # on its own timer, so a window that blocks while it opens cannot hold up the tour itself
+            try:
+                if opener == 'cube':
+                    win._open_cube()
+                elif opener is not None:
+                    opener(win)
+            except Exception as ex:
+                _NM_TOUR['errors'].append('%s: could not open: %s' % (key, ex))
+                _exc_debug('tour open ' + key)
+        if opener is not None:
+            root.after(10, _do_open)
+        yield wait
+        if opener == 'cube':
+            cube = getattr(win, '_cube', None)
+        if cube is not None:
+            try:
+                if cube._out is not None:
+                    cube._out.save(os.path.join(out_dir, 'cube.png'))
+                    _NM_TOUR['shots'].append({'key': key, 'file': 'cube.png', 'title': 'NetSentinel Cube',
+                                              'w': cube._out.size[0], 'h': cube._out.size[1]})
+                cube.close()
+            except Exception as ex:
+                _NM_TOUR['errors'].append('cube: %s' % ex)
+            _NM_TOUR['done'] += 1
+            continue
+        now = _nm_tour_toplevels(root)
+        new = [w for w in now if w not in before]
+        target = None
+        if key == 'main_dashboard':
+            target = root
+        elif frag:
+            for w in now:
+                try:
+                    if frag in w.wm_title():
+                        target = w; break
+                except Exception:
+                    pass
+        elif new:
+            target = new[-1]
+        if target is None:
+            _NM_TOUR['errors'].append('%s: no window appeared' % key)
+        else:
+            try:
+                target.lift(); target.update_idletasks()
+            except Exception:
+                pass
+            yield 0.6
+            shoot(key, target)
+            if tabs:
+                for nb in _nm_tour_notebooks(target)[:1]:
+                    try:
+                        n = nb.index('end')
+                        names = [nb.tab(i, 'text') for i in range(n)]
+                        cur = nb.index('current')
+                    except Exception:
+                        continue
+                    for i in range(n):
+                        if i == cur:
+                            continue
+                        try:
+                            nb.select(i)
+                        except Exception:
+                            continue
+                        yield 1.6
+                        shoot('%s__%s' % (key, (names[i] or '').strip() or ('tab%d' % i)), target)
+                    try:
+                        nb.select(cur)
+                    except Exception:
+                        pass
+        # close whatever this step opened (windows that were already open stay open)
+        for w in new:
+            _nm_tour_close(w)
+        for w in [x for x in _nm_tour_toplevels(root) if x not in before]:
+            _nm_tour_close(w)
+        _NM_TOUR['done'] += 1
+        yield 0.8
+    for n, f in _saved_mb.items():
+        setattr(_mb, n, f)
+    _NM_TOUR['running'] = False; _NM_TOUR['finished'] = True
+    try:
+        import json as _j
+        with open(os.path.join(out_dir, 'manifest.json'), 'w', encoding='utf-8') as f:
+            _j.dump(_NM_TOUR, f, indent=1)
+    except Exception:
+        _exc_debug('tour manifest')
+
+
+def _nm_tour_start(out_dir):
+    """Begin the tour on the interface thread. Refused unless tour.enable exists in the app's data folder."""
+    win = _NM_MAIN_WINDOW
+    if win is None:
+        return {'ok': False, 'error': 'main window not ready'}
+    if not (_nm_wifi_dir() / 'tour.enable').exists():
+        return {'ok': False, 'error': 'tour.enable is not in the data folder'}
+    if _NM_TOUR['running']:
+        return {'ok': False, 'error': 'already running'}
+    gen = _nm_tour_run(win, out_dir)
+    _NM_TOUR['running'] = True
+
+    def pump():
+        try:
+            delay = next(gen)
+        except StopIteration:
+            return
+        except Exception:
+            _NM_TOUR['running'] = False
+            _NM_TOUR['errors'].append('tour stopped: ' + __import__('traceback').format_exc()[-400:])
+            return
+        win.root.after(int(max(0.05, delay) * 1000), pump)
+    win.root.after(100, pump)
+    return {'ok': True, 'out': out_dir}
+
+
+
+_NM_NETIO = {'t': 0.0, 'all': None, 'nic': None, 'started': False, 'lock': threading.Lock()}
+
+
+def _nm_netio_loop():
+    """Read the Windows network counters on a thread of their own, twice a second. The call can take many seconds
+    when a VPN or virtual adapter is slow to answer (one 12 s freeze of the whole window was caught inside it), and
+    on the interface thread that froze every window. Everything else reads the last result instead of calling it."""
+    while True:
+        try:
+            import psutil as _ps
+            a = _ps.net_io_counters()
+            n = _ps.net_io_counters(pernic=True)
+            with _NM_NETIO['lock']:
+                _NM_NETIO['t'] = time.time(); _NM_NETIO['all'] = a; _NM_NETIO['nic'] = n
+        except Exception:
+            _exc_debug('net counters sampler')
+        time.sleep(0.5)
+
+
+def _nm_netio(pernic=False):
+    """(sample time, counters) from the background sampler, started on first use; (0, None) until the first
+    reading lands. Never blocks."""
+    if not _NM_NETIO['started']:
+        with _NM_NETIO['lock']:
+            if not _NM_NETIO['started']:
+                _NM_NETIO['started'] = True
+                threading.Thread(target=_nm_netio_loop, daemon=True, name='nm-netio').start()
+    with _NM_NETIO['lock']:
+        return _NM_NETIO['t'], _NM_NETIO['nic' if pernic else 'all']
+
+
+def _nm_start_stall_watchdog(root, limit_s=2.5):
+    """Write to the log what the interface thread is doing whenever it stops responding for more than `limit_s` seconds
+    (the freezes Windows reports as "stopped interacting"), so a freeze can be traced to the code that caused it.
+    Cheap: a 250 ms heartbeat on the interface thread and a thread that looks at it twice a second."""
+    import sys, threading, time as _t, traceback
+    main_id = threading.get_ident()
+    st = {'beat': _t.time(), 'dumped': False, 'since': 0.0}
+
+    def beat():
+        now = _t.time()
+        if st['dumped']:
+            log.warning('[stall] interface was frozen for %.1f s', now - st['since'])
+            st['dumped'] = False
+        st['beat'] = now
+        try:
+            root.after(250, beat)
+        except Exception:
+            pass
+
+    def watch():
+        while True:
+            _t.sleep(0.5)
+            try:
+                gap = _t.time() - st['beat']
+                if gap > limit_s and not st['dumped']:
+                    st['dumped'] = True
+                    st['since'] = st['beat']
+                    f = sys._current_frames().get(main_id)
+                    stack = ''.join(traceback.format_stack(f, limit=14)) if f is not None else '(no stack)'
+                    log.warning('[stall] interface not responding for %.1f s; it is busy in:\n%s', gap, stack.rstrip())
+            except Exception:
+                _exc_debug('stall watchdog')
+    try:
+        root.after(250, beat)
+        threading.Thread(target=watch, daemon=True, name='nm-stall-watch').start()
+    except Exception:
+        _exc_debug('stall watchdog start')
 
 
 def _nm_ollama_tray_exe(exe):
@@ -44237,7 +45498,8 @@ class _ThreeDServer:
                             'proto': _h['proto'], 'bytes': int(_h['bytes']),
                             'pkts': _h['pkts'], 'frac': 0.9, 'local': False,
                             'blocked': _h['state'] == 'blocked', 'suspicious': True,
-                            'x': 0, 'y': 0, 'z': 0, 'lat': _h['lat'], 'lon': _h['lon'],
+                            'x': _nm_attack_xyz(_h['ip'])[0], 'y': _nm_attack_xyz(_h['ip'])[1],
+                            'z': _nm_attack_xyz(_h['ip'])[2], 'lat': _h['lat'], 'lon': _h['lon'],
                             'attack': True, 'attack_state': _h['state'],
                             'attack_kind': _h['kind']})
                 _af.append({'src': _h['ip'], 'dst': 'this-machine', 'proto': _h['proto'],
@@ -44388,7 +45650,7 @@ class _ThreeDServer:
                 'proto': _h['proto'], 'bytes': int(_h['bytes']), 'pkts': _h['pkts'],
                 'frac': 0.9, 'local': False,
                 'blocked': _h['state'] == 'blocked', 'suspicious': True,
-                'x': 0, 'y': 0, 'z': 0,
+                'x': _nm_attack_xyz(_h['ip'])[0], 'y': _nm_attack_xyz(_h['ip'])[1], 'z': _nm_attack_xyz(_h['ip'])[2],
                 'lat': _h['lat'], 'lon': _h['lon'],
                 'attack': True, 'attack_state': _h['state'], 'attack_kind': _h['kind'],
             })
@@ -48684,14 +49946,14 @@ function _wifiBuild(){
   const sub=document.getElementById('wifiSub'),leg=document.getElementById('wifiLegend');
   if(!d.ok){_wifiMsg(d.error||'Wi-Fi data is not available (this feature reads the Windows Wi-Fi adapter).');sub.textContent='';leg.innerHTML='';return;}
   const lk=d.link;
-  sub.textContent=(lk?('connected: '+(lk.ssid||'?')+'  '+(lk.dbm!=null?Math.round(lk.dbm)+' dBm':'')):'not connected')+
+  sub.textContent=(lk?('connected: '+(lk.ssid||'?')+'  '+(lk.dbm!=null?Math.round(lk.dbm)+' dBm':'')):(d.blocked?'blocked by Windows (Location is off)':'not connected'))+
      '   ·   '+((d.aps||[]).length)+' access points'+(d.health?('   ·   health '+d.health.score+'/100 ('+d.health.grade+')'):'')+
      (d.moving?'   ·   MOVEMENT':'')+(d.away?'   ·   away mode':'');
   if(_wf.mode==='air')_wifiBuildAir(d,scene,T,leg);else _wifiBuildSurvey(d,scene,T,leg);
 }
 function _wifiBuildAir(d,scene,T,leg){
   const aps=d.aps||[];
-  _wifiMsg(aps.length?'':(d.running?'Waiting for the first Wi-Fi scan…':'Starting the Wi-Fi watcher…'));
+  _wifiMsg(aps.length?'':(d.blocked?d.blocked:(d.running?'Waiting for the first Wi-Fi scan…':'Starting the Wi-Fi watcher…')));
   const R=dbm=>1.6+((-35-Math.max(-95,Math.min(-35,dbm)))/60)*9.5;   // -35 dBm -> 1.6, -95 dBm -> 11.1
   // rings
   [-50,-60,-70,-80].forEach(v=>{
@@ -52451,102 +53713,12 @@ self.addEventListener('fetch',function(e){
         def esc(s):
             return _h.escape(str(s))
 
-        # Web-only sections for views that have a screenshot but no CONTENT entry.
-        EXTRA = {
-            'monitor': [
-                ('h1', 'Alerts & Monitoring'),
-                ('p', 'The Monitor window gathers alerts, discovered devices, latency events, '
-                      'VDI health and analytics into one tabbed console. Threat-intel counts '
-                      '(known-bad IPs, ranges and countries seen) show along the top.'),
-                ('bullet', 'Alerts — geo, threat-intel, latency and new-device events with '
-                           'severity (INFO / WARN / CRIT) and timestamps'),
-                ('bullet', 'Devices — a live 3D map of hosts on the LAN; click one for full details'),
-                ('bullet', 'Latency / VDI / Analytics — per-area detail tabs'),
-                ('bullet', 'Notify — outbound alert (webhook / toast) configuration'),
-            ],
-            'heatmap': [
-                ('h1', 'Time-of-Day Heatmap'),
-                ('p', 'A 7x24 grid of weekday by hour showing the median of a chosen metric '
-                      'across the selected window. The white-outlined cell is the current hour; '
-                      'hover any cell for its sample count and last reading.'),
-                ('bullet', 'Metric — download, upload, ping or DNS'),
-                ('bullet', 'Window — how many days of history to aggregate'),
-                ('bullet', 'Colours follow your selected theme (Settings) — each metric\'s ramp '
-                           'runs from that theme\'s panel colour up to its own accent colour, '
-                           'and ping\'s ramp runs the other way since lower is better. Changing '
-                           'theme in Settings re-colours the heatmap immediately if it\'s open'),
-                ('tip', 'Reads straight from the history database, so the longer it runs the '
-                        'more reliable the picture.'),
-            ],
-            'quality': [
-                ('h1', 'Connection Quality'),
-                ('p', 'The Quality window grades your line for bufferbloat (latency added under '
-                      'load) and tracks jitter and packet loss over time.'),
-                ('bullet', 'Bufferbloat grade — A+ to F, from the latency added while the link '
-                           'is saturated'),
-                ('bullet', 'Jitter & loss — historical trend charts'),
-                ('bullet', 'Bandwidth / Devices / Anomalies — per-destination usage, device '
-                           'inventory and IsolationForest anomaly scoring'),
-            ],
-            'evidence': [
-                ('h1', 'ISP Evidence Pack'),
-                ('p', 'A one-click PDF for disputes with your ISP: what you actually receive '
-                      'measured against what you pay for, with every outage timestamped over '
-                      'the chosen period. Set the number of days and generate.'),
-                ('h2', 'What is in the pack'),
-                ('bullet', 'Page 1 — availability and download: uptime, outage count, total and '
-                           'longest downtime, median/mean/spread, the full percentile range, and '
-                           'how many tests fell below 90%, 75% and 50% of the advertised speed'),
-                ('bullet', 'Peak-hours comparison — median download during 20:00–22:00 against '
-                           'the rest of the day, the same basis ISPs advertise on'),
-                ('bullet', 'Page 2 — upload and latency: upload percentiles against advertised, '
-                           'ping median/P90/P95/P99 and jitter, plus a plain-English note on method'),
-                ('bullet', 'Pages 3–5 — download, upload and latency plotted over the whole '
-                           'period, with median and advertised reference lines and outages shaded'),
-                ('bullet', 'Page 6 — distribution of every download result, marking the median, '
-                           'the advertised rate and the slowest 10%'),
-                ('bullet', 'Page 7 — daily breakdown: test count and median download, upload and '
-                           'ping for each day'),
-                ('bullet', 'Page 8 — numbered outage log with start, end and duration, and totals'),
-                ('tip', 'Set your advertised speeds in Settings first — without them the pack '
-                        'cannot show the comparison that makes the case.'),
-            ],
-            'tools': [
-                ('h1', 'Tools (MobaXterm)'),
-                ('p', 'The Tools window hosts MobaXterm inside the app so you can open terminals '
-                      'and SSH sessions without leaving the monitor. Restart, Detach (pop out to '
-                      'its own window) and Close control the embed.'),
-                ('tip', 'Set the MobaXterm folder in Settings if auto-detect does not find it.'),
-            ],
-        }
+        # Web-only sections + screenshot map live on UserGuideWindow (EXTRA / SHOTS) so the
+        # in-app Tk guide shows the same sections and pictures as this web page.
+        EXTRA = UserGuideWindow.EXTRA
 
         # Section id -> [(screenshot key, caption), ...]  (keys index _GUIDE_SHOTS)
-        SHOTS = {
-            'dashboard': [('main_screen', 'The main dashboard — gauge strip, charts and the sidebar')],
-            'system':    [('system_tmog', 'Task Manager TMOG — Summary page')],
-            'pentest':   [('pentest_view', 'Pen Test — nmap scan builder, live console and AI Assistant')],
-            'monitor':   [('monitor_view', 'Alerts, Devices, VDI and Analytics in one window')],
-            'heatmap':   [('heatmmap', 'Median download by weekday and hour')],
-            'quality':   [('network_quality', 'Bufferbloat grade with jitter and loss trends')],
-            'report':    [('report', 'Report generator with scheduling')],
-            'evidence':  [('evidence_pack', 'ISP Evidence Pack PDF generator')],
-            'settings':  [('settings', 'Settings — paths, colour themes, schedule and alerts')],
-            'tools':     [('tools', 'MobaXterm hosted inside the app')],
-            'wireshark': [('wireshark_monitor', 'Live packet capture and deep inspection'),
-                          ('wireshark_capture_analysis', 'AI capture analysis in plain English'),
-                          ('wire_shark_ids', 'Intrusion-detection dashboard')],
-            'talkers':   [('etherape_top_talkers', 'Top talkers ranked by traffic volume')],
-            'radar':     [('sonar_radar', 'Sonar scope \u2014 hosts plotted at their real location')],
-            'world':     [('world_view', 'World view \u2014 hosts on the globe, lit by the real sun')],
-            'attack':    [('sonar_radar', 'Hostiles and detonations appear on the same scope')],
-            'scrubber':  [('etherape_sankey_view', 'Rewind the flow view without stopping capture')],
-            'etherape':  [('etherape_3d_view', '3D network view'),
-                          ('etherape_geo_map', 'Geographic flow map'),
-                          ('etherape_radial_view', 'Radial topology'),
-                          ('etherape_sankey_view', 'Sankey traffic flow'),
-                          ('etherape_top_talkers', 'Top flow talkers'),
-                          ('etherape_top_tallkers_with_radar', 'Top talkers with incoming radar')],
-        }
+        SHOTS = _nm_guide_shot_map()
 
         # Preferred section order (weaves the web-only sections in sensibly).
         ORDER = ['overview', 'dashboard', 'system', 'pentest', 'monitor', 'gauges', 'charts',
@@ -54342,6 +55514,21 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden){pol
                             _nm_attack_set(not _NM_ATTACK_ON)
                         self._json(200, {'on': _NM_ATTACK_ON,
                                          'hosts': _nm_attack_hosts()})
+                    elif path == '/api/tour':
+                        # Guide-screenshot tour: this PC only, and only while tour.enable exists in the data folder.
+                        if (self.client_address[0] if self.client_address else '') not in ('127.0.0.1', '::1'):
+                            self._json(403, {'ok': False, 'error': 'this PC only'})
+                        else:
+                            from urllib.parse import urlparse as _up2, parse_qs as _pq2
+                            _q2 = _pq2(_up2(self.path).query)
+                            if (_q2.get('start', [''])[0]):
+                                _out2 = _q2.get('out', [''])[0] or str(_nm_wifi_dir() / 'tour')
+                                _r2 = _nm_tour_start(_out2)
+                            else:
+                                _r2 = {'ok': True}
+                            _r2.update({k: _NM_TOUR[k] for k in ('running', 'finished', 'done', 'total', 'last',
+                                                                  'errors', 'shots')})
+                            self._json(200, _r2)
                     elif path == '/api/killswitch':
                         self._json(200, {'active': _nm_killswitch_active()})
                     elif path == '/guide':
@@ -55983,12 +57170,19 @@ class ModernWindow:
         self.root.minsize(1000, 600)
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
 
-        global _MODERN_MODE
+        global _MODERN_MODE, _NM_MAIN_WINDOW
         _MODERN_MODE = True
+        _NM_MAIN_WINDOW = self
         self._build_ui()
         self.root.after(200, self._refresh)
         self.root.after(600, self._refresh_live_fast)
         self.root.after(1000, self._open_etherape)
+        # The other two windows opened at start-up too, one after the other so the app is not asked to build three
+        # heavy windows in the same instant. Untick the box in Settings to turn this off.
+        if (self._monitor.config or {}).get('startup_windows', True):
+            self.root.after(2200, self._open_heatmap)
+            self.root.after(3400, self._open_floor)
+        _nm_start_stall_watchdog(self.root)
         self.root.mainloop()
         _MODERN_MODE = False
 
@@ -56033,6 +57227,12 @@ class ModernWindow:
             relief='flat', font=(_NM_MONO, 8), padx=10, cursor='hand2',
             command=self._toggle_bloom)
         self._bloom_btn.pack(side='left', pady=0, ipady=14)
+        # CUBE: the app's windows on the faces of a rotating cube you can spin (see _NmCube).
+        self._cube = None
+        tk.Button(top, text='\u2b22 CUBE', bg=self.PANEL2, fg='#a371f7',
+                  activebackground='#0a1828', activeforeground=self.ACC,
+                  relief='flat', font=(_NM_MONO, 8), padx=10, cursor='hand2',
+                  command=self._open_cube).pack(side='left', pady=0, ipady=14)
         tk.Frame(top, bg=self.PANEL2).pack(side='left', fill='x', expand=True)
         self._live_var = tk.StringVar(value='LIVE')
         self._live_lbl = tk.Label(top, textvariable=self._live_var,
@@ -56043,6 +57243,18 @@ class ModernWindow:
         tk.Label(top, textvariable=self._clock_var, bg=self.PANEL2,
                  fg='#2a4060', font=(_NM_MONO, 8)).pack(side='right', padx=4)
         tk.Frame(r, bg=self.SPIN, height=1).pack(fill='x')
+
+    def _open_cube(self):
+        """Open the cube (or bring it forward if it is already open)."""
+        try:
+            c = getattr(self, '_cube', None)
+            if c is not None and not c._stop.is_set():
+                c.win.lift(); c.win.focus_force()
+                return
+            self._cube = _NmCube(self)
+        except Exception:
+            self._cube = None
+            _exc('_open_cube')
 
     def _toggle_bloom(self):
         self._bloom_enabled = not self._bloom_enabled
@@ -56311,6 +57523,22 @@ class ModernWindow:
         self._mpl_canvas = FigureCanvasTkAgg(fig, master=cf)
         self._mpl_canvas.get_tk_widget().pack(fill='both', expand=True)
         self._mpl_fig = fig
+        # The live-traffic panel moves several times a second. Redrawing the whole figure for that (all six panels,
+        # about 170 ms) kept the interface busy a third of the time, so the live panel is drawn on its own: the
+        # figure's normal drawing skips it (animated) and it is painted over a saved copy of the background.
+        self._bg_live = None
+        self._live_box = None
+        self._axes['live'].set_animated(True)
+
+        def _on_draw(_e=None):
+            try:
+                self._bg_live = self._mpl_canvas.copy_from_bbox(self._mpl_fig.bbox)
+                self._mpl_fig.draw_artist(self._axes['live'])
+                self._live_box = None
+            except Exception:
+                self._bg_live = None
+                _exc_debug('live panel background')
+        self._mpl_canvas.mpl_connect('draw_event', _on_draw)
 
     # ── Status bar ────────────────────────────────────────────────────────────
     def _build_statusbar(self):
@@ -56592,9 +57820,25 @@ class ModernWindow:
             except Exception:
                 _exc('_do_refresh')
 
-        # Charts
-        self._update_charts(data, ts_all, dl_all, ul_all, pg_all,
-                           dv_all, dns_ts, ti, today)
+        # Charts. Rebuilding every axis and redrawing the whole figure is the most expensive thing this window does
+        # (it blocks the interface for a moment each time), so do it only when there is something new to show, at least
+        # once a minute, and never while the window is minimised.
+        try:
+            _c = self._monitor.colors
+            sig = (self._view_mode, self._hist_offset, len(ts_all), ts_all[-1] if ts_all else '',
+                   dl_all[-1] if dl_all else None, ul_all[-1] if ul_all else None, pg_all[-1] if pg_all else None,
+                   len(dns_ts), dns_ts[-1] if dns_ts else '', today, int(time.time() // 60),
+                   _c.get('download'), _c.get('upload'), _c.get('ping'), _c.get('dns'), self.PANEL, self.TICK,
+                   self._mpl_canvas.get_tk_widget().winfo_width() if self._mpl_canvas is not None else 0,
+                   self._mpl_canvas.get_tk_widget().winfo_height() if self._mpl_canvas is not None else 0)
+        except Exception:
+            sig = None
+        if self._ui_state() == 'hidden':
+            self._chart_sig = None                     # redraw as soon as the window is shown again
+        elif sig is None or sig != getattr(self, '_chart_sig', None):
+            self._chart_sig = sig
+            self._update_charts(data, ts_all, dl_all, ul_all, pg_all,
+                               dv_all, dns_ts, ti, today)
 
     def _update_charts(self, data, ts_all, dl_all, ul_all, pg_all,
                        dv_all, dns_ts, today_i, today):
@@ -56781,8 +58025,10 @@ class ModernWindow:
             import psutil as _psu, time as _t
             if not hasattr(self, '_net_hist'):
                 self._net_hist = {'tx': [], 'rx': [], 'last': None, 'last_t': None}
-            c2 = _psu.net_io_counters(); now = _t.time()
-            if self._net_hist['last'] is not None:
+            now, c2 = _nm_netio()
+            if c2 is None or now == self._net_hist['last_t']:
+                c2 = None                      # no new reading since the last redraw: draw what we have
+            if c2 is not None and self._net_hist['last'] is not None:
                 dt2 = now - self._net_hist['last_t']
                 if dt2 > 0:
                     tx_s = (c2.bytes_sent - self._net_hist['last'][0]) / dt2 / 1e6 * 8
@@ -56791,8 +58037,9 @@ class ModernWindow:
                     self._net_hist['rx'].append(max(0, rx_s))
                     if len(self._net_hist['tx']) > 120: self._net_hist['tx'].pop(0)
                     if len(self._net_hist['rx']) > 120: self._net_hist['rx'].pop(0)
-            self._net_hist['last'] = (c2.bytes_sent, c2.bytes_recv)
-            self._net_hist['last_t'] = now
+            if c2 is not None:
+                self._net_hist['last'] = (c2.bytes_sent, c2.bytes_recv)
+                self._net_hist['last_t'] = now
             tx = self._net_hist['tx']; rx = self._net_hist['rx']
             if tx and rx:
                 xs2 = list(range(len(tx)))
@@ -56840,13 +58087,53 @@ class ModernWindow:
         # visibly animates in real time instead of only moving in step with
         # the rest of the dashboard's 2-second refresh.
         if self._closed: return
+        st = self._ui_state()
+        if st != 'hidden':                             # nothing to animate for a minimised window
+            try:
+                c = self._monitor.colors
+                self._update_live_traffic(c['download'], c['upload'])
+                self._draw_live_only()
+            except Exception:
+                _exc('_refresh_live_fast')
+        # Each redraw repaints the whole chart panel on the interface thread, so the faster rate is only for a
+        # window that is in use; behind others it is slow, and minimised it only wakes to see if it was restored.
+        self.root.after({'front': 400, 'back': 1500}.get(st, 1500), self._refresh_live_fast)
+
+    def _draw_live_only(self):
+        """Repaint just the live-traffic panel over the saved background; a full draw only when there is none yet."""
+        cv = self._mpl_canvas
+        bg = getattr(self, '_bg_live', None)
+        if bg is None:
+            cv.draw_idle()                             # the first full draw saves the background (see _build_charts)
+            return
         try:
-            c = self._monitor.colors
-            self._update_live_traffic(c['download'], c['upload'])
-            self._mpl_canvas.draw_idle()
+            from matplotlib.transforms import Bbox
+            fig = self._mpl_fig; ax = self._axes['live']
+            rnd = cv.get_renderer()
+            tb = ax.get_tightbbox(rnd)
+            box = Bbox.union([b for b in (tb, self._live_box) if b is not None])
+            box = Bbox.from_extents(max(box.x0 - 4, 0), max(box.y0 - 4, 0),
+                                    min(box.x1 + 4, fig.bbox.x1), min(box.y1 + 4, fig.bbox.y1))
+            cv.restore_region(bg)                      # whole buffer: a partial restore takes its box in a flipped y-direction and leaves ghosts
+            fig.draw_artist(ax)
+            cv.blit(box)
+            self._live_box = tb
         except Exception:
-            _exc('_refresh_live_fast')
-        self.root.after(400, self._refresh_live_fast)
+            self._bg_live = None
+            cv.draw_idle()
+            _exc_debug('live panel draw')
+
+    def _ui_state(self):
+        """'hidden' when the main window is minimised or not on screen, 'front' when this app has the keyboard
+        focus, otherwise 'back' (visible but behind another program)."""
+        try:
+            if self._closed:
+                return 'hidden'
+            if self.root.state() in ('iconic', 'withdrawn') or not self.root.winfo_viewable():
+                return 'hidden'
+            return 'front' if self.root.focus_displayof() is not None else 'back'
+        except Exception:
+            return 'front'
 
     # ── Button actions ────────────────────────────────────────────────────────
     def _run_test(self):
@@ -56868,21 +58155,22 @@ class ModernWindow:
 
         if gauge is not None:
             try:
-                import psutil
-                _c0 = psutil.net_io_counters()
-                _state = {'t': time.monotonic(), 'rx': _c0.bytes_recv, 'tx': _c0.bytes_sent}
+                _t0, _c0 = _nm_netio()
+                _state = {'t': _t0, 'rx': _c0.bytes_recv if _c0 else 0, 'tx': _c0.bytes_sent if _c0 else 0,
+                          'have': _c0 is not None}
 
                 def _tick():
                     if gauge._closed:
                         return
                     try:
-                        c = psutil.net_io_counters()
-                        now = time.monotonic()
-                        dt = max(0.05, now - _state['t'])
-                        rx_mbps = max(0.0, (c.bytes_recv - _state['rx']) * 8 / dt / 1_000_000)
-                        tx_mbps = max(0.0, (c.bytes_sent - _state['tx']) * 8 / dt / 1_000_000)
-                        _state['t'], _state['rx'], _state['tx'] = now, c.bytes_recv, c.bytes_sent
-                        gauge.sample(rx_mbps, tx_mbps)
+                        now, c = _nm_netio()
+                        if c is not None and now > _state['t']:
+                            if _state['have']:
+                                dt = max(0.05, now - _state['t'])
+                                rx_mbps = max(0.0, (c.bytes_recv - _state['rx']) * 8 / dt / 1_000_000)
+                                tx_mbps = max(0.0, (c.bytes_sent - _state['tx']) * 8 / dt / 1_000_000)
+                                gauge.sample(rx_mbps, tx_mbps)
+                            _state['t'], _state['rx'], _state['tx'], _state['have'] = now, c.bytes_recv, c.bytes_sent, True
                     except Exception:
                         _exc_debug('_run_test speed gauge tick')
                     self.root.after(150, _tick)
@@ -56912,6 +58200,15 @@ class ModernWindow:
 
     def _open_etherape(self):
         try:
+            # The topology window now opens at start-up: a second click should bring it back, not start a
+            # second capture and a second copy of every thread.
+            for _e in list(_ea_instances):
+                if not getattr(_e, '_closed', True):
+                    try:
+                        _e.root.deiconify(); _e.root.lift(); _e.root.focus_force()
+                        return
+                    except Exception:
+                        pass
             EtherApeWindow(tshark_path=self._monitor._tshark_exe, monitor=self._monitor)
             # __init__ self-registers in _ea_instances — no need to append here
         except Exception:

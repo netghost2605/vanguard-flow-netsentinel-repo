@@ -28,8 +28,9 @@ check(csi['chip_m'].cget('text') == 'NOT CONNECTED', 'idle: chip says not connec
 csi['fill_ports']([('COM3', 'Silicon Labs CP210x USB to UART Bridge (COM3)', True), ('COM1', 'Communications Port (COM1)', False)])
 check(csi['port_var'].get().startswith('COM3') and '★' in csi['port_var'].get(), 'ports: the USB-serial bridge is listed, starred and preselected')
 csi['fill_ports']([])
-check('No serial ports' in csi['hint_var'].get(), 'ports: an empty list explains the likely cause (charge-only cable)')
-csi['toggle_conn']()                       # no port chosen
+check('No USB serial ports' in csi['hint_var'].get(), 'ports: an empty list explains the likely cause (charge-only cable)')
+csi['port_var'].set('')                  # no port chosen (an empty list now preselects the Wi-Fi entry)
+csi['toggle_conn']()
 check('Pick a serial port' in csi['hint_var'].get() and csi['S']['src'] is None, 'connect with no port gives guidance and does not start')
 # demo (real time, short)
 csi['scen_var'].set('Someone walking about')

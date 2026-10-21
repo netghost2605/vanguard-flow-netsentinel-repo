@@ -291,6 +291,8 @@ check('MOVEMENT' in evk(w2) and alerts2 == [], 'watcher: movement while you are 
 for i in range(320, 360):
     w2._process_link(t0 + i, dict(lk, dbm=-53.0 + random.choice([0, 0, 0.5])))
 w2.set_pref('away', True)
+check(not w2.is_away(), 'watcher: away ticked but you are at the PC -> not away')
+w2.idle_fn = lambda: 1000.0          # PC left unused
 check(w2.is_away(), 'watcher: away toggle')
 for i in range(360, 380):
     w2._process_link(t0 + i, dict(lk, dbm=-53.0 + random.choice([-7, -3, 2, -8, 0, -5, 1, -6])))
