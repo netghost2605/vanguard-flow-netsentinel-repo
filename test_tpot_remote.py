@@ -8,6 +8,7 @@ os.environ['NM_WIFI_TEST'] = '1'
 os.environ['LOCALAPPDATA'] = TMP
 spec = importlib.util.spec_from_file_location("stm_under_test", os.path.join(HERE, "speedtest_monitor.py"))
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod._NM_HONEYPOT_OFF = False        # the dormant honeypot code is tested with the switch ON
 fails = []
 def check(c, m):
     print(('  ok   ' if c else '  FAIL ') + m)

@@ -24,6 +24,93 @@ def _app_dir() -> Path:
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
+# ── Console safety ────────────────────────────────────────────────────────────
+# The app runs with a console window. On Windows, clicking in that window (or pressing a
+# key in it) starts "QuickEdit" text selection, which PAUSES every program that writes to
+# the console until Enter/Esc is pressed. Because the logger writes to the console while it
+# holds its lock, one blocked write froze every thread in the app at once: no live feed,
+# no speed tests, a locked window. Two defences: (1) switch QuickEdit off for this console,
+# (2) never let a console write block the app -- output goes through a small queue that a
+# background thread drains (and drops text if it ever backs up).
+class _NMNonBlockingOut:
+    def __init__(self, real, maxsize=4000):
+        import queue as _q, threading as _t
+        self._real = real
+        self._q = _q.Queue(maxsize=maxsize)
+        self.encoding = getattr(real, 'encoding', None) or 'utf-8'
+        self.errors = 'replace'
+        _t.Thread(target=self._pump, name='nm-console-out', daemon=True).start()
+
+    def _pump(self):
+        while True:
+            s = self._q.get()
+            try:
+                try:
+                    self._real.write(s)
+                except UnicodeEncodeError:
+                    enc = getattr(self._real, 'encoding', None) or 'ascii'
+                    self._real.write(s.encode(enc, 'replace').decode(enc, 'replace'))
+                self._real.flush()
+            except Exception:
+                pass
+
+    def write(self, s):
+        try:
+            if not isinstance(s, str):
+                s = str(s)
+            self._q.put_nowait(s)
+        except Exception:
+            pass                    # queue full (console is stuck): drop it rather than freeze the app
+        return len(s) if isinstance(s, str) else 0
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        try:
+            return bool(self._real.isatty())
+        except Exception:
+            return False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _nm_console_quickedit_off():
+    """Windows: clear ENABLE_QUICK_EDIT_MODE on this console's input. True if it was changed."""
+    if sys.platform != 'win32':
+        return False
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.GetStdHandle.restype = ctypes.c_void_p
+        k.GetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        k.SetConsoleMode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        h = k.GetStdHandle(-10)                      # STD_INPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not h or not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False                             # no console attached
+        new = (mode.value & ~0x0040) | 0x0080        # QUICK_EDIT off, EXTENDED_FLAGS on
+        if new != mode.value:
+            return bool(k.SetConsoleMode(h, new))
+    except Exception:
+        pass
+    return False
+
+
+def _nm_harden_console(force=False):
+    """Apply both defences. Only wraps stdout/stderr in the installed (frozen) app, or when forced."""
+    try:
+        _nm_console_quickedit_off()
+        if force or getattr(sys, 'frozen', False):
+            for nm in ('stdout', 'stderr'):
+                cur = getattr(sys, nm, None)
+                if cur is not None and not isinstance(cur, _NMNonBlockingOut):
+                    setattr(sys, nm, _NMNonBlockingOut(cur))
+    except Exception:
+        pass
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 def _setup_logging() -> logging.Logger:
     log_path = _app_dir() / 'speedtest_monitor.log'
@@ -55,6 +142,7 @@ def _setup_logging() -> logging.Logger:
     logger.info(f'Logging started — log file: {log_path}')
     return logger
 
+_nm_harden_console()
 log = _setup_logging()
 
 
@@ -479,6 +567,14 @@ import sys         # noqa: E402
 # genuinely platform-specific calls so the rest of the code can stay unchanged.
 # Only ~0.7% of the file touches the platform at all, and most of that is here.
 _NM_IS_WIN = (os.name == 'nt')
+# ESP32 boards (CSI / Floor detection), LD14P lidars and the movement detection built on them are switched OFF:
+# no windows, buttons, tabs, phone pages, listeners or background recorders. The code stays in the file only so a
+# future version can bring it back by flipping this one switch.
+_NM_BOARDS_OFF = True
+# The Honeypot feature (HONEYPOT button and window, the T-Pot feed and its phone pages, honeypot auto-block and alerts,
+# the T-Pot VM deploy, the report section) is switched OFF. The code stays in the file only so a future version can
+# bring it back by flipping this one switch. Firewall rules that already exist are not touched.
+_NM_HONEYPOT_OFF = True
 _NM_IS_MAC = (sys.platform == 'darwin')
 _NM_IS_LINUX = (not _NM_IS_WIN and not _NM_IS_MAC)
 
@@ -1902,6 +1998,10 @@ def _nm_guide_shot_map():
     out = {}
     for k, v in m.items():
         v = [(a, b) for (a, b) in v if a in _GUIDE_SHOTS]
+        if _NM_BOARDS_OFF:                       # no pictures of the switched-off ESP32 / Floor / Lidar windows
+            v = [(a, b) for (a, b) in v if not re.search(r'csi|floor|lidar', a + ' ' + b, re.I)]
+        if _NM_HONEYPOT_OFF:                     # and none of the switched-off Honeypot window
+            v = [(a, b) for (a, b) in v if not re.search(r'honeypot|t-?pot', a + ' ' + b, re.I)]
         if v:
             out[k] = v
     return out
@@ -3241,6 +3341,8 @@ _NM_HP_TARPIT = {'on': True}
 
 def _nm_honeypot_autoblock_hook(rec, count):
     """on_hit handler: block a source after 2 hits when auto-block is on."""
+    if _NM_HONEYPOT_OFF:
+        return
     if not _NM_HP_AUTOBLOCK.get('on'):
         return
     if count < 2:
@@ -3263,6 +3365,8 @@ def _nm_honeypot_control(req):
     Mirrors START / STOP / TEST / BLOCK SELECTED / AI ANALYSIS / auto-block.
     """
     global _NM_HONEYPOT
+    if _NM_HONEYPOT_OFF:
+        return {'ok': False, 'error': 'The honeypot is switched off.'}
     action = (req.get('action') or '').strip().lower()
 
     if action == 'start':
@@ -3948,7 +4052,7 @@ _NM_TPOT_SKIP_EVENTS = ('cowrie.session.closed', 'cowrie.log.closed', 'cowrie.cl
                         'cowrie.direct-tcpip.data')    # follow-up noise inside one connection
 _NM_TPOT_FIELDS = ['@timestamp', 'type', 'src_ip', 'dest_port', 'proto', 'protocol', 'transport', 'eventid',
                    'event_type', 'username', 'password', 'input', 'url', 'request', 'msg', 'message', 'payload',
-                   'http', 'user_agent', 'signature']
+                   'http', 'user_agent', 'signature', 'attack_connection', 'start_time', 'end_time']
 
 
 def _nm_hp_is_masked(ip):
@@ -5067,6 +5171,8 @@ def _nm_vm_status():
 
 def _nm_vm_api(req, local=True, deps=None, stop_after=None):
     """check / start / cancel the VM deployment. Loopback only: it starts programs and takes passwords."""
+    if _NM_HONEYPOT_OFF:
+        return {'ok': False, 'error': 'The honeypot is switched off.'}
     if not local:
         return {'ok': False, 'error': 'Deploying a VM is only allowed from this PC.'}
     deps = deps or {}
@@ -5135,6 +5241,9 @@ class _NMTpotHoneypot(_NMHoneypot):
         self.error = ''
         self.connected = False
         self._ts = None
+        self._held = []             # (when the connection ended, seconds it stayed open), newest last
+        self._held_total = 0.0      # seconds of scanner time held, for everything filed since START
+        self._held_n = 0
 
     # ── transport ──
     def _http(self, url, body=None):
@@ -5179,6 +5288,45 @@ class _NMTpotHoneypot(_NMHoneypot):
                 return g(k)
         return ''
 
+    @staticmethod
+    def _payload_bytes(src):
+        """The first bytes the visitor sent, when T-Pot kept them. Honeytrap stores them as hex inside
+        attack_connection.payload.data_hex, not at the top of the record."""
+        try:
+            ac = src.get('attack_connection')
+            pl = ac.get('payload') if isinstance(ac, dict) else None
+            hx = str(pl.get('data_hex') or '') if isinstance(pl, dict) else ''
+            hx = hx[:240]
+            if len(hx) % 2:
+                hx = hx[:-1]
+            return bytes.fromhex(hx) if hx else b''
+        except (ValueError, TypeError, AttributeError):
+            return b''
+
+    @classmethod
+    def _sample_any(cls, src):
+        """Readable sample for a record: the usual fields first, then the bytes the visitor sent."""
+        t = cls._sample(src)
+        if t:
+            return t
+        pb = cls._payload_bytes(src)
+        return pb[:120].decode('latin-1', 'replace') if pb else ''
+
+    def _note_held(self, src):
+        """How long this connection stayed open (start_time to end_time): the honeypot holding a scanner."""
+        a = self._epoch(str(src.get('start_time') or ''))
+        b = self._epoch(str(src.get('end_time') or ''))
+        if a is None or b is None:
+            return
+        d = b - a
+        if d <= 0 or d > 3600:
+            return
+        self._held.append((b, d))
+        if len(self._held) > 4000:
+            del self._held[:1000]
+        self._held_total += d
+        self._held_n += 1
+
     def _ingest(self, doc):
         src = doc.get('_source') or {}
         ip = str(src.get('src_ip') or '').strip()
@@ -5197,8 +5345,12 @@ class _NMTpotHoneypot(_NMHoneypot):
         what = str(src.get('eventid') or src.get('event_type') or '')
         what = what.replace('cowrie.', '').replace('.', ' ')
         self._types[typ] = self._types.get(typ, 0) + 1
-        self._record(ip, port, self._sample(src).encode('utf-8', 'replace'), force=True, proto=proto,
-                     when=when, service=typ, tool=what)
+        smp = self._sample(src)
+        pb = self._payload_bytes(src)
+        fb = smp.encode('utf-8', 'replace') if smp else pb
+        self._note_held(src)
+        self._record(ip, port, fb, force=True, proto=proto, when=when, service=typ,
+                     tool=what or (_nm_hp_fingerprint(pb) if pb else ''))
         return True
 
     def _query(self, since_iso):
@@ -5307,6 +5459,10 @@ class _NMTpotHoneypot(_NMHoneypot):
                   'types': dict(self._types), 'bound': 1 if self._running else 0,
                   'remote': self._es.startswith('https://'),
                   'tarpit_enabled': False})
+        import time as _t
+        _lim = _t.time() - 60.0
+        d.update({'held_recent': sum(1 for e, _d in self._held if e >= _lim),
+                  'held_secs': float(self._held_total), 'held_n': int(self._held_n)})
         return d
 
 
@@ -5492,13 +5648,15 @@ def _nm_tpot_recent(es=None, fetch=None, n=60):
             port = 0
         what = str(s.get('eventid') or s.get('event_type') or '').replace('cowrie.', '').replace('.', ' ')
         out.append({'time': _NMTpotHoneypot._epoch(str(s.get('@timestamp') or '')) or 0, 'type': str(s.get('type') or ''),
-                    'port': port, 'what': what, 'sample': _NMTpotHoneypot._sample(s)[:140], 'ip': ip,
+                    'port': port, 'what': what, 'sample': _NMTpotHoneypot._sample_any(s)[:140], 'ip': ip,
                     'masked': _nm_hp_is_masked(ip) or _nm_is_private_ip(ip)})
     return out
 
 
 def _nm_tpot_snapshot(force=False):
     """Everything the /tpot page shows, cached for a few seconds so several viewers do not hammer docker/ES."""
+    if _NM_HONEYPOT_OFF:
+        return {'off': True}
     import time as _t
     now = _t.time()
     c = _NM_TPOT_CACHE.get('snap')
@@ -5526,6 +5684,8 @@ def _nm_tpot_snapshot(force=False):
 
 def _nm_tpot_control(req, local=True, run=None, probe=None):
     """start / stop T-Pot (docker compose in its folder). Local-only: these start and stop containers on this PC."""
+    if _NM_HONEYPOT_OFF:
+        return {'ok': False, 'error': 'The honeypot is switched off.'}
     action = str((req or {}).get('action') or '').lower()
     if not local:
         return {'ok': False, 'error': 'Control is only allowed from this PC.'}
@@ -5581,6 +5741,8 @@ def _nm_tpot_control(req, local=True, run=None, probe=None):
 def _nm_tpot_autofeed_tick():
     """Keep the T-Pot feed running without pressing START: alerts and phone alerts need it. Returns what happened."""
     global _NM_HONEYPOT
+    if _NM_HONEYPOT_OFF:
+        return 'off'
     if _nm_hp_prefs()['source'] != 'tpot' or _NM_TPOT_USER_STOP['v']:
         return 'off'
     hp = _nm_honeypot()
@@ -5602,6 +5764,8 @@ def _nm_tpot_autofeed_tick():
 
 def _nm_tpot_autofeed_start():
     import threading
+    if _NM_HONEYPOT_OFF:
+        return
     if os.environ.get('NM_WIFI_TEST') or _NM_TPOT_CACHE.get('autofeed'):
         return
     _NM_TPOT_CACHE['autofeed'] = True
@@ -5623,6 +5787,8 @@ _NM_HONEYPOT = None
 
 
 def _nm_honeypot():
+    if _NM_HONEYPOT_OFF:
+        return None
     return _NM_HONEYPOT
 
 
@@ -6459,7 +6625,7 @@ mkChart('proto-chart','doughnut',{proto_labels},[
 {_blocked_html}
 </section>''')
 
-    if 'honeypot' in report_types or 'full' in report_types:
+    if (not _NM_HONEYPOT_OFF) and ('honeypot' in report_types or 'full' in report_types):
         import collections as _coll
         _hp = _nm_honeypot()
         _hits = _hp.hits(500) if _hp else []
@@ -9026,6 +9192,8 @@ class _NMWifiWatcher:
 
     def lidar_apply(self):
         """Start or stop listening for the lidar boards so it matches the 'lidar_on' setting (the demo keeps it running)."""
+        if _NM_BOARDS_OFF:
+            return
         want = bool(self.prefs.get('lidar_on')) and (self._threads_on or self.lidar is not None)
         hub = self.lidar_hub(create=want)
         if hub is None:
@@ -9045,6 +9213,8 @@ class _NMWifiWatcher:
 
     def floor_track_apply(self):
         """Start or stop the background floor recorder so it matches the 'floor_bg' setting."""
+        if _NM_BOARDS_OFF:
+            return
         want = bool(self.prefs.get('floor_bg')) and self._threads_on
         with self.lock:
             trk = self.floor_tracker
@@ -9264,6 +9434,8 @@ class _NMWifiWatcher:
     # instead (csi_pause / csi_resume hand it back and forth, calibration included) and feeds this class
     # once a second. The simulated demo NEVER reaches this code.
     def csi_wanted(self):
+        if _NM_BOARDS_OFF:
+            return False
         return bool(self.prefs.get('csi_bg') and self.prefs.get('csi_port'))
 
     def _csi_make_source(self, an):
@@ -10433,12 +10605,13 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
                 command=lambda: _nm_phone_dialog(win, D, W_)).pack(side='right')
 
     # LD14P lidars
-    opts4 = tk.Frame(win, bg=D['bg'])
-    opts4.pack(fill='x', padx=14, pady=(0, 4))
-    lidar_v = tk.BooleanVar(value=bool(W_.prefs.get('lidar_on')))
-    _ttk.Checkbutton(opts4, text='Listen for LD14P lidars (room map, people, intruder alerts)', variable=lidar_v,
-                     command=lambda: W_.set_pref('lidar_on', bool(lidar_v.get()))).pack(side='left', padx=(0, 10))
-    _ttk.Button(opts4, text='Lidar\u2026', command=lambda: _nm_open_lidar(monitor, parent=win, watcher=W_)).pack(side='left')
+    if not _NM_BOARDS_OFF:
+        opts4 = tk.Frame(win, bg=D['bg'])
+        opts4.pack(fill='x', padx=14, pady=(0, 4))
+        lidar_v = tk.BooleanVar(value=bool(W_.prefs.get('lidar_on')))
+        _ttk.Checkbutton(opts4, text='Listen for LD14P lidars (room map, people, intruder alerts)', variable=lidar_v,
+                         command=lambda: W_.set_pref('lidar_on', bool(lidar_v.get()))).pack(side='left', padx=(0, 10))
+        _ttk.Button(opts4, text='Lidar\u2026', command=lambda: _nm_open_lidar(monitor, parent=win, watcher=W_)).pack(side='left')
 
     # night alarm: a klaxon on sustained movement in a night window
     opts3 = tk.Frame(win, bg=D['bg'])
@@ -10495,7 +10668,7 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
     tab_live = _ttk.Frame(nb); tab_net = _ttk.Frame(nb); tab_act = _ttk.Frame(nb); tab_map = _ttk.Frame(nb)
     tab_csi = tk.Frame(nb, bg=D['bg'])
     for tab, txt in ((tab_live, '  Live  '), (tab_net, '  Networks  '), (tab_act, '  Activity  '),
-                     (tab_map, '  Signal map  '), (tab_csi, '  CSI (ESP32)  ')):
+                     (tab_map, '  Signal map  ')) + (() if _NM_BOARDS_OFF else ((tab_csi, '  CSI (ESP32)  '),)):
         nb.add(tab, text=txt)
 
     def _style_ax(a):
@@ -11450,7 +11623,10 @@ def _nm_open_wifi(monitor, watcher=None, state_dir=None):
             _draw_map()
     nb.bind('<<NotebookTabChanged>>', _tab_changed)
 
-    csi_ctl = _nm_csi_build_tab(tab_csi, D, win, state_dir, watcher=W_)
+    if _NM_BOARDS_OFF:
+        csi_ctl = {'close': lambda: None, 'retheme': lambda: None}      # the ESP32 tab is switched off
+    else:
+        csi_ctl = _nm_csi_build_tab(tab_csi, D, win, state_dir, watcher=W_)
 
     def _on_destroy(ev):
         if ev.widget is win:
@@ -12434,6 +12610,45 @@ def _nm_flash_dialog(parent, D, list_ports=None, before_flash=None, scan=None, r
 
 # ── serial port (no pyserial needed) ─────────────────────────────────────────
 
+_NM_PORT_NAMES = {'t': 0.0, 'names': {}, 'busy': False}
+
+
+def _nm_csi_port_names():
+    """{'COM3': 'Silicon Labs CP210x (COM3)', ...} -- the PowerShell/CIM lookup takes 1-3 s, and this is
+    called from the Tk thread when a window opens, which froze the whole app at start-up. So the answer is
+    cached for ten minutes and refreshed on a background thread; the caller waits at most a moment for a
+    first answer and otherwise gets what is known so far (the names fill in on the next refresh)."""
+    import threading
+    st = _NM_PORT_NAMES
+    now = time.time()
+    if not st['busy'] and (now - st['t'] > 600.0 or not st['names'] and now - st['t'] > 30.0):
+        st['busy'] = True
+
+        def _work():
+            try:
+                rc, out = _nm_run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                                   "Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match '\\(COM\\d+\\)' } "
+                                   "| ForEach-Object { $_.Name }"], timeout=20)
+                got = {}
+                if rc == 0:
+                    for ln in out.splitlines():
+                        m = re.search(r'\((COM\d+)\)', ln)
+                        if m:
+                            got[m.group(1)] = ln.strip()
+                    st['names'] = got
+            except Exception:
+                _exc_debug('port names')
+            finally:
+                st['t'] = time.time()
+                st['busy'] = False
+        threading.Thread(target=_work, name='nm-portnames', daemon=True).start()
+    if not st['names']:
+        t0 = time.time()
+        while st['busy'] and time.time() - t0 < 0.35:
+            time.sleep(0.02)
+    return dict(st['names'])
+
+
 def _nm_csi_list_ports(with_names=True):
     """[(port, description, likely_esp32)] -- registry for the list, PowerShell for names."""
     ports = []
@@ -12453,14 +12668,7 @@ def _nm_csi_list_ports(with_names=True):
             _exc_debug('_nm_csi_list_ports registry')
         names = {}
         if with_names and ports:
-            rc, out = _nm_run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
-                               "Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match '\\(COM\\d+\\)' } "
-                               "| ForEach-Object { $_.Name }"], timeout=20)
-            if rc == 0:
-                for ln in out.splitlines():
-                    m = re.search(r'\((COM\d+)\)', ln)
-                    if m:
-                        names[m.group(1)] = ln.strip()
+            names = _nm_csi_port_names()
         res = []
         for p in sorted(set(ports), key=lambda x: int(re.sub(r'\D', '', x) or 0)):
             d = names.get(p, '')
@@ -13215,6 +13423,9 @@ class _NMCsiUdpBroker:
     def subscribe(self, src):
         """Add a source; (re)start the receive thread if needed. Returns True once the socket is bound."""
         import threading
+        if _NM_BOARDS_OFF:
+            self.error = 'ESP32 boards are switched off in this version.'
+            return False
         with self.lock:
             if src not in self.subs:
                 self.subs.append(src)
@@ -14243,12 +14454,24 @@ class _NMFloorDetector:
             except Exception:
                 snaps[f] = {}
             self.live[f] = snaps[f]
+        # a receiver that has sent nothing for the last two seconds has NO say: its last score/"moving" flag is
+        # stale, and letting it vote made the window claim "downstairs movement" while the upstairs board was off
+        silent = []
+        for f in self.FLOORS:
+            try:
+                alive = float(snaps[f].get('rate') or 0.0) > 0.0
+            except (TypeError, ValueError):
+                alive = False
+            if not alive:
+                silent.append(f)
+                snaps[f] = dict(snaps[f], score=0.0, moving=False)
+                self.live[f] = snaps[f]
         s_up, s_down = self._link_score(snaps['up']), self._link_score(snaps['down'])
         up_move, down_move = bool(snaps['up'].get('moving')), bool(snaps['down'].get('moving'))
 
         # while a floor-walk capture is running, sample the split whenever there is any movement
         if self._learn is not None:
-            if up_move or down_move or (s_up + s_down) > 0:
+            if not silent and (up_move or down_move or (s_up + s_down) > 0):
                 self._learn['vals'].append((s_up, s_down))
             if (self.floor_progress() or 0.0) >= 1.0:
                 self._finish_floor()
@@ -14257,7 +14480,11 @@ class _NMFloorDetector:
         ratio = (s_up / total) if total > 1e-6 else None
         floor, label, conf = None, 'quiet', 0.0
 
-        if up_move or down_move:
+        if silent:
+            # one link cannot say WHICH floor moved (that needs the split between the two), so say what is wrong
+            names = ' and '.join('upstairs' if f == 'up' else 'downstairs' for f in silent)
+            label = 'no data from the %s receiver' % names
+        elif up_move or down_move:
             if self.calibrated() and ratio is not None:
                 ru, rd = self.cal['up']['ratio'], self.cal['down']['ratio']
                 du, dd = abs(ratio - ru), abs(ratio - rd)
@@ -14295,7 +14522,8 @@ class _NMFloorDetector:
                         _exc_debug('floor on_floor')
 
         self.verdict = {'floor': floor, 'label': label, 'moving': moving, 'ratio': ratio, 'conf': conf,
-                        's_up': s_up, 's_down': s_down, 't': t, 'up_move': up_move, 'down_move': down_move}
+                        's_up': s_up, 's_down': s_down, 't': t, 'up_move': up_move, 'down_move': down_move,
+                        'silent': list(silent)}
         return self.verdict
 
     def _alert_detail(self, floor, s_up, s_down):
@@ -17879,7 +18107,7 @@ class _NMLidarHub:
     # ── thread plumbing ──
     def start(self):
         import threading
-        if self.running:
+        if _NM_BOARDS_OFF or self.running:
             return
         self.running = True
         self.stop_ev.clear()
@@ -19666,7 +19894,11 @@ class _NMCsiWeb:
         label = {'up': names['up'].upper(), 'down': names['down'].upper(), 'both': 'BOTH FLOORS'}.get(fl)
         if label and place:
             label = '%s  ·  near %s' % (label, place['name'])
-        if label:
+        sil = [f for f in (v.get('silent') or []) if f in self.FLOORS]
+        if sil:
+            chip = ('NO DATA \u00b7 %s BOARD' % names[sil[0]].upper()) if len(sil) == 1 else 'WAITING FOR BOARDS'
+            tone = 'idle'
+        elif label:
             chip, tone = label, 'moving'
         else:
             chip, tone = 'QUIET', 'quiet'
@@ -20326,17 +20558,33 @@ def _nm_open_floor(monitor, parent=None):
     def _tick():
         if S['dead']:
             return
-        try:
+        # Every stage has its own try/except: one failing step (battery line, history save, a follow-sync...)
+        # used to abort the whole tick and leave the chip on "NOT CONNECTED" and the labels stale.
+        def _stage(name, fn):
+            try:
+                fn()
+            except Exception:
+                _exc('floor tick: ' + name)
+
+        def _s_run():
             if W is not None:
                 W.floor_win = ({'det': det, 'loc': LOC, 'src': S['src']} if S['connected'] else None)
             if S['connected']:
                 det.tick()
+
+        def _s_loc():
+            if S['connected']:
                 _loc_step()
+
+        def _s_hist():
+            if S['connected']:
                 HIST.record(clock(), _nm_floor_hist_info(det, LOC))
                 if W is not None:
                     W.night.note('floor', clock(), bool(det.verdict.get('moving')))
                 _nm_floor_hist_save(HIST, sdir)
             _nm_floor_cal_save(sdir, det, CALMEMO)
+
+        def _s_follow():
             if S['connected']:
                 _pn = _prefs_now()
                 if _nm_floor_follow_sync(S['src'], _pn):            # a receiver came back on a new address
@@ -20349,10 +20597,13 @@ def _nm_open_floor(monitor, parent=None):
                     PM.update({k: v for k, v in _pn.items() if k.endswith('_mac') or k.endswith('_mac_ip')})
                     _save_prefs()
                     _set_status('A receiver moved to a new address; the app followed it.')
-            snap = det.snapshot()
-            lv = snap['live']
+
+        def _s_labels():
+            lv = det.snapshot()['live']
             up_lbl.configure(text=_fmt_link('Upstairs link', lv['up']))
             down_lbl.configure(text=_fmt_link('Downstairs link', lv['down']))
+
+        def _s_batt():
             if S['connected']:
                 _bt = time.time()
                 _bl = []
@@ -20364,7 +20615,9 @@ def _nm_open_floor(monitor, parent=None):
                         _nm_batt_alert(W, _nm, _bat, batt_memo, _bt)
                 batt_lbl.configure(text='\n'.join(_bl) if _bl else
                                    'Battery: not reported (only the Heltec V3 firmware has a battery gauge).')
-            # calibration progress / status
+
+        def _s_cal():
+            snap = det.snapshot()
             learn = snap['learn']
             if learn is not None:
                 cal_prog.configure(value=learn['progress'] or 0.0)
@@ -20375,28 +20628,40 @@ def _nm_open_floor(monitor, parent=None):
             if snap['calibrated'] and det._learn is None:
                 cu, cd = snap['cal']['up'], snap['cal']['down']
                 if 'Learned' not in cal_status.cget('text') and 'Calibration cleared' not in cal_status.cget('text'):
-                    _set_status('Calibrated — upstairs split %.2f, downstairs split %.2f. Watching.'
+                    _set_status('Calibrated \u2014 upstairs split %.2f, downstairs split %.2f. Watching.'
                                 % (cu['ratio'], cd['ratio']))
-            # verdict chip
+
+        def _s_chip():
             if not S['connected']:
                 chip.configure(text='NOT CONNECTED', bg=D['chip'], fg=D['text2'])
+                return
+            v = det.snapshot()['verdict']
+            sil = v.get('silent') or []
+            if sil:
+                who = ' + '.join('UPSTAIRS' if f == 'up' else 'DOWNSTAIRS' for f in sil)
+                chip.configure(text='NO DATA \u00b7 %s BOARD' % who if len(sil) == 1 else
+                               'CONNECTED \u00b7 WAITING FOR BOARDS', bg='#5a4300', fg='#ffe9a8')
+                return
+            fl = v['floor']
+            if fl in VCOL:
+                bg, fg, txt = VCOL[fl]
+                _pl = LOC.shown()
+                if _pl:
+                    txt = '%s  \u00b7  near %s' % (txt, _pl['name'])
+                chip.configure(text=txt, bg=bg, fg=fg)
             else:
-                v = snap['verdict']
-                fl = v['floor']
-                if fl in VCOL:
-                    bg, fg, txt = VCOL[fl]
-                    _pl = LOC.shown()
-                    if _pl:
-                        txt = '%s  \u00b7  near %s' % (txt, _pl['name'])
-                    chip.configure(text=txt, bg=bg, fg=fg)
-                else:
-                    chip.configure(text='QUIET', bg='#12482b', fg='#c8ffe0')
+                chip.configure(text='QUIET', bg='#12482b', fg='#c8ffe0')
+
+        def _s_draw():
             if time.time() - FP['last_static'] > 90.0:
                 _fp_static()                                  # pick up new survey samples / plan changes
             else:
                 _fp_dyn()
-        except Exception:
-            _exc('floor tick')
+
+        for _n, _f in (('run', _s_run), ('chip', _s_chip), ('labels', _s_labels), ('loc', _s_loc),
+                       ('history', _s_hist), ('follow', _s_follow), ('battery', _s_batt),
+                       ('calibration', _s_cal), ('draw', _s_draw)):
+            _stage(_n, _f)
         S['job'] = win.after(500, _tick)
 
     def _on_close():
@@ -20424,6 +20689,23 @@ def _nm_open_floor(monitor, parent=None):
     win.protocol('WM_DELETE_WINDOW', _on_close)
     win.after(150, _fp_static)
     S['job'] = win.after(500, _tick)
+
+    def _auto_connect():
+        # Open the window and it connects to the receivers you picked last time -- no extra Connect press.
+        # Only once per opening, so a Disconnect you press yourself is respected.
+        try:
+            if S['dead'] or S['connected'] or not win.winfo_exists():
+                return
+            u_, d_ = up_var.get().strip(), down_var.get().strip()
+            if u_ and d_ and u_ != d_:
+                _toggle()
+                if S['connected']:
+                    _set_status('Connected automatically to your saved receivers. ' + (
+                        'Your saved calibration is loaded \u2014 watching.' if det.calibrated() else
+                        'Step 1: with the house empty and still, press "Learn empty room".'))
+        except Exception:
+            _exc('floor auto-connect')
+    win.after(1800, _auto_connect)
     return win
 
 
@@ -24266,7 +24548,7 @@ class SpeedTestMonitor:
                        ).grid(row=10, column=0, columnspan=4, sticky='w', padx=4, pady=(0, 4))
 
         startwin_var = tk.BooleanVar(value=bool(self.config.get('startup_windows', True)))
-        tk.Checkbutton(af, text='Open the Topology, Heatmap and Floor windows when the app starts',
+        tk.Checkbutton(af, text='Open the Topology and Heatmap windows when the app starts',
                        variable=startwin_var,
                        command=lambda: self.config.__setitem__('startup_windows', bool(startwin_var.get())),
                        fg=FG, bg=BG2, selectcolor=ENT,
@@ -24622,11 +24904,13 @@ class SpeedTestMonitor:
             'firewall': 'Firewall Logs (Windows)',
             'honeypot': 'Honeypot Activity',
         }
+        if _NM_HONEYPOT_OFF:
+            report_vars.pop('honeypot', None); type_labels.pop('honeypot', None)
         type_cbs = {}
         cf = tk.Frame(main, bg=BG2); cf.pack(fill='x', padx=4)
         def toggle_full(*_):
             is_full = report_vars['full'].get()
-            for k in ('speed','dns','agents','topology','firewall','honeypot'):
+            for k in [k for k in ('speed','dns','agents','topology','firewall','honeypot') if k in type_cbs]:
                 report_vars[k].set(not is_full)
                 type_cbs[k].config(state='disabled' if is_full else 'normal')
         for i,(key,label) in enumerate(type_labels.items()):
@@ -25161,14 +25445,9 @@ class EtherApeWindow:
         self._closed=True
         self._stop_capture(); self._stop_replay()
         try:
-            # Cancel all pending after() callbacks before destroy
-            # tk.call('after','info') returns a tuple of IDs, not a string
-            after_ids = self.root.tk.call('after','info')
-            if isinstance(after_ids, str):
-                after_ids = after_ids.split()
-            for after_id in after_ids:
-                try: self.root.after_cancel(after_id)
-                except Exception: _exc('_on_close_cancel')
+            # Cancel this window's own pending after() callbacks before destroy. NOT the interpreter's whole list:
+            # that is shared with the main window and every other window (see _nm_cancel_window_afters).
+            _nm_cancel_window_afters(self.root)
         except Exception: _exc('_on_close')
         try: self.root.destroy()
         except Exception: _exc_debug('_on_close')  # TclError on recursive destroy is harmless
@@ -25388,7 +25667,8 @@ class EtherApeWindow:
         railbtn(rail.inner, '⊛', 'SPREAD', self._spread_nodes, '#74c7ec')
         sep(rail.inner, vertical=False)
         railbtn(rail.inner, '⛔', 'FIREWALL', self._open_firewall_window, '#ff9f43')
-        railbtn(rail.inner, '\U0001f36f', 'HONEYPOT', self._open_honeypot, '#38f0a8')
+        if not _NM_HONEYPOT_OFF:
+            railbtn(rail.inner, '\U0001f36f', 'HONEYPOT', self._open_honeypot, '#38f0a8')
         railbtn(rail.inner, '⚠', 'THREATS', self._open_threat_radar, '#ff4444')
         sep(rail.inner, vertical=False)
         railbtn(rail.inner, '\U0001f9ea', 'TEST', self._inject_test_traffic, '#ff6bff')
@@ -25782,7 +26062,7 @@ class EtherApeWindow:
         r.bind('<Configure>', lambda e: r.after(10, _clamp_right_panel))
         # Initial placement after window is drawn
         r.after(200, _clamp_right_panel)
-        self._fig=plt.figure(figsize=(10,8),facecolor=self._BG)
+        self._fig=_nm_new_figure(figsize=(10,8),facecolor=self._BG)
         self._ax=self._fig.add_axes([0,0,1,1])
         self._ax.set_facecolor(self._BG); self._ax.set_xlim(0,1); self._ax.set_ylim(0,1)
         self._ax.set_aspect('auto'); self._ax.axis('off')
@@ -29223,6 +29503,8 @@ class EtherApeWindow:
         address the host does not own, so it is safe on any network. A hit is
         always a scan or an attack - no real service lives on these ports.
         """
+        if _NM_HONEYPOT_OFF:
+            return
         tk = self._tk
         win = tk.Toplevel(self.root)
         win.title('Honeypot')
@@ -29384,9 +29666,16 @@ class EtherApeWindow:
                     state.set('T-Pot connected \u00b7 no attacks yet \u2014 quiet is normal on a clean network')
                 else:
                     _s = int(_t2.time() - sm['last_hit']) if sm.get('last_hit') else 0
-                    state.set('T-Pot \u00b7 %d events from %d source(s) \u00b7 last %s ago%s'
+                    _held = ''
+                    if sm.get('held_n'):
+                        _hs = int(sm.get('held_secs') or 0)
+                        _ht = ('%dh %dm' % (_hs // 3600, _hs % 3600 // 60)) if _hs >= 3600 else \
+                              ('%dm %ds' % (_hs // 60, _hs % 60)) if _hs >= 60 else '%ds' % _hs
+                        _held = ' \u00b7 %d held in the last minute \u00b7 %s of scanner time held' % (
+                            sm.get('held_recent', 0), _ht)
+                    state.set('T-Pot \u00b7 %d events from %d source(s) \u00b7 last %s ago%s%s'
                               % (sm['total'], sm['unique_ips'], ('%ds' % _s if _s < 90 else '%dm' % (_s // 60)),
-                                 (' \u00b7 ' + _ty) if _ty else ''))
+                                 (' \u00b7 ' + _ty) if _ty else '', _held))
                 return
             if sm['total'] == 0 and sm.get('started'):
                 _mins = int((_t2.time() - sm['started']) / 60)
@@ -29909,6 +30198,8 @@ class EtherApeWindow:
         Falls back to the built-in Tk window if the web server is not up or no
         browser can be launched, so the button always does something.
         """
+        if _NM_HONEYPOT_OFF:
+            return
         port = 8765
         try:
             port = int(getattr(self, '_monitor', None)
@@ -36653,7 +36944,7 @@ class UserGuideWindow:
             ('bullet', 'Legend — toggle the protocol colour key'),
             ('bullet', '⊕ GEO MAP — open the global geographic map window (uses the sharp NASA night map once '
                        'the 3D globe has downloaded it; zooming in loads a full-resolution crop)'),
-            ('bullet', '\U0001f310 LIVE THREAT MAP (button in the Geo Map window, also on your phone at /livemap) \u2014 Radware\u2019s live threat map shown as a page, with your own traffic and your honeypot visitors drawn on top of it as dots and arcs. Line the layer up once with Calibrate overlay: tick Reference pins and move the sliders until the pins sit on London, New York, Tokyo and Sydney (the setting is remembered in that browser). Radware\u2019s page is theirs, shown as they serve it, and no data from it is read. If their site refuses to be shown inside another page, press App map (the app\u2019s own world map under the same layer) or open Radware\u2019s map in its own tab'),
+            ('bullet', '\U0001f310 LIVE THREAT MAP (button in the Geo Map window, also on your phone at /livemap) \u2014 Radware\u2019s live threat map shown as a page, with your own traffic drawn on top of it as dots and arcs. Line the layer up once with Calibrate overlay: tick Reference pins and move the sliders until the pins sit on London, New York, Tokyo and Sydney (the setting is remembered in that browser). Radware\u2019s page is theirs, shown as they serve it, and no data from it is read. If their site refuses to be shown inside another page, press App map (the app\u2019s own world map under the same layer) or open Radware\u2019s map in its own tab'),
             ('bullet', '🖧 LAN SCAN — open the live LAN network map (see LAN Scan section below)'),
             ('bullet', '⊛ SPREAD — redistribute nodes into a clean radial layout'),
             ('bullet', '⇉ SANKEY / ◎ RADIAL — switch between the bipartite ribbon layout '
@@ -36883,8 +37174,6 @@ class UserGuideWindow:
                    'uses the same sweep, rings and projection as the Sonar Radar, but '
                    'where sonar shows all traffic, this shows threats and nothing else.'),
             ('h2', 'What appears on it'),
-            ('bullet', 'Honeypot sources \u2014 anything that touched a decoy port, with '
-                       'its scan classification (sweep, multi-port, repeated probe)'),
             ('bullet', 'Blocked hosts \u2014 addresses with an active firewall rule'),
             ('bullet', 'Attack traffic \u2014 nodes the live capture has flagged'),
             ('bullet', 'Suspicious hosts \u2014 flagged but not yet blocked'),
@@ -36934,7 +37223,7 @@ class UserGuideWindow:
             ('h2', 'Options'),
             ('bullet', 'Time period — last hour through to all time'),
             ('bullet', 'Contents — full summary, speed-test history, DNS, topology, remote '
-                       'agents, firewall activity and honeypot activity'),
+                       'agents and firewall activity'),
             ('bullet', 'Storage location — the folder reports are written to'),
             ('bullet', 'Schedule — hourly, daily or weekly, at a time you choose'),
             ('h2', 'Buttons'),
@@ -38026,6 +38315,103 @@ class UserGuideWindow:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ── ESP32 boards / Floor detection / Lidar are switched off (see _NM_BOARDS_OFF): take them out of the guide too ──
+_NM_BOARD_TEXT = re.compile(r'ESP32|\bCSI\b|lidar|LD14P|floor detection|walking man|board honeypot|csi_send|csi_recv|'
+                            r'Wi-Fi & Boards|\bthe boards\b|\bboards? (?:are|is|see|report|can)\b', re.I)
+
+
+def _nm_guide_strip_boards(items):
+    """Drop the paragraphs and whole sub-sections about the switched-off ESP32 / Floor / Lidar features."""
+    out, skip = [], False
+    for it in items:
+        try:
+            kind, text = it[0], str(it[1])
+        except Exception:
+            out.append(it)
+            continue
+        if kind in ('h1', 'h2'):
+            skip = (kind == 'h2') and bool(_NM_BOARD_TEXT.search(text))
+            if skip:
+                continue
+            out.append(it)
+            continue
+        if skip or _NM_BOARD_TEXT.search(text):
+            continue
+        out.append(it)
+    return out
+
+
+_wn2 = UserGuideWindow.CONTENT.get('whatsnew') or []
+for _i, _it in enumerate(_wn2):
+    if _it[0] == 'h2':
+        _wn2[_i:_i] = [('h2', 'Devices: Rescan network'),
+                       ('bullet', 'Monitor \u2192 Devices has a new Rescan network button. It pings every address on your network, waits for '
+                                  'Windows to confirm who really answered, adds anything new (a new Apple TV, say) and marks what no longer answers '
+                                  'as offline (an Xbox that was switched off). The map also refreshes by itself every few seconds, but that only reads '
+                                  "Windows' cached list, so use Rescan when something looks out of date. A phone or gadget that is asleep may show as offline until it wakes; tick Show offline / history to still see it.")]
+        break
+
+
+# ── The Honeypot is switched off (see _NM_HONEYPOT_OFF): take it out of the guide too ──
+_NM_HP_TEXT = re.compile(r'honeypot|T-Pot|tpot', re.I)
+
+
+def _nm_guide_strip_honeypot(items, loose=False):
+    """Drop the sub-sections about the switched-off Honeypot / T-Pot; in the history list also single lines about it."""
+    out, skip = [], False
+    for it in items:
+        try:
+            kind, text = it[0], str(it[1])
+        except Exception:
+            out.append(it)
+            continue
+        if kind in ('h1', 'h2'):
+            skip = (kind == 'h2') and bool(_NM_HP_TEXT.search(text))
+            if skip:
+                continue
+            out.append(it)
+            continue
+        if skip or (loose and _NM_HP_TEXT.search(text)):
+            continue
+        out.append(it)
+    return out
+
+
+if _NM_HONEYPOT_OFF:
+    for _d in (UserGuideWindow.CONTENT, UserGuideWindow.EXTRA):
+        _d.pop('honeypot', None)
+        for _k in list(_d):
+            _d[_k] = _nm_guide_strip_honeypot(_d[_k], loose=(_k == 'whatsnew'))
+    UserGuideWindow.SECTIONS = [(t, k) for t, k in UserGuideWindow.SECTIONS if k != 'honeypot']
+    _wn3 = UserGuideWindow.CONTENT.get('whatsnew') or []
+    for _i, _it in enumerate(_wn3):
+        if _it[0] == 'h2':
+            _wn3[_i:_i] = [('h2', 'Honeypot removed'),
+                           ('bullet', 'The Honeypot is switched off: no HONEYPOT button or window, no T-Pot feed, no honeypot alerts, auto-block, '
+                                      'report section or phone pages. Firewall rules that were already written are left as they are (see Firewall '
+                                      'Rules to review them). The T-Pot virtual machine itself is not touched by this app.')]
+            break
+
+
+if _NM_BOARDS_OFF:
+    for _d in (UserGuideWindow.CONTENT, UserGuideWindow.EXTRA):
+        for _k in list(_d):
+            _d[_k] = _nm_guide_strip_boards(_d[_k])
+    UserGuideWindow.SECTIONS = [((t.replace('Wi-Fi Signal & CSI', 'Wi-Fi Signal') if k == 'wifi' else t), k)
+                                for t, k in UserGuideWindow.SECTIONS]
+    _w = UserGuideWindow.CONTENT.get('wifi') or []
+    if _w and _w[0][0] == 'h1':
+        _w[0] = ('h1', 'Wi-Fi Signal')
+    _wn = UserGuideWindow.CONTENT.get('whatsnew') or []
+    for _i, _it in enumerate(_wn):
+        if _it[0] == 'h2':
+            _wn[_i:_i] = [('h2', 'ESP32 boards, floor detection and lidar removed'),
+                          ('bullet', 'The ESP32 boards, Floor Detection, the lidar and the movement tracking built on them are switched off: '
+                                     'no windows, buttons, tabs, phone pages or background listening. Nothing else changed: the Wi-Fi window '
+                                     '(link signal, networks, activity, signal map), the heatmap, topology and the rest work as before.')]
+            break
+
+
 def _nm_clean_cfg_text(s):
     """Strip the junk that makes a dotfile value (~/.nm_ai_model etc.) look
     right in every editor and still fail an exact-string match: a leading
@@ -38539,6 +38925,19 @@ class _NMStore:
         c.execute('UPDATE devices SET online=0 WHERE last_seen<?', (time.time()-older_than,))
         c.commit()
 
+    def set_offline_except(self, prefix, alive_ips):
+        """Mark every online device under *prefix* (e.g. '192.168.1.') that is not in
+        *alive_ips* as offline. Returns the list of IPs that just went offline."""
+        c = self._conn()
+        rows = [r[0] for r in c.execute('SELECT ip FROM devices WHERE online=1 AND ip LIKE ?',
+                                        (prefix + '%',))]
+        alive = set(alive_ips)
+        gone = [ip for ip in rows if ip not in alive]
+        for ip in gone:
+            c.execute('UPDATE devices SET online=0 WHERE ip=?', (ip,))
+        c.commit()
+        return gone
+
     def set_device_name(self, ip, name):
         c = self._conn(); c.execute('UPDATE devices SET name=? WHERE ip=?', (name, ip)); c.commit()
 
@@ -38782,6 +39181,178 @@ def _nm_arp_scan():
     return entries
 
 
+_NM_RESCAN_DEAD = {}       # ip -> until-timestamp: judged gone by the last Rescan, ignore stale ARP echoes
+
+
+def _nm_rescan_is_dead(ip):
+    import time
+    until = _NM_RESCAN_DEAD.get(ip)
+    if not until:
+        return False
+    if until < time.time():
+        _NM_RESCAN_DEAD.pop(ip, None)
+        return False
+    return True
+
+
+def _nm_neigh_states(prefix=''):
+    """{ip: (mac, state)} from Windows' neighbour table, best state across all interfaces.
+    State is lower-case: reachable / stale / delay / probe / permanent / incomplete / unreachable.
+    {} when it is not available (not Windows, or PowerShell failed) -- never raises."""
+    if sys.platform != 'win32':
+        return {}
+    import subprocess as _sp
+    rank = {'reachable': 6, 'permanent': 5, 'probe': 4, 'delay': 3, 'stale': 2, 'incomplete': 1, 'unreachable': 0}
+    out = {}
+    try:
+        ps = ("Get-NetNeighbor -AddressFamily IPv4 | ForEach-Object "
+              "{ '{0}|{1}|{2}' -f $_.IPAddress,$_.LinkLayerAddress,$_.State }")
+        r = _sp.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+                    capture_output=True, text=True, timeout=20,
+                    creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+        for line in (r.stdout or '').splitlines():
+            parts = line.strip().split('|')
+            if len(parts) != 3 or not parts[0].startswith(prefix):
+                continue
+            ip, mac, st = parts[0], parts[1].replace('-', ':').lower(), parts[2].strip().lower()
+            if mac in ('', '00:00:00:00:00:00', 'ff:ff:ff:ff:ff:ff'):
+                mac = ''
+            old = out.get(ip)
+            if old is None or rank.get(st, 0) > rank.get(old[1], 0) or (mac and not old[0] and rank.get(st, 0) >= rank.get(old[1], 0)):
+                out[ip] = (mac or (old[0] if old else ''), st)
+    except Exception:
+        _exc('_nm_neigh_states')
+        return {}
+    return out
+
+
+def _nm_rescan_lan(store, on_progress=None):
+    """Real rescan of the local /24: ping every address (that makes Windows ask ARP
+    "who has this?"), let the neighbour table settle, then keep only what actually
+    answered. Updates the device store (adds new devices, marks the ones that did not
+    answer as offline). Returns {'ok', 'found', 'new': [ip..], 'gone': [ip..], 'error'}.
+    *on_progress(text)* is called from the worker thread."""
+    import time, socket, concurrent.futures as _cf
+    def _say(t):
+        if on_progress:
+            try: on_progress(t)
+            except Exception: _exc_debug('_nm_rescan_lan.progress')
+    cidr, myip = _nm_local_subnet()
+    if not cidr or store is None:
+        return {'ok': False, 'error': 'No network connection to scan.', 'found': 0, 'new': [], 'gone': []}
+    prefix = cidr.rsplit('.', 1)[0] + '.'
+    win = (sys.platform == 'win32')
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if win else 0
+    import ipaddress as _ipa
+    targets = [str(h) for h in _ipa.ip_network(cidr, strict=False).hosts()]
+    responders = set()
+
+    def _ping(ip, tries=1, wait_ms=1500):
+        try:
+            cmd = (['ping', '-n', str(tries), '-w', str(wait_ms), ip] if win
+                   else ['ping', '-c', str(tries), '-W', str(max(1, wait_ms // 1000)), ip])
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=tries * (wait_ms / 1000.0 + 1.0) + 2, creationflags=flags)
+            if r.returncode == 0 and (not win or 'TTL=' in (r.stdout or '').upper()):
+                return ip
+        except Exception:
+            pass
+        return None
+    done = 0
+    with _cf.ThreadPoolExecutor(max_workers=120) as ex:
+        for fut in _cf.as_completed([ex.submit(_ping, ip) for ip in targets]):
+            done += 1
+            r = fut.result()
+            if r:
+                responders.add(r)
+            if done % 16 == 0 or done == len(targets):
+                _say('Rescanning the network: checking addresses %d / %d\u2026' % (done, len(targets)))
+    # Phones, tablets and smart gadgets in Wi-Fi power-save answer pings late or on the 2nd/3rd try:
+    # give every address Windows already knows a MAC for (but that stayed silent) a patient second go
+    states_a = {}                           # Windows' view right after the sweep: ARP-confirmed ("reachable") only lasts ~30 s
+    try:
+        states_a = _nm_neigh_states(prefix) if win else {}
+        known = {ip for ip, (m, st) in states_a.items() if m} if win else \
+                {ip for ip, m in _nm_arp_scan() if ip.startswith(prefix)}
+    except Exception:
+        known = set()
+    try:                                    # ...and every device this app has seen before on this network
+        known |= {d['ip'] for d in store.list_devices() if d['ip'].startswith(prefix)}
+    except Exception:
+        _exc_debug('_nm_rescan_lan.known')
+    late = [ip for ip in sorted(known) if ip not in responders and _nm_dev_ip_ok(ip) and ip != myip]
+    if late:
+        _say('Rescanning the network: giving %d sleepy devices a second chance\u2026' % len(late))
+        with _cf.ThreadPoolExecutor(max_workers=32) as ex2:
+            for r in ex2.map(lambda i: _ping(i, 5, 2000), late):
+                if r:
+                    responders.add(r)
+    # let Windows finish verifying the entries the pings touched (stale -> delay -> probe -> reachable/unreachable)
+    states = {}
+    if win:
+        for i in range(6):
+            _say('Rescanning the network: confirming who answered\u2026')
+            time.sleep(1.5)
+            states = _nm_neigh_states(prefix)
+            pending = [1 for ip, (mac, st) in states.items()
+                       if mac and st in ('delay', 'probe', 'stale') and ip not in responders]
+            if not pending:
+                break
+    alive = {}                                  # ip -> mac
+    if states or states_a:
+        for snap in (states_a, states):         # either snapshot saying "ARP-confirmed" is enough
+            for ip, (mac, st) in snap.items():
+                if mac and (st in ('reachable', 'permanent') or ip in responders) and ip.rsplit('.', 1)[-1] != '255':
+                    alive[ip] = mac
+        for ip in responders:                   # answered a ping but no MAC (e.g. this PC)
+            alive.setdefault(ip, '')
+    else:
+        arp = dict(_nm_arp_scan())
+        for ip in responders:
+            alive[ip] = arp.get(ip, '')
+        for ip, mac in arp.items():
+            if ip.startswith(prefix) and ip in responders:
+                alive[ip] = mac
+    alive = {ip: m for ip, m in alive.items() if _nm_dev_ip_ok(ip) and ip != myip}
+    # names for the live ones (reverse DNS, short deadline)
+    hosts = {}
+    ex = _cf.ThreadPoolExecutor(max_workers=24)
+    try:
+        futs = {ex.submit(socket.gethostbyaddr, ip): ip for ip in alive}
+        try:
+            for fut in _cf.as_completed(futs, timeout=5):
+                try:
+                    h = fut.result()[0]
+                    if h and h != futs[fut]:
+                        hosts[futs[fut]] = h.rstrip('.')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    finally:
+        ex.shutdown(wait=False)
+    new = []
+    for ip, mac in sorted(alive.items(), key=lambda kv: tuple(int(x) for x in kv[0].split('.'))):
+        vendor = _nm_oui_vendor(mac) if mac else ''
+        try:
+            is_new = store.upsert_device(ip, mac=mac or None, vendor=vendor or None, hostname=hosts.get(ip) or None)
+        except Exception:
+            _exc('_nm_rescan_lan.upsert'); continue
+        _NM_RESCAN_DEAD.pop(ip, None)
+        if is_new:
+            new.append(ip)
+            try:
+                store.add_alert('warn', 'new_device', 'New device joined: %s (%s)' % (hosts.get(ip) or vendor or ip, ip),
+                                dedup_sec=3600)
+            except Exception:
+                _exc_debug('_nm_rescan_lan.alert')
+    gone = store.set_offline_except(prefix, set(alive) | ({myip} if myip else set()))
+    until = time.time() + 600
+    for ip in set(gone) | {i for i, (m, st) in states.items() if m and i not in alive}:
+        _NM_RESCAN_DEAD[ip] = until
+    return {'ok': True, 'found': len(alive), 'new': new, 'gone': gone, 'error': ''}
+
+
 def _nm_default_gateway():
     import subprocess, os, re
     try:
@@ -38976,6 +39547,8 @@ def _nm_device_worker(monitor):
             if cyc % 20 == 0:
                 rdns = {}   # periodically re-resolve so late DNS/PTR entries appear
             for ip, mac in _nm_arp_scan():
+                if _nm_rescan_is_dead(ip):
+                    continue        # a Rescan just found this one silent; its ARP entry is only a leftover
                 vendor = _nm_oui_vendor(mac)
                 if ip not in rdns:
                     host = ''
@@ -40475,9 +41048,9 @@ _NM_CUBE_FACES = [
     ('main',     None,                   'Main dashboard', None),
     ('topology', 'EtherApe',             'Topology',       '_open_etherape'),
     ('heatmap',  'Time-of-Day Heatmap',  'Heatmap',        '_open_heatmap'),
-    ('floor',    'Floor Detection',      'Floor',          '_open_floor'),
+    ('quality',  'Network Quality',      'Quality',        '_open_quality'),
     ('wifi',     'Wi-Fi Signal',         'Wi-Fi',          '_open_wifi'),
-    ('lidar',    'Lidar',                'Lidar',          '_open_lidar'),
+    ('outages',  'Outage Log',           'Outages',        '_open_outages'),
 ]
 _NM_CUBE_W, _NM_CUBE_H, _NM_CUBE_D = 1.6, 0.9, 1.6          # half sizes: 3.2 x 1.8 x 3.2 (sides are 16:9)
 _NM_CUBE_GEOM = {
@@ -40485,9 +41058,9 @@ _NM_CUBE_GEOM = {
     'main':     ((0, 0, 1),  [(-1, 1, 1), (1, 1, 1), (1, -1, 1), (-1, -1, 1)], (1024, 576)),
     'topology': ((1, 0, 0),  [(1, 1, 1), (1, 1, -1), (1, -1, -1), (1, -1, 1)], (1024, 576)),
     'heatmap':  ((0, 0, -1), [(1, 1, -1), (-1, 1, -1), (-1, -1, -1), (1, -1, -1)], (1024, 576)),
-    'floor':    ((-1, 0, 0), [(-1, 1, -1), (-1, 1, 1), (-1, -1, 1), (-1, -1, -1)], (1024, 576)),
+    'quality':  ((-1, 0, 0), [(-1, 1, -1), (-1, 1, 1), (-1, -1, 1), (-1, -1, -1)], (1024, 576)),
     'wifi':     ((0, 1, 0),  [(-1, 1, -1), (1, 1, -1), (1, 1, 1), (-1, 1, 1)], (768, 768)),
-    'lidar':    ((0, -1, 0), [(-1, -1, 1), (1, -1, 1), (1, -1, -1), (-1, -1, -1)], (768, 768)),
+    'outages':  ((0, -1, 0), [(-1, -1, 1), (1, -1, 1), (1, -1, -1), (-1, -1, -1)], (768, 768)),
 }
 
 
@@ -41011,7 +41584,6 @@ def _nm_tour_steps(win):
         ('main_dashboard',    'Main dashboard',            None,                        None,        0.5, False),
         ('topology',          'Topology (EtherApe)',       None,                        'EtherApe',  0.5, True),
         ('heatmap',           'Heatmap',                   None,                        'Heatmap',   0.5, True),
-        ('floor',             'Floor detection',           None,                        'Floor',     0.5, True),
         ('pen_test',          'Pen Test',                  call('_open_pen_test'),      None,        3.0, True),
         ('wireshark',         'Capture (Wireshark)',       call('_open_wireshark'),     None,        4.0, True),
         ('monitor',           'Monitor',                   call('_open_monitor'),       None,        3.5, True),
@@ -41022,13 +41594,11 @@ def _nm_tour_steps(win):
         ('evidence',          'ISP evidence pack',         call('_open_evidence'),      None,        3.0, True),
         ('pihole',            'Pi-hole',                   call('_open_pihole'),        None,        4.0, True),
         ('wifi',              'Wi-Fi signal',              call('_open_wifi'),          'Wi-Fi Signal', 5.0, True),
-        ('lidar',             'Lidar',                     call('_open_lidar'),         'Lidar',     4.0, True),
         ('report',            'Report',                    call('_open_report'),        None,        3.0, True),
         ('export',            'Export',                    call('_open_export'),        None,        3.0, True),
         ('tools',             'Tools',                     call('_open_tools'),         None,        3.0, True),
         ('settings',          'Settings',                  call('_open_settings'),      None,        2.5, True),
         ('topology_geo',      'Topology: geo map',         sub('_open_geo_window'),     None,        4.0, True),
-        ('topology_honeypot', 'Topology: honeypot',        sub('_open_honeypot_window'), None,       4.0, True),
         ('topology_lan_scan', 'Topology: LAN scan',        sub('_open_lan_scan_window'), None,       3.0, True),
         ('topology_firewall', 'Topology: firewall rules',  sub('_open_firewall_window'), None,       3.0, True),
         ('topology_blocked',  'Topology: blocked countries', sub('_open_blocked_countries_window'), None, 3.0, True),
@@ -41283,13 +41853,68 @@ def _nm_netio(pernic=False):
         return _NM_NETIO['t'], _NM_NETIO['nic' if pernic else 'all']
 
 
+def _nm_cancel_window_afters(widget):
+    """Cancel the pending after() callbacks that belong to `widget` and the widgets inside it, and nobody else's.
+    Windows such as the topology window are Toplevels of the one shared Tcl interpreter, so the interpreter's whole
+    list of timers (`after info`) is the whole APP's: the main window's clock, live graphs and every other window's
+    refresh as well. Cancelling that list when one window closed switched all of them off at once, and the app sat
+    there with a stuck clock and empty windows. Each callback is registered under a command name on the widget that
+    scheduled it, so the window's own timers can be told apart and cancelled alone. Returns how many were cancelled."""
+    names = set()
+
+    def walk(w, depth=0):
+        try:
+            names.update(getattr(w, '_tclCommands', None) or [])
+        except Exception:
+            pass
+        if depth < 80:
+            try:
+                for c in w.winfo_children():
+                    walk(c, depth + 1)
+            except Exception:
+                pass
+    walk(widget)
+    if not names:
+        return 0
+    n = 0
+    tcl = widget.tk
+    ids = tcl.call('after', 'info')
+    if isinstance(ids, str):
+        ids = ids.split()
+    for i in ids:
+        try:
+            info = tcl.call('after', 'info', i)
+            script = info[0] if isinstance(info, (tuple, list)) else str(info).split()[0]
+            if script in names:
+                tcl.call('after', 'cancel', i)
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _nm_new_figure(*args, **kwargs):
+    """A matplotlib Figure that pyplot does not know about. pyplot's figure() also builds a hidden second Tk window (a
+    second Tcl interpreter in the same thread, ~3 s to start) that nothing here uses, because every figure is shown
+    through FigureCanvasTkAgg inside the app's own window. Same drawing, one interpreter fewer."""
+    from matplotlib.figure import Figure
+    return Figure(*args, **kwargs)
+
+
 def _nm_start_stall_watchdog(root, limit_s=2.5):
     """Write to the log what the interface thread is doing whenever it stops responding for more than `limit_s` seconds
     (the freezes Windows reports as "stopped interacting"), so a freeze can be traced to the code that caused it.
-    Cheap: a 250 ms heartbeat on the interface thread and a thread that looks at it twice a second."""
+    Cheap: a 250 ms heartbeat on the interface thread and a thread that looks at it twice a second.
+
+    Also keeps the interface's timers running. On some machines the window timers (Tk `after`) stop firing a few
+    seconds after start-up while everything else keeps working: the clock stops, live graphs stop, windows open empty.
+    A thread that asks the interface thread a trivial question five times a second wakes its event loop, which is
+    what runs any timer that is due. Costs nothing measurable; if it ever finds the interface's own clock lagging the
+    real one it says so in the log."""
     import sys, threading, time as _t, traceback
     main_id = threading.get_ident()
-    st = {'beat': _t.time(), 'dumped': False, 'since': 0.0}
+    st = {'beat': _t.time(), 'dumped': False, 'since': 0.0, 'pump': _t.time(), 'pump_n': 0, 'lag': 0.0,
+          'off': None, 'episodes': 0, 'lag_logged': 0.0, 'late': 0}
 
     def beat():
         now = _t.time()
@@ -41302,6 +41927,44 @@ def _nm_start_stall_watchdog(root, limit_s=2.5):
         except Exception:
             pass
 
+    def _other_threads():
+        """One short line per other thread: where it is. Shows a thread stuck waiting for the interface thread."""
+        out = []
+        names = {t.ident: t.name for t in threading.enumerate()}
+        for tid, fr in sys._current_frames().items():
+            if tid == main_id or tid == threading.get_ident():
+                continue
+            try:
+                stk = traceback.extract_stack(fr, limit=3)
+                tail = ' < '.join('%s:%d %s' % (f.filename.replace('\\', '/').rsplit('/', 1)[-1], f.lineno, f.name)
+                                  for f in reversed(stk))
+                out.append('  [%s] %s' % (names.get(tid, tid), tail))
+            except Exception:
+                pass
+        return '\n'.join(sorted(out)[:60])
+
+    def _probe_tcl():
+        """Ask the Tcl side what it knows: how many timers are waiting and what its clock says. Runs on its own
+        thread because the answer may never come if the event loop is truly dead."""
+        res = {}
+
+        def ask():
+            try:
+                res['after'] = len(str(root.tk.call('after', 'info')).split())
+                res['tcl_ms'] = int(root.tk.call('clock', 'milliseconds'))
+            except Exception as e:
+                res['err'] = repr(e)
+        th = threading.Thread(target=ask, daemon=True, name='nm-stall-probe')
+        th.start()
+        th.join(3.0)
+        if th.is_alive():
+            return 'the interface thread did not answer a question for 3 s'
+        if 'err' in res:
+            return 'probe failed: ' + res['err']
+        return 'Tcl has %d timer(s) waiting; its clock is %.2f s %s the real clock' % (
+            res.get('after', -1), abs(res.get('tcl_ms', 0) / 1000.0 - _t.time()),
+            'ahead of' if res.get('tcl_ms', 0) / 1000.0 > _t.time() else 'behind')
+
     def watch():
         while True:
             _t.sleep(0.5)
@@ -41313,13 +41976,55 @@ def _nm_start_stall_watchdog(root, limit_s=2.5):
                     f = sys._current_frames().get(main_id)
                     stack = ''.join(traceback.format_stack(f, limit=14)) if f is not None else '(no stack)'
                     log.warning('[stall] interface not responding for %.1f s; it is busy in:\n%s', gap, stack.rstrip())
+                    st['episodes'] += 1
+                    if st['episodes'] <= 3:
+                        age = _t.time() - st['pump']
+                        log.warning('[stall] wake-up thread last got an answer %.1f s ago (%d answers so far); %s',
+                                    age, st['pump_n'], _probe_tcl())
+                        log.warning('[stall] other threads:\n%s', _other_threads())
             except Exception:
                 _exc_debug('stall watchdog')
+
+    def pump():
+        """Five times a second, ask the interface thread for Tcl's clock. The question itself wakes the event loop."""
+        import tkinter as _tk
+        misses = 0
+        while True:
+            _t.sleep(0.2)
+            try:
+                t0 = _t.time()
+                ms = int(root.tk.call('clock', 'milliseconds'))
+                t1 = _t.time()
+                misses = 0
+                st['pump'] = t1
+                st['pump_n'] += 1
+                off = ms / 1000.0 - (t0 + t1) / 2.0
+                if st['off'] is None:
+                    st['off'] = off
+                st['lag'] = st['off'] - off      # >0: Tcl's clock is falling behind the real one
+                if t1 - t0 > 2.0:
+                    st['late'] += 1
+                    if st['late'] <= 5:
+                        log.warning('[stall] the interface thread took %.1f s to answer the wake-up call', t1 - t0)
+                if st['lag'] > 1.5 and t1 - st['lag_logged'] > 60:
+                    st['lag_logged'] = t1
+                    log.warning("[stall] the interface's own clock is %.1f s behind the real clock, so its timers "
+                                "run late", st['lag'])
+            except _tk.TclError:
+                return                      # window destroyed: the app is closing
+            except RuntimeError:
+                misses += 1                 # main loop not running yet (start-up) or already finished
+                if misses > (3 if st['pump_n'] else 600):
+                    return                  # it worked before, so the main loop has ended: stop
+            except Exception:
+                _exc_debug('stall wake-up')
     try:
         root.after(250, beat)
         threading.Thread(target=watch, daemon=True, name='nm-stall-watch').start()
+        threading.Thread(target=pump, daemon=True, name='nm-wake').start()
     except Exception:
         _exc_debug('stall watchdog start')
+    return st
 
 
 def _nm_ollama_tray_exe(exe):
@@ -41698,6 +42403,10 @@ class MonitorWindow:
                        bg=self.BG, fg='#cfe3f5', selectcolor='#0d2235', activebackground=self.BG,
                        activeforeground='#39ff14', bd=0, highlightthickness=0,
                        font=(_NM_MONO, 9)).pack(side='right')
+        self._dev_rescan_btn = self._btn(bar, '\u27f3 Rescan network', self._dev_rescan, '#39ff14')
+        self._dev_rescan_btn.pack(side='right', padx=(0, 12))
+        self._dev_rescanning = False
+        self._dev_note = ('', 0)
 
         body = tk.Frame(f, bg=self.BG); body.pack(fill='both', expand=True)
         self._dev_fig = _DevFigure(figsize=(8.0, 6.0), dpi=100, facecolor='#06101e')
@@ -41717,6 +42426,56 @@ class MonitorWindow:
         btns = tk.Frame(side, bg='#0a1626'); btns.pack(fill='x', padx=12, pady=(0, 10))
         self._btn(btns, '\u270e Rename', self._rename_device).pack(fill='x', pady=2)
         self._btn(btns, '\u2317 Scan ports', self._dev_scan_ports, '#c084fc').pack(fill='x', pady=2)
+
+    def _dev_rescan(self):
+        """Rescan network: ping every address, confirm who answers, drop what is gone."""
+        if self._dev_rescanning:
+            return
+        self._dev_rescanning = True
+        self._dev_rescan_btn.config(state='disabled', text='\u27f3 Rescanning\u2026')
+        self._dev_lbl.config(text='Rescanning the network\u2026 this takes about 40 seconds')
+
+        def _say(t):
+            def _s():
+                if not self._closed and self._dev_rescanning:
+                    self._dev_lbl.config(text=t)
+            try: self.root.after(0, _s)
+            except Exception: pass
+
+        def _work():
+            try:
+                res = _nm_rescan_lan(_nm_store(), _say)
+            except Exception:
+                _exc('MonitorWindow._dev_rescan')
+                res = {'ok': False, 'error': 'The rescan failed - see the log.', 'found': 0, 'new': [], 'gone': []}
+
+            def _done():
+                self._dev_rescanning = False
+                if self._closed:
+                    return
+                try:
+                    self._dev_rescan_btn.config(state='normal', text='\u27f3 Rescan network')
+                    if res.get('ok'):
+                        import time as _t
+                        bits = ['Rescan done: %d online' % res['found']]
+                        if res['new']:
+                            bits.append('%d new' % len(res['new']))
+                        if res['gone']:
+                            bits.append('%d not answering' % len(res['gone']))
+                        self._dev_note = (' \u00b7 '.join(bits), _t.time() + 20)
+                    else:
+                        import time as _t
+                        self._dev_note = (res.get('error') or 'Rescan failed.', _t.time() + 20)
+                    st = _nm_store()
+                    dv = st.list_devices() if st else []
+                    on = sum(1 for d in dv if d.get('online') and _nm_dev_ip_ok(d.get('ip', '')))
+                    self._dev_lbl.config(text=self._dev_note[0] + '  \u00b7  %d total' % len(dv))
+                    self._dev_map_render(dv)
+                except Exception:
+                    _exc('MonitorWindow._dev_rescan.done')
+            try: self.root.after(0, _done)
+            except Exception: self._dev_rescanning = False
+        threading.Thread(target=_work, daemon=True).start()
 
     def _dev_map_devs(self, dv):
         """Adapt the store's device dicts into the shape the iso-map draws."""
@@ -42038,8 +42797,12 @@ class MonitorWindow:
         try:
             dv = st.list_devices() if st else []
             on = sum(1 for d in dv if d.get('online') and _nm_dev_ip_ok(d.get('ip', '')))
-            self._dev_lbl.config(text='%d online \u00b7 %d total  \u00b7  click a device for details'
-                                 % (on, len(dv)))
+            if not self._dev_rescanning:
+                import time as _tm
+                _note = self._dev_note
+                _extra = (_note[0] + '  \u00b7  ') if (_note[0] and _note[1] > _tm.time()) else ''
+                self._dev_lbl.config(text=_extra + '%d online \u00b7 %d total  \u00b7  click a device for details'
+                                     % (on, len(dv)))
             self._dev_map_render(dv)
         except Exception: _exc('MonitorWindow devices')
         # Latency
@@ -50524,9 +51287,9 @@ poll();
 </section>
 
 <a class="boards" href="/wifi" id="boards">
-  <div class="bl"><div class="mlabel">Wi-Fi &amp; Boards</div>
+  <div class="bl"><div class="mlabel">Wi-Fi</div>
     <span class="bchip" id="bChip">&#8230;</span>
-    <div class="bsub" id="bSub">Live movement, the walking man, activity, signal map and switches</div></div>
+    <div class="bsub" id="bSub">Live signal, activity, signal map and switches</div></div>
   <div class="bch">&#8250;</div>
 </a>
 
@@ -50687,7 +51450,7 @@ $('aiBtn').addEventListener('click',async function(){
 (function(){
  var W=[
   {t:'TOPOLOGY',ic:'nodes',items:[{l:'3D Topology',s:'Interactive network globe',h:'/3d'},{l:'Flow Talkers',s:'Top bandwidth flows',h:'/sankey'},{l:'Top Talkers',s:'Busiest hosts by bytes',h:'/talkers'}]},
-  {t:'MONITOR',ic:'bell',items:[{l:'Remote Agents',s:'Other sites reporting in',h:'/agents'},{l:'Alerts & Devices',s:'Alerts, devices, latency',h:'/monitor'},{l:'VDI Sessions',s:'Blast / PCoIP / RDP',h:'/vdi'},{l:'Wi-Fi & Boards',s:'Live sensing, activity, signal map',h:'/wifi'},{l:'CSI Sensing',s:'Heat map, floors, weekly history',h:'/csi'},{l:'Lidar',s:'Room map, people, intruders',h:'/lidar'},{l:'Honeypot',s:'T-Pot: who is probing you',h:'/tpot'},{l:'Threat Radar',s:'Where threats come from',h:'/threats'},{l:'Live Threat Map',s:'Radware map + your traffic',h:'/livemap'}]},
+  {t:'MONITOR',ic:'bell',items:[{l:'Remote Agents',s:'Other sites reporting in',h:'/agents'},{l:'Alerts & Devices',s:'Alerts, devices, latency',h:'/monitor'},{l:'VDI Sessions',s:'Blast / PCoIP / RDP',h:'/vdi'},{l:'Wi-Fi',s:'Signal, activity, signal map',h:'/wifi'},{l:'Honeypot',s:'T-Pot: who is probing you',h:'/tpot'},{l:'Threat Radar',s:'Where threats come from',h:'/threats'},{l:'Live Threat Map',s:'Radware map + your traffic',h:'/livemap'}]},
   {t:'ANALYTICS',ic:'chart',items:[{l:'Analytics & AI',s:'Stats and AI briefing',h:'/analytics'},{l:'Full HTML Report',s:'Self-contained report',h:'/api/report'}]},
   {t:'EXPORT',ic:'download',items:[{l:'Download CSV',s:'Speed & DNS history',h:'/api/export?fmt=csv'},{l:'Download JSON',s:'Raw history data',h:'/api/export?fmt=json'}]},
   {t:'RUN TESTS',ic:'play',items:[{l:'Run Speed Test',s:'Trigger a test now',post:'/api/run_test'},{l:'Run DNS Check',s:'Resolve timing now',post:'/api/run_dns'}]}
@@ -50783,6 +51546,8 @@ if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catc
                             ('@@TEXT2@@', _ui['text2'])):
             _html = _html.replace(_tok, _val)
         _html = _html.replace('</body>', self._nm_ai_widget_html() + '</body>', 1)
+        if _NM_HONEYPOT_OFF:
+            _html = _html.replace("{l:'Honeypot',s:'T-Pot: who is probing you',h:'/tpot'},", '')
         return _html
 
     def _build_vdi_html(self):
@@ -50882,7 +51647,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>Wi-Fi &amp; Boards</title>
+<title>Wi-Fi</title>
 <meta name="theme-color" content="@@BG@@">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -50951,11 +51716,11 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 </style>
 </head>
 <body>
-<header><a class="back" href="/">&#8592;</a><h1>Wi-Fi &amp; Boards</h1><span class="chip" id="chip">&hellip;</span><div class="dot" id="dot"></div></header>
+<header><a class="back" href="/">&#8592;</a><h1>Wi-Fi</h1><span class="chip" id="chip">&hellip;</span><div class="dot" id="dot"></div></header>
 <div class="sub" id="sub">Loading&hellip;</div>
-<nav class="jump"><a href="/csi">CSI &amp; floors &#8250;</a><a href="/lidar">Lidar &#8250;</a><a href="#boards">Boards</a><a href="#link">Wi-Fi link</a><a href="#activity">Activity</a><a href="#map">Signal map</a><a href="#nets">Networks</a><a href="#ctl">Controls</a></nav>
+<nav class="jump"><a href="#link">Wi-Fi link</a><a href="#activity">Activity</a><a href="#map">Signal map</a><a href="#nets">Networks</a><a href="#ctl">Controls</a></nav>
 
-<div class="card" id="boards">
+<div class="card" id="boards" style="display:none">
  <h2>Boards (ESP32): movement level</h2>
  <div class="note">The last five minutes. The dashed line is the movement threshold; red shading is movement.</div>
  <div class="row"><div class="grow"><canvas id="cBoards" height="150"></canvas>
@@ -50973,7 +51738,7 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden)refr
 
 <div class="card" id="activity">
  <h2>Activity</h2>
- <div class="note">How often movement was seen, by weekday and hour, over the last 30 days (PC Wi-Fi card and ESP32 boards together).</div>
+ <div class="note">How often movement was seen, by weekday and hour, over the last 30 days (from this PC's Wi-Fi card).</div>
  <canvas id="cHeat" height="190"></canvas>
  <div class="stats" id="heatTip">Tap a cell for its value.</div>
  <div class="note hh" style="margin-top:12px">Minutes of movement per hour, last 24 hours</div>
@@ -51165,11 +51930,10 @@ function renderNets(d){
 }
 
 /* ---------- controls ---------- */
-var SW=[['night_alarm','Night alarm (klaxon)','A klaxon on the PC and a phone alert on sustained movement between the night times set on the PC (default 01:00 to 03:00). Needs the boards being watched.'],
-        ['away','Away mode','Alert me when the boards or the Wi-Fi see movement while I am not at the PC.'],
+var SW=[['night_alarm','Night alarm (klaxon)','A klaxon on the PC and a phone alert on sustained movement between the night times set on the PC (default 01:00 to 03:00). '],
+        ['away','Away mode','Alert me when the Wi-Fi sees movement while I am not at the PC.'],
         ['auto_away_min','Away when the PC is idle 10 minutes','Switches away mode on by itself.'],
-        ['background','Keep watching when the Wi-Fi window is closed','The watcher runs in the app in the background.'],
-        ['csi_bg','Keep watching with the ESP32 boards','Movement near the boards counts for alerts and the history. Needs a receiver chosen in the CSI tab on the PC.']];
+        ['background','Keep watching when the Wi-Fi window is closed','The watcher runs in the app in the background.']];
 var lastCtl='';
 function renderCtl(d){
   var p=d.prefs||{};
@@ -55358,6 +56122,8 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden){pol
                     elif path == '/livemap':
                         self._send(200, 'text/html; charset=utf-8',
                                    server_self._build_livemap_html())
+                    elif _NM_HONEYPOT_OFF and (path in ('/honeypot', '/tpot') or path.startswith('/api/tpot') or path.startswith('/api/honeypot')):
+                        self._send(404, 'text/plain; charset=utf-8', 'Not found')
                     elif path == '/honeypot':
                         self._send(200, 'text/html; charset=utf-8',
                                    server_self._build_honeypot_html())
@@ -55575,6 +56341,8 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden){pol
                         server_self._serve_wifi_plan(self)
                     elif path == '/wifi':
                         self._send(200, 'text/html; charset=utf-8', server_self._build_wifi_html())
+                    elif _NM_BOARDS_OFF and (path in ('/csi', '/lidar') or path.startswith('/api/csi/') or path.startswith('/api/lidar/')):
+                        self._send(404, 'text/plain; charset=utf-8', 'Not found')
                     elif path == '/csi':
                         self._send(200, 'text/html; charset=utf-8', server_self._build_csi_html())
                     elif path.startswith('/api/csi/'):
@@ -55658,6 +56426,10 @@ document.addEventListener('visibilitychange',function(){if(!document.hidden){pol
                 if not self._license_ok():
                     self._json(401, {'ok': False, 'error': 'license required'}); return
                 try:
+                    if _NM_BOARDS_OFF and path in ('/api/lidar/act', '/api/csi/act'):
+                        self._json(404, {'ok': False, 'error': 'not available'}); return
+                    if _NM_HONEYPOT_OFF and (path.startswith('/api/tpot') or path.startswith('/api/honeypot')):
+                        self._json(404, {'ok': False, 'error': 'not available'}); return
                     if path == '/api/lidar/act':
                         n = int(self.headers.get('Content-Length', 0) or 0)
                         raw = self.rfile.read(min(n, 4096)) if n else b'{}'
@@ -57177,11 +57949,12 @@ class ModernWindow:
         self.root.after(200, self._refresh)
         self.root.after(600, self._refresh_live_fast)
         self.root.after(1000, self._open_etherape)
-        # The other two windows opened at start-up too, one after the other so the app is not asked to build three
+        # The other window opened at start-up too, one after the other so the app is not asked to build three
         # heavy windows in the same instant. Untick the box in Settings to turn this off.
         if (self._monitor.config or {}).get('startup_windows', True):
             self.root.after(2200, self._open_heatmap)
-            self.root.after(3400, self._open_floor)
+            if not _NM_BOARDS_OFF:
+                self.root.after(3400, self._open_floor)
         _nm_start_stall_watchdog(self.root)
         self.root.mainloop()
         _MODERN_MODE = False
@@ -57308,8 +58081,9 @@ class ModernWindow:
         btn('⎙', 'EVIDENCE', self._open_evidence,  '#39ff14')
         btn('☉', 'PI-HOLE', self._open_pihole, '#38f0a8')
         btn('≈', 'WI-FI',   self._open_wifi,   '#38b8f0')
-        btn('⌂', 'FLOOR',   self._open_floor,  '#7ee787')
-        btn('◍', 'LIDAR',   self._open_lidar,  '#74c7ec')
+        if not _NM_BOARDS_OFF:
+            btn('⌂', 'FLOOR',   self._open_floor,  '#7ee787')
+            btn('◍', 'LIDAR',   self._open_lidar,  '#74c7ec')
         tk.Frame(sb, bg=self.PANEL2).pack(fill='both', expand=True)
         div()
         btn('⎙', 'REPORT',  self._open_report,   '#ff9f43')
@@ -57497,7 +58271,7 @@ class ModernWindow:
         cf = self._tk.Frame(parent, bg=self.BG)
         cf.pack(fill='both', expand=True, padx=10, pady=8)
 
-        fig = plt.figure(figsize=(14, 5), facecolor=self.BG)
+        fig = _nm_new_figure(figsize=(14, 5), facecolor=self.BG)
         fig.subplots_adjust(left=0.04, right=0.98, top=0.91,
                            bottom=0.14, hspace=0.55, wspace=0.28)
         gs = gridspec.GridSpec(2, 3, figure=fig)
@@ -58337,12 +59111,16 @@ class ModernWindow:
             _m = str(ex); _exc('_open_evidence'); log.error(f'[evidence] {_m}')
 
     def _open_floor(self):
+        if _NM_BOARDS_OFF:
+            return
         try:
             _nm_open_floor(self._monitor, parent=self.root)
         except Exception as ex:
             _m = str(ex); _exc('_open_floor'); log.error(f'[floor] {_m}')
 
     def _open_lidar(self):
+        if _NM_BOARDS_OFF:
+            return
         try:
             _nm_open_lidar(self._monitor, parent=self.root)
         except Exception as ex:

@@ -6,6 +6,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ['NM_WIFI_TEST'] = '1'
 spec = importlib.util.spec_from_file_location("stm_under_test", os.path.join(HERE, "speedtest_monitor.py"))
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod._NM_BOARDS_OFF = False        # these tests exercise the switched-off ESP32 / Floor / Lidar code
 import numpy as np, tkinter as tk
 from PIL import Image, ImageDraw
 fails = []

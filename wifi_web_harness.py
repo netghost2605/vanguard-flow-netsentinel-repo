@@ -4,6 +4,8 @@ os.environ['NM_WIFI_TEST'] = '1'
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("stm_under_test", os.path.join(HERE, "speedtest_monitor.py"))
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+if not os.environ.get('NM_TEST_BOARDS_OFF'):
+    mod._NM_BOARDS_OFF = False        # the dormant ESP32 / Floor / Lidar code is tested with the switch ON
 
 class FakeMon:
     _db = None

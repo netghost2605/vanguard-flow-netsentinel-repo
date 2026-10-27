@@ -23,8 +23,8 @@ def post(p, body, headers=None):
 
 pg = urllib.request.urlopen(base + '/lidar').read().decode()
 check('@@' not in pg and 'id="cMap"' in pg and 'Lidar Room Map' in pg and '--acc:' + H.mod.THEMES['Ocean']['download'] in pg and 'AI' in pg, 'page: theme tokens replaced, map canvas, AI widget')
-check('/lidar' in urllib.request.urlopen(base + '/').read().decode(), 'dashboard menu links to /lidar')
-check('href="/lidar"' in urllib.request.urlopen(base + '/wifi').read().decode(), '/wifi links to /lidar')
+check("h:'/lidar'" not in urllib.request.urlopen(base + '/').read().decode(), 'dashboard menu no longer links to /lidar (switched off)')
+check('href="/lidar"' not in urllib.request.urlopen(base + '/wifi').read().decode(), '/wifi no longer links to /lidar (switched off)')
 
 st = get('/api/lidar/state')
 check(st['ok'] and st['nodes'] == [] and st['prefs']['lidar_on'] is False and st['prefs']['lidar_alert'] == 'away' and st['can_act'] and st['local'] and st['port'] == 4220, 'state: nothing yet, listening off, PC may act')

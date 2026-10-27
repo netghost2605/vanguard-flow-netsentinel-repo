@@ -41,7 +41,6 @@ check(D['bg'] == N['bg'] and D['accent'] == N['download'], 'a theme change is pi
 check(str(win.cget('bg')).lower() == N['bg'] and sum(1 for l in labs if str(l.cget('bg')).lower() == C['bg']) == 0 and n_bg_old > 0,
       f'every label on the old background was recoloured ({n_bg_old} labels)')
 check(str(sty.lookup('NMW.TButton', 'background')).lower() == N['panel'], 'buttons recoloured')
-check(lw._colors == (D['well'], D['accent']) and st['csi']['pw']._colors == (D['well'], D['accent']), 'both walking men recoloured')
-check(st['csi']['S'].get('lay') is None or st['csi']['S'].get('full', 0) >= 1, 'the CSI graphs were redrawn in the new colours')
+check(lw._colors == (D['well'], D['accent']), 'the walking man is recoloured (the ESP32 tab and its second man are switched off)')
 win.destroy(); root.update()
 print('RESULT:', 'FAIL %d' % len(fails) if fails else 'PASS'); os._exit(1 if fails else 0)

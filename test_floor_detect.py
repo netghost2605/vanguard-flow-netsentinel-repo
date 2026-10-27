@@ -6,6 +6,7 @@ os.environ['HOME'] = tempfile.mkdtemp()
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("stm_under_test", os.path.join(HERE, "speedtest_monitor.py"))
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod._NM_BOARDS_OFF = False        # these tests exercise the switched-off ESP32 / Floor / Lidar code
 fails = []
 def check(c, m):
     print(('ok:   ' if c else 'FAIL: ') + m)
@@ -474,5 +475,33 @@ ww2 = mod._NMWifiWatcher(state_dir=_pd, use_api=False, threads=False)
 ww2.set_pref('floor_bg', True)
 check(ww2.floor_tracker is None, 'a watcher without threads (tests) never starts the recorder')
 check(mod._NMWifiWatcher.PREF_DEFAULTS.get('floor_bg') is False, 'background recording is off by default in the settings')
+
+# ── a silent receiver must not be treated as movement on the other floor ──
+sd = mod._NMFloorDetector(clock=clock)
+sup, sdn = FakeAn(), FakeAn()
+sd.an['up'], sd.an['down'] = sup, sdn
+sup.empty = {'mean': 1}; sdn.empty = {'mean': 1}
+sup.cur = {'score': 0.0, 'moving': True, 'rate': 0, 'rssi': -70, 'frames': 9}      # board off: stale "moving", no packets
+sdn.cur = {'score': 90.0, 'moving': True, 'rate': 90, 'rssi': -50, 'frames': 9}
+v = sd.tick()
+check(v['floor'] is None and not v['moving'] and v['silent'] == ['up'], 'silent upstairs board -> no floor is claimed')
+check('no data' in v['label'] and 'upstairs' in v['label'], 'the verdict says which receiver is silent')
+fired = []
+sd.on_floor = lambda f, d: fired.append(f)
+for _ in range(5):
+    adv(1.0); sd.tick()
+check(not fired, 'no phone alert is raised while a receiver is silent')
+sup.cur = {'score': 5.0, 'moving': False, 'rate': 95, 'rssi': -55, 'frames': 9}
+v = sd.tick()
+check(v['silent'] == [] and v['floor'] == 'down', 'both boards sending again -> normal verdict returns')
+sdn.cur = {'score': 3.0, 'moving': False, 'rate': 0, 'rssi': -55, 'frames': 9}
+sup.cur = {'score': 3.0, 'moving': False, 'rate': 0, 'rssi': -55, 'frames': 9}
+v = sd.tick()
+check(sorted(v['silent']) == ['down', 'up'] and 'upstairs and downstairs' in v['label'], 'both silent -> says both')
+sd.start_floor('up', dur=5.0)
+sup.cur = {'score': 20.0, 'moving': True, 'rate': 0, 'rssi': -55, 'frames': 9}
+for _ in range(4):
+    adv(1.0); sd.tick()
+check(len(sd._learn['vals']) == 0, 'calibration does not record samples while a receiver is silent')
 
 print('\nRESULT:', 'FAIL %d' % len(fails) if fails else 'PASS'); os._exit(1 if fails else 0)

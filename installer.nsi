@@ -1,4 +1,4 @@
-; ============================================================
+﻿; ============================================================
 ;  Vanguard Flow NetSentinel — NSIS Installer (Modern UI 2, branded)
 ;  Requires NSIS 3.x only — no third-party plugins. Downloads go through a
 ;  small generated PowerShell script + stock ExecWait (see DetailPrint
