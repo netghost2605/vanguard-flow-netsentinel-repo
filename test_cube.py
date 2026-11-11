@@ -46,7 +46,7 @@ check([k for k, _ in hits] == ['heatmap'], 'turned round, the back face (heatmap
 img, hits = mod._nm_cube_render(size, mod._nm_cube_rot(np.pi / 2, 0), 6.8, tex, bg)
 check([k for k, _ in hits] == ['wifi'], 'tipped forward, the top face (Wi-Fi) shows')
 img, hits = mod._nm_cube_render(size, mod._nm_cube_rot(-np.pi / 2, 0), 6.8, tex, bg)
-check([k for k, _ in hits] == ['lidar'], 'tipped back, the bottom face (Lidar) shows')
+check([k for k, _ in hits] == ['outages'], 'tipped back, the bottom face (Outages) shows')
 # a face texture with and without a picture
 t1 = mod._nm_cube_face_texture('main', 'Main dashboard', Image.new('RGB', (1400, 820), (200, 0, 0)))
 t2 = mod._nm_cube_face_texture('wifi', 'Wi-Fi', None, 'not open - click to open')
@@ -55,13 +55,13 @@ check(t1.size == (1024, 576) and t2.size == (768, 768), 'face pictures have the 
 import tkinter as tk
 root = tk.Tk(); root.title('main')
 tl = {}
-for t in ('◈  EtherApe — Network Topology Monitor', 'Lidar — room map and people', 'Something else'):
+for t in ('◈  EtherApe — Network Topology Monitor', 'Outage Log', 'Something else'):
     w = tk.Toplevel(root); w.title(t); tl[t] = w
 class Owner: pass
 o = Owner(); o.root = root; o._cube = None
 cube = mod._NmCube(o, capture=lambda h: Image.new('RGB', (900, 500), (30, 90, 30)), hwnd_of=lambda w: 1)
 root.update()
-check(cube.targets['topology'][0] is not None and cube.targets['lidar'][0] is not None, 'windows are found by part of their title')
+check(cube.targets['topology'][0] is not None and cube.targets['outages'][0] is not None, 'windows are found by part of their title')
 check(cube.targets['wifi'][0] is None and 'not open' in cube.targets['wifi'][1], 'a window that is not open says so')
 tl['Something else'].destroy()
 t_end = time.time() + 2.0
@@ -77,7 +77,7 @@ cube.close(); root.update()
 check(cube._stop.is_set() and o._cube is None, 'closing stops the threads and clears the handle')
 src = open(os.path.join(HERE, 'speedtest_monitor.py'), encoding='utf-8').read()
 check("command=self._open_cube" in src and "CUBE" in src, 'CUBE button is in the top bar')
-check(src.index("self._bloom_btn.pack(side='left', pady=0, ipady=14)") < src.index("command=self._open_cube"), 'CUBE button sits right after BLOOM')
-check("self.root.after(2200, self._open_heatmap)" in src and "self.root.after(3400, self._open_floor)" in src, 'heatmap and floor open at start-up')
+check(src.index("self._bloom_btn.pack(side='left', padx=(12, 0), pady=11, ipady=3)") < src.index("command=self._open_cube"), 'CUBE button sits right after BLOOM')
+check("self.root.after(2200, self._open_heatmap)" in src and "self.root.after(3400, self._open_floor)" in src and "if not _NM_BOARDS_OFF:\n                self.root.after(3400, self._open_floor)" in src, 'heatmap opens at start-up, Floor never does while the boards are switched off')
 check("'startup_windows'" in src, 'start-up windows can be turned off in Settings')
 print('ALL PASS' if not fails else 'FAILED: %d' % len(fails)); os._exit(1 if fails else 0)

@@ -5783,6 +5783,49 @@ def _nm_tpot_autofeed_start():
 
 
 
+_NM_SELF_IP = {'ip': '', 't': 0.0}
+
+
+_NM_SELF_IPS = {'ips': [], 't': 0.0}
+
+
+def _nm_self_ips_cached(ttl=30.0):
+    """Every IPv4 address this PC owns (Wi-Fi, Ethernet, VM adapters...). A PC on both Wi-Fi and Ethernet has two
+    addresses on the home network; both are this PC. Looked up at most every 30 s."""
+    import time as _t
+    now = _t.time()
+    if now - _NM_SELF_IPS['t'] > ttl:
+        _NM_SELF_IPS['t'] = now
+        out = []
+        try:
+            import psutil
+            import socket as _so
+            for _addrs in psutil.net_if_addrs().values():
+                for a in _addrs:
+                    if a.family == _so.AF_INET and a.address and not a.address.startswith(('127.', '169.254.')):
+                        out.append(a.address)
+        except Exception:
+            _exc_debug('_nm_self_ips_cached')
+        one = _nm_self_ip_cached(ttl)
+        if one and one not in out:
+            out.append(one)
+        _NM_SELF_IPS['ips'] = out
+    return list(_NM_SELF_IPS['ips'])
+
+
+def _nm_self_ip_cached(ttl=30.0):
+    """This PC's own address for the 3D page (it sits in the middle of the view). Looked up at most every 30 s."""
+    import time as _t
+    now = _t.time()
+    if now - _NM_SELF_IP['t'] > ttl:
+        _NM_SELF_IP['t'] = now
+        try:
+            _NM_SELF_IP['ip'] = _nm_local_ipv4() or ''
+        except Exception:
+            _NM_SELF_IP['ip'] = ''
+    return _NM_SELF_IP['ip']
+
+
 _NM_HONEYPOT = None
 
 
@@ -21190,8 +21233,43 @@ def _nm_registrable_domain(host):
     return '.'.join(parts[-2:])
 
 
+_NM_SELF_IFACE = {'map': {}, 't': 0.0}
+
+
+def _nm_self_iface_name(ip, ttl=30.0):
+    """Short name of this PC's network connection that owns `ip` ('Ethernet', 'Wi-Fi', 'VMnet8'), or ''.
+    A PC on Wi-Fi and Ethernet at once has two addresses with the same host name; this tells them apart."""
+    import time as _t
+    now = _t.time()
+    if now - _NM_SELF_IFACE['t'] > ttl:
+        _NM_SELF_IFACE['t'] = now
+        m = {}
+        try:
+            import psutil
+            import socket as _so
+            for name, addrs in psutil.net_if_addrs().items():
+                short = name.strip()
+                lo = short.lower().replace('-', '').replace(' ', '')
+                if lo.startswith('wifi') or lo.startswith('wlan') or 'wireless' in lo:
+                    short = 'Wi-Fi'
+                elif 'vmware' in lo or 'virtualbox' in lo:
+                    short = short.split()[-1]
+                short = short[:14]
+                for a in addrs:
+                    if a.family == _so.AF_INET and a.address:
+                        m[a.address] = short
+        except Exception:
+            _exc_debug('_nm_self_iface_name')
+        _NM_SELF_IFACE['map'] = m
+    return _NM_SELF_IFACE['map'].get(ip, '')
+
+
 def _nm_friendly_host(ip, raw='', maxlen=24):
     """Turn an IP + whatever DNS gave us into something a human can read."""
+    _own = _nm_self_iface_name(ip) if ip and not str(ip).startswith('127.') else ''
+    if _own:
+        _base = (raw or '').strip().rstrip('.').split('.')[0] or ip
+        return (_base + ' \u00b7 ' + _own)[:max(maxlen, 28)]
     sp = _nm_special_ip(ip)
     if sp:
         return sp
@@ -25312,7 +25390,7 @@ class SpeedTestMonitor:
 # ─────────────────────────────────────────────────────────────────────────────
 class EtherApeWindow:
     MAX_NODES = 500; MAX_FLOWS = 2000; DECAY = 0.9985; RENDER_MS = 50; TABLE_MS = 1000
-    _BG='#050d1a'; _PANEL='#06101e'; _ACC='#38b8f0'; _TEXT='#c8dff0'; _TICK='#6a9ab8'; _SPIN='#0a1828'
+    _BG='#060a1c'; _PANEL='#0c1330'; _ACC='#5ef0ff'; _TEXT='#e4ebff'; _TICK='#8b99c4'; _SPIN='#121a40'
 
     PROTO_COLORS = {
         # Vivid, high-separation palette — matches the 3D view's legend exactly
@@ -25323,6 +25401,11 @@ class EtherApeWindow:
         'arp':'#00e5e0','other':'#7f9fbf',
     }
     PROTO_PRIORITY = ['http2','http','tls','ssl','dns','mdns','dhcp','dhcpv6','icmpv6','icmp','tcp','udp','arp']
+
+    # The still parts of the Sankey view (ribbons, nodes, labels) are redrawn in full at most this often; in between
+    # only the moving packets are repainted. Each full redraw takes ~40 ms and showed as a hitch in the motion when it
+    # ran every 0.4 s. New hosts, moved ribbons, zoom and pan still redraw at once.
+    BG_REFRESH_S = 1.5
 
     def __init__(self, tshark_path=None, monitor=None):
         _nm_pick_mono()   # font family must be resolved before widgets
@@ -25455,10 +25538,12 @@ class EtherApeWindow:
     def _build_style(self):
         s=self._ttk.Style(self.root); s.theme_use('clam')
         s.configure('EA.Treeview',background=self._PANEL,fieldbackground=self._PANEL,
-                    foreground=self._TEXT,font=(_NM_MONO, 9),rowheight=19,borderwidth=0)
-        s.configure('EA.Treeview.Heading',background='#040c1a',foreground=self._TICK,
-                    font=(_NM_MONO, 9,'bold'),relief='flat')
-        s.map('EA.Treeview',background=[('selected','#0a3060')],foreground=[('selected','white')])
+                    foreground=self._TEXT,font=(_NM_MONO, 9),rowheight=22,borderwidth=0,relief='flat')
+        s.configure('EA.Treeview.Heading',background=self._PANEL,foreground='#56628a',
+                    font=(_nm_disp_font(), 8,'bold'),relief='flat',borderwidth=0,padding=(4, 5))
+        s.map('EA.Treeview.Heading',background=[('active','#14204c')])
+        s.map('EA.Treeview',background=[('selected','#14204c')],foreground=[('selected','#5ef0ff')])
+        s.layout('EA.Treeview',[('Treeview.treearea',{'sticky':'nswe'})])   # no sunken frame around the table
 
     def _btn(self,parent,text,cmd,fg,bg,hover=None,**kw):
         return self._tk.Button(parent,text=text,command=cmd,bg=bg,fg=fg,
@@ -25466,14 +25551,14 @@ class EtherApeWindow:
                                font=(_NM_MONO, 9,'bold'),relief='flat',cursor='hand2',padx=8,pady=3,**kw)
 
     def _lbl(self,parent,text,fg=None,**kw):
-        return self._tk.Label(parent,text=text,bg='#040c1a',fg=fg or self._TICK,font=(_NM_MONO, 9),**kw)
+        return self._tk.Label(parent,text=text,bg='#080d24',fg=fg or self._TICK,font=(_NM_MONO, 9),**kw)
 
     def _apply_font(self):
         try: sz=int(self._font_size_var.get()); fam=self._font_family_var.get()
         except Exception: return
         sz=max(6,min(24,sz)); self._label_fontsize=sz; self._label_fontfamily=fam
         s=self._ttk.Style(self.root)
-        s.configure('EA.Treeview',font=(fam,sz),rowheight=sz+10)
+        s.configure('EA.Treeview',font=(fam,sz),rowheight=sz+13)
         s.configure('EA.Treeview.Heading',font=(fam,sz,'bold'))
         if hasattr(self,'_flow_detail'): self._flow_detail.config(font=(fam,sz))
         self._reconfigure_labels(self.root,fam,sz)
@@ -25502,8 +25587,8 @@ class EtherApeWindow:
         def _ea_right(hdr, bg):
             tk.Label(hdr,textvariable=self._total_var,bg=bg,fg=self._ACC,
                      font=(_NM_MONO, 9,'bold')).pack(side='right',padx=16)
-        _make_header(r, tk, '◎  ETHERAPE MONITOR',
-                     'Live Network Topology & Traffic Flow',
+        _make_header(r, tk, '◎  NETSENTINEL  /  TOPOLOGY',
+                     'Live network topology & traffic flow',
                      right_widget_fn=_ea_right, accent=self._ACC)
 
         # ── Body: [icon rail] | [content: top toolbar / canvas+panel / filters drawer] ──
@@ -25513,33 +25598,33 @@ class EtherApeWindow:
         # drawer for the advanced filter/block controls. Every widget below is the
         # exact same construction (same command, same colors, same variable) as
         # before — only its parent frame and packing changed.
-        body_row = tk.Frame(r, bg='#020810')
+        body_row = tk.Frame(r, bg='#080d24')
         # NOTE: body_row.pack() is deliberately deferred until after the bottom
         # status bar (sb) and the replay bar (_build_replay_bar) are packed,
         # near the end of this method — see the comment there for why.
 
         # High-tech button helper (unchanged from the original toolbar)
-        def htbtn(parent, text, cmd, acc='#38b8f0', width=9):
+        def htbtn(parent, text, cmd, acc='#5ef0ff', width=9):
             """Neon pill button — dark bg, coloured border + text, glow on hover."""
             b = tk.Button(parent, text=text, command=cmd,
-                         bg='#060f1c', fg=acc,
-                         activebackground=acc, activeforeground='#000408',
-                         relief='flat', font=(_NM_MONO, 8, 'bold'),
+                         bg='#0a1028', fg=acc,
+                         activebackground='#14204c', activeforeground=acc,
+                         relief='flat', font=(_nm_disp_font(), 8, 'bold'),
                          cursor='hand2', padx=10, pady=5,
                          width=width, bd=0,
                          highlightthickness=1,
-                         highlightbackground=acc,
+                         highlightbackground='#1a2450',
                          highlightcolor=acc)
             b.pack(side='left', padx=3)
             return b
 
         def sep(parent, vertical=True):
             if vertical:
-                tk.Frame(parent, bg='#0d2030', width=1).pack(side='left', fill='y', padx=4, pady=3)
+                tk.Frame(parent, bg='#1a2450', width=1).pack(side='left', fill='y', padx=4, pady=3)
             else:
-                tk.Frame(parent, bg='#0d2030', height=1).pack(fill='x', pady=4)
+                tk.Frame(parent, bg='#1a2450', height=1).pack(fill='x', pady=4)
 
-        def railbtn(parent, glyph, label, cmd, acc='#38b8f0'):
+        def railbtn(parent, glyph, label, cmd, acc='#5ef0ff'):
             """Compact two-line icon button for the left rail — same glyph, same
             label text, same command/colour as the original inline toolbar button,
             just stacked vertically to fit a narrow column. Sized naturally (no
@@ -25548,13 +25633,12 @@ class EtherApeWindow:
             just letting Tk fit the real glyph+label pixels — that's what freed
             up room to size the font for readability instead."""
             b = tk.Button(parent, text=f'{glyph}\n{label}', command=cmd,
-                          bg='#060f1c', fg=acc,
-                          activebackground=acc, activeforeground='#000408',
-                          relief='flat', font=(_NM_MONO, 8, 'bold'),
+                          bg='#080d24', fg=acc,
+                          activebackground='#14204c', activeforeground=acc,
+                          relief='flat', font=(_nm_disp_font(), 7, 'bold'),
                           cursor='hand2', justify='center',
-                          bd=0, highlightthickness=1,
-                          highlightbackground=acc, highlightcolor=acc,
-                          padx=2, pady=4)
+                          bd=0, highlightthickness=0,
+                          padx=2, pady=5)
             b.pack(side='top', pady=3, padx=4, fill='x')
             return b
 
@@ -25579,7 +25663,7 @@ class EtherApeWindow:
                 self._canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
                 self._sb = tk.Scrollbar(
                     self, orient=orient, command=(self._canvas.xview if horiz else self._canvas.yview),
-                    bg='#0a1220', troughcolor='#020810', activebackground='#1a3a5a',
+                    bg='#0a1028', troughcolor='#080d24', activebackground='#28356e',
                     bd=0, highlightthickness=0)
                 if horiz:
                     self._canvas.configure(xscrollcommand=self._sb.set)
@@ -25652,10 +25736,10 @@ class EtherApeWindow:
                     self._sb.pack_forget(); self._sb_shown = False
 
         # ── Left icon rail: the 11 "opens another window" tools ────────────────
-        rail_outer = tk.Frame(body_row, bg='#020810', width=80)
+        rail_outer = tk.Frame(body_row, bg='#080d24', width=80)
         rail_outer.pack(side='left', fill='y')
         rail_outer.pack_propagate(False)
-        rail = _ScrollStrip(rail_outer, bg='#020810', orient='vertical')
+        rail = _ScrollStrip(rail_outer, bg='#080d24', orient='vertical')
         rail.pack(fill='both', expand=True)
         railbtn(rail.inner, '⚠', 'BEHAV', self._analyze_behavioral, '#ffd93d')
         railbtn(rail.inner, '◎', 'TRAFFIC', self._analyze_traffic, '#a371f7')
@@ -25677,15 +25761,15 @@ class EtherApeWindow:
         content = tk.Frame(body_row, bg=self._BG)
         content.pack(side='left', fill='both', expand=True)
 
-        top_outer = tk.Frame(content, bg='#020810')
+        top_outer = tk.Frame(content, bg='#080d24')
         top_outer.pack(fill='x', side='top')
-        top_strip = _ScrollStrip(top_outer, bg='#020810', orient='horizontal')
+        top_strip = _ScrollStrip(top_outer, bg='#080d24', orient='horizontal')
         top_strip.pack(fill='x')
         tb1 = top_strip.inner
         tb1.configure(pady=6)
 
         # Interface selector
-        tk.Label(tb1,text='INTERFACE',bg='#020810',fg='#1a3a5a',
+        tk.Label(tb1,text='INTERFACE',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(10,4))
         self._iface_var=tk.StringVar()
         self._iface_cb=ttk.Combobox(tb1,textvariable=self._iface_var,width=30,state='readonly',
@@ -25708,19 +25792,19 @@ class EtherApeWindow:
         self._pcap_replay_btn.config(state='disabled')
         self._stop_replay_btn=htbtn(tb1,'⏹  STOP',self._stop_replay,'#ff6b6b',6)
         self._stop_replay_btn.config(state='disabled')
-        tk.Label(tb1,text='×',bg='#020810',fg='#1a3a5a',font=(_NM_MONO, 8)).pack(side='left')
+        tk.Label(tb1,text='×',bg='#080d24',fg='#28356e',font=(_NM_MONO, 8)).pack(side='left')
         self._speed_var=tk.DoubleVar(value=1.0)
         tk.Spinbox(tb1,values=(0.1,0.25,0.5,1.0,2.0,4.0,8.0,16.0),
                    textvariable=self._speed_var,width=4,
-                   bg='#0a1220',fg='#ff9f43',insertbackground='#ff9f43',
-                   relief='flat',font=(_NM_MONO, 8),buttonbackground='#0a1220',
+                   bg='#0a1028',fg='#ff9f43',insertbackground='#ff9f43',
+                   relief='flat',font=(_NM_MONO, 8),buttonbackground='#0a1028',
                    command=lambda:setattr(self,'_replay_speed',self._speed_var.get())
                    ).pack(side='left',padx=(0,4),ipady=2)
         self._replay_file_var=tk.StringVar(value='')
-        tk.Label(tb1,textvariable=self._replay_file_var,bg='#020810',fg='#ffd93d',
+        tk.Label(tb1,textvariable=self._replay_file_var,bg='#080d24',fg='#ffd93d',
                  font=(_NM_MONO, 8)).pack(side='left',padx=2)
         sep(tb1)
-        tk.Label(tb1,text='FILTER',bg='#020810',fg='#1a3a5a',
+        tk.Label(tb1,text='FILTER',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(4,4))
         self._proto_var=tk.StringVar(value='ALL')
         proto_cb=ttk.Combobox(tb1,textvariable=self._proto_var,width=7,
@@ -25733,9 +25817,9 @@ class EtherApeWindow:
         # BLOCKING drawer below, where Trevor couldn't find it. Moved up to the
         # always-visible top toolbar, right next to the protocol FILTER, since
         # both answer the same question ("what flows do I actually see?"). ──
-        tk.Label(tb1,text='MIN TRAFFIC',bg='#020810',fg='#1a3a5a',
+        tk.Label(tb1,text='MIN TRAFFIC',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,4))
-        self._thresh_lbl=tk.Label(tb1,text='ALL',bg='#020810',fg='#39ff14',
+        self._thresh_lbl=tk.Label(tb1,text='ALL',bg='#080d24',fg='#39ff14',
                                    font=(_NM_MONO, 9,'bold'),width=6)
         self._thresh_lbl.pack(side='left',padx=(0,4))
         def _on_thresh(v):
@@ -25745,22 +25829,24 @@ class EtherApeWindow:
             elif v<1e6: self._thresh_lbl.config(text=f'{v/1024:.0f}K')
             else: self._thresh_lbl.config(text=f'{v/1048576:.1f}M')
         tk.Scale(tb1,from_=0,to=5000000,resolution=1000,orient='horizontal',
-                 command=_on_thresh,bg='#39ff14',fg='#39ff14',troughcolor='#0a1220',
+                 command=_on_thresh,bg='#39ff14',fg='#39ff14',troughcolor='#0a1028',
                  activebackground='#7fff5c',highlightthickness=0,sliderrelief='flat',bd=0,
                  sliderlength=18,width=12,length=140,showvalue=False
                  ).pack(side='left',padx=(0,8))
         sep(tb1)
         # ── Layout toggle: RADIAL (original) <-> SANKEY (bipartite ribbons) ──
-        _sk0 = (self._layout_mode == 'sankey')
-        self._layout_btn = tk.Button(
-            tb1, text='⇉ SANKEY' if _sk0 else '◎ RADIAL', command=self._toggle_layout,
-            bg='#0a1828', fg='#f7cc73' if _sk0 else '#38b8f0',
-            activebackground='#16324a',
-            activeforeground='white', relief='flat', font=(_NM_MONO, 8),
-            cursor='hand2', padx=8, pady=2, bd=0,
-            highlightthickness=1,
-            highlightbackground='#5a4a1a' if _sk0 else '#1a3a5a')
-        self._layout_btn.pack(side='left', padx=(0, 6))
+        _seg = tk.Frame(tb1, bg='#0a1028', highlightthickness=1, highlightbackground='#1a2450')
+        _seg.pack(side='left', padx=(0, 6))
+        self._layout_seg = {}
+        for _mode, _txt in (('sankey', 'SANKEY'), ('radial', 'RADIAL')):
+            _b = tk.Button(_seg, text=_txt, relief='flat', bd=0, highlightthickness=0, cursor='hand2',
+                           font=(_nm_disp_font(), 8, 'bold'), padx=10, pady=2,
+                           activebackground='#14204c', activeforeground='#5ef0ff',
+                           command=lambda m=_mode: (self._layout_mode != m) and self._toggle_layout())
+            _b.pack(side='left', padx=2, pady=2)
+            self._layout_seg[_mode] = _b
+        self._layout_btn = self._layout_seg['sankey']    # kept: other code configures this name
+        self._paint_layout_seg()
         sep(tb1)
         # ── Timeline scrubber: replay recent topology history ──
         # Guarded: a widget failure here must never abort _build_ui, or the
@@ -25768,7 +25854,7 @@ class EtherApeWindow:
         try:
             self._tl_live_btn = tk.Button(
                 tb1, text='● LIVE', command=self._tl_go_live,
-                bg='#0a1828', fg='#39ff14', activebackground='#16324a',
+                bg='#121a40', fg='#39ff14', activebackground='#28356e',
                 activeforeground='white', relief='flat', font=(_NM_MONO, 8),
                 cursor='hand2', padx=8, pady=2, bd=0,
                 highlightthickness=1, highlightbackground='#1a4a2a')
@@ -25778,12 +25864,12 @@ class EtherApeWindow:
                 command=self._tl_on_scrub,
                 # In Tk the slider HANDLE is drawn in `bg` — it must contrast with
                 # both the trough and the near-black toolbar or it is invisible.
-                bg='#38b8f0', activebackground='#7fd4ff', troughcolor='#0d2438',
+                bg='#5ef0ff', activebackground='#7fd4ff', troughcolor='#0d2438',
                 highlightthickness=0, sliderrelief='flat',
                 bd=0, sliderlength=18, width=12, length=140)
             self._tl_scale.pack(side='left', padx=(0, 4))
             self._tl_time_lbl = tk.Label(
-                tb1, text='buffering…', bg='#020810', fg='#6a9ab8',
+                tb1, text='buffering…', bg='#080d24', fg='#8b99c4',
                 font=(_NM_MONO, 8), width=10, anchor='w')
             self._tl_time_lbl.pack(side='left', padx=(0, 6))
             sep(tb1)
@@ -25820,17 +25906,17 @@ class EtherApeWindow:
         ]:
             tk.Checkbutton(tb1,text=text,variable=var,
                            command=lambda a=attr,v=var:(setattr(self,a,v) if a=='_hold_flows_var' else setattr(self,a,v.get())),
-                           bg='#020810',fg='#38b8f0',selectcolor='#0a1828',
-                           activebackground='#020810',activeforeground='white',
+                           bg='#080d24',fg='#5ef0ff',selectcolor='#121a40',
+                           activebackground='#080d24',activeforeground='white',
                            font=(_NM_MONO, 8),relief='flat').pack(side='left',padx=4)
         sep(tb1)
         self._pkt_var=tk.StringVar(value='0 pkts')
-        tk.Label(tb1,textvariable=self._pkt_var,bg='#020810',fg='#38b8f0',
+        tk.Label(tb1,textvariable=self._pkt_var,bg='#080d24',fg='#5ef0ff',
                  font=(_NM_MONO, 9,'bold')).pack(side='left',padx=14)
         # Blocked count, next to the packet count, so it is visible without
         # opening anything. Clicking it opens the rule list.
         self._blocked_var = tk.StringVar(value='')
-        _bl = tk.Label(tb1, textvariable=self._blocked_var, bg='#020810',
+        _bl = tk.Label(tb1, textvariable=self._blocked_var, bg='#080d24',
                        fg='#ff4444', font=(_NM_MONO, 9, 'bold'), cursor='hand2')
         _bl.pack(side='left', padx=(0, 6))
         _bl.bind('<Button-1>', lambda e: self._open_firewall_window())
@@ -25840,7 +25926,7 @@ class EtherApeWindow:
         # row 2 held (flow width, BPF filter, country search, traffic threshold,
         # block rules, font) — same widgets, same commands, just tucked away
         # until the handle is clicked instead of always taking a full row. ──
-        drawer_outer = tk.Frame(content, bg='#06101e')
+        drawer_outer = tk.Frame(content, bg='#0c1330')
         self._drawer_open = False
 
         def _toggle_drawer():
@@ -25852,28 +25938,28 @@ class EtherApeWindow:
                 drawer_body.pack_forget()
                 handle_chevron.config(text='▴')
 
-        handle = tk.Frame(drawer_outer, bg='#020810', height=24)
+        handle = tk.Frame(drawer_outer, bg='#080d24', height=24)
         handle.pack(fill='x', side='bottom')
         handle.pack_propagate(False)
-        handle_chevron = tk.Label(handle, text='▴', bg='#020810', fg='#2f6690',
+        handle_chevron = tk.Label(handle, text='▴', bg='#080d24', fg='#2f6690',
                                    font=(_NM_MONO, 8, 'bold'), cursor='hand2')
         handle_chevron.pack(side='left', padx=(12, 4))
         handle_lbl = tk.Label(
             handle, text='FILTERS & BLOCKING  —  flow width · capture filter · country · threshold · block rules',
-            bg='#020810', fg='#2f6690', font=(_NM_MONO, 7, 'bold'), cursor='hand2')
+            bg='#080d24', fg='#2f6690', font=(_NM_MONO, 7, 'bold'), cursor='hand2')
         handle_lbl.pack(side='left')
         for _w in (handle, handle_chevron, handle_lbl):
             _w.bind('<Button-1>', lambda e: _toggle_drawer())
 
-        drawer_body = tk.Frame(drawer_outer, bg='#06101e')
+        drawer_body = tk.Frame(drawer_outer, bg='#0c1330')
         # not packed yet — starts collapsed; _toggle_drawer() packs it on demand
-        tb2_strip = _ScrollStrip(drawer_body, bg='#020810', orient='horizontal')
+        tb2_strip = _ScrollStrip(drawer_body, bg='#080d24', orient='horizontal')
         tb2_strip.pack(fill='x')
         tb2 = tb2_strip.inner
         tb2.configure(pady=4)
 
         # Flow width controls
-        tk.Label(tb2,text='FLOW WIDTH',bg='#020810',fg='#1a3a5a',
+        tk.Label(tb2,text='FLOW WIDTH',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(10,6))
         self._flow_scale_var=tk.DoubleVar(value=3.0)
         self._min_bytes_thresh=0.0
@@ -25882,24 +25968,24 @@ class EtherApeWindow:
             self._flow_scale_lbl.config(text=f'{float(v):.1f}x')
         scale_sl=tk.Scale(tb2,from_=0.5,to=12.0,resolution=0.5,orient='horizontal',
                           variable=self._flow_scale_var,command=_on_scale_update,
-                          bg='#020810',fg='#a371f7',troughcolor='#0a1220',
+                          bg='#080d24',fg='#a371f7',troughcolor='#0a1028',
                           activebackground='#c084fc',highlightthickness=0,
                           sliderlength=18,width=12,length=180,showvalue=False)
         scale_sl.pack(side='left',padx=(0,4))
-        self._flow_scale_lbl=tk.Label(tb2,text='3.0x',bg='#020810',fg='#a371f7',
+        self._flow_scale_lbl=tk.Label(tb2,text='3.0x',bg='#080d24',fg='#a371f7',
                                        font=(_NM_MONO, 10,'bold'),width=5)
         self._flow_scale_lbl.pack(side='left',padx=(0,8))
         for preset_lbl,preset_val in [('THIN','1.0'),('MED','3.0'),('BOLD','6.0'),('THICK','10.0')]:
-            tk.Button(tb2,text=preset_lbl,bg='#0a1220',fg='#a371f7',relief='flat',
+            tk.Button(tb2,text=preset_lbl,bg='#0a1028',fg='#a371f7',relief='flat',
                       font=(_NM_MONO, 7,'bold'),cursor='hand2',padx=8,pady=3,
                       activebackground='#1a1a3a',activeforeground='white',
                       command=lambda v=preset_val:(
                           self._flow_scale_var.set(float(v)),
                           _on_scale_update(v)
                       )).pack(side='left',padx=1)
-        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
+        tk.Frame(tb2,bg='#1a2450',width=1).pack(side='left',fill='y',padx=8,pady=3)
         # Capture filter
-        tk.Label(tb2,text='BPF FILTER',bg='#020810',fg='#1a3a5a',
+        tk.Label(tb2,text='BPF FILTER',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,6))
         self._cfilt_var=tk.StringVar()
         # Common / applicable BPF capture-filter presets. Editable — type a custom
@@ -25909,19 +25995,19 @@ class EtherApeWindow:
             from tkinter import ttk as _bpf_ttk
             _bpf_style=_bpf_ttk.Style(tb2)
             _bpf_style.configure('BPF.TCombobox',
-                                 fieldbackground='#0a1220',background='#0a1220',
-                                 foreground='#38b8f0',arrowcolor='#38b8f0',
-                                 bordercolor='#1a3a5a',lightcolor='#1a3a5a',
-                                 darkcolor='#1a3a5a',relief='flat')
+                                 fieldbackground='#0a1028',background='#0a1028',
+                                 foreground='#5ef0ff',arrowcolor='#5ef0ff',
+                                 bordercolor='#28356e',lightcolor='#28356e',
+                                 darkcolor='#28356e',relief='flat')
             _bpf_style.map('BPF.TCombobox',
-                           fieldbackground=[('readonly','#0a1220'),('!disabled','#0a1220')],
-                           foreground=[('!disabled','#38b8f0')])
+                           fieldbackground=[('readonly','#0a1028'),('!disabled','#0a1028')],
+                           foreground=[('!disabled','#5ef0ff')])
             try:
                 _top=tb2.winfo_toplevel()
-                _top.option_add('*TCombobox*Listbox.background','#0a1220')
-                _top.option_add('*TCombobox*Listbox.foreground','#38b8f0')
-                _top.option_add('*TCombobox*Listbox.selectBackground','#38b8f0')
-                _top.option_add('*TCombobox*Listbox.selectForeground','#020810')
+                _top.option_add('*TCombobox*Listbox.background','#0a1028')
+                _top.option_add('*TCombobox*Listbox.foreground','#5ef0ff')
+                _top.option_add('*TCombobox*Listbox.selectBackground','#5ef0ff')
+                _top.option_add('*TCombobox*Listbox.selectForeground','#080d24')
                 _top.option_add('*TCombobox*Listbox.font',_NM_MONO + ' 9')
             except Exception:
                 _exc_debug('etherape_bpf_dropdown')
@@ -25933,22 +26019,22 @@ class EtherApeWindow:
             # Fallback to a plain entry if ttk/theming is unavailable.
             _exc_debug('etherape_bpf_dropdown')
             tk.Entry(tb2,textvariable=self._cfilt_var,width=32,
-                     bg='#0a1220',fg='#38b8f0',insertbackground='#38b8f0',
+                     bg='#0a1028',fg='#5ef0ff',insertbackground='#5ef0ff',
                      relief='flat',font=(_NM_MONO, 9),
-                     highlightthickness=1,highlightcolor='#38b8f0',
-                     highlightbackground='#1a3a5a').pack(side='left',padx=(0,6),ipady=3)
-        tk.Label(tb2,text='pick or type — applied at capture start',bg='#020810',fg='#1a3a5a',
+                     highlightthickness=1,highlightcolor='#5ef0ff',
+                     highlightbackground='#28356e').pack(side='left',padx=(0,6),ipady=3)
+        tk.Label(tb2,text='pick or type — applied at capture start',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7)).pack(side='left')
         # Country search filter
-        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
-        tk.Label(tb2,text='COUNTRY',bg='#020810',fg='#1a3a5a',
+        tk.Frame(tb2,bg='#1a2450',width=1).pack(side='left',fill='y',padx=8,pady=3)
+        tk.Label(tb2,text='COUNTRY',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,6))
         self._country_var=tk.StringVar()
         self._country_entry=tk.Entry(tb2,textvariable=self._country_var,width=16,
-                 bg='#0a1220',fg='#38f0a8',insertbackground='#38f0a8',
+                 bg='#0a1028',fg='#38f0a8',insertbackground='#38f0a8',
                  relief='flat',font=(_NM_MONO, 9),
                  highlightthickness=1,highlightcolor='#38f0a8',
-                 highlightbackground='#1a3a5a')
+                 highlightbackground='#28356e')
         self._country_entry.pack(side='left',padx=(0,4),ipady=3)
         self._country_entry.bind('<Return>', lambda e: self._apply_country_filter())
         def _do_search():
@@ -25957,19 +26043,19 @@ class EtherApeWindow:
             self._country_var.set('')
             self._filter_country=''
             self._country_lbl.config(text='')
-        tk.Button(tb2,text='SEARCH',bg='#0a1220',fg='#38f0a8',relief='flat',
+        tk.Button(tb2,text='SEARCH',bg='#0a1028',fg='#38f0a8',relief='flat',
                   font=(_NM_MONO, 7,'bold'),cursor='hand2',padx=6,pady=3,
-                  activebackground='#38f0a8',activeforeground='#020810',
+                  activebackground='#38f0a8',activeforeground='#080d24',
                   command=_do_search).pack(side='left',padx=(0,2))
-        tk.Button(tb2,text='✕',bg='#0a1220',fg='#ff4444',relief='flat',
+        tk.Button(tb2,text='✕',bg='#0a1028',fg='#ff4444',relief='flat',
                   font=(_NM_MONO, 8,'bold'),cursor='hand2',padx=5,pady=3,
                   activebackground='#ff4444',activeforeground='white',
                   command=_do_clear).pack(side='left',padx=(0,2))
-        tk.Button(tb2,text='📋 MANAGE',bg='#0a1220',fg='#ff8844',relief='flat',
+        tk.Button(tb2,text='📋 MANAGE',bg='#0a1028',fg='#ff8844',relief='flat',
                   font=(_NM_MONO, 7,'bold'),cursor='hand2',padx=6,pady=3,
                   activebackground='#ff8844',activeforeground='white',
                   command=self._open_blocked_countries_window).pack(side='left',padx=(0,6))
-        self._country_lbl=tk.Label(tb2,text='',bg='#020810',fg='#38f0a8',
+        self._country_lbl=tk.Label(tb2,text='',bg='#080d24',fg='#38f0a8',
                                     font=(_NM_MONO, 7,'bold'))
         self._country_lbl.pack(side='left',padx=(0,6))
         # Country block
@@ -25977,32 +26063,32 @@ class EtherApeWindow:
         # this collapsed drawer -- Trevor couldn't find it. It now lives on the
         # always-visible top toolbar (tb1, next to the FILTER dropdown) instead;
         # see that block for the widget + self._min_bytes_thresh/_thresh_lbl.
-        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
-        tk.Label(tb2,text='BLOCK CC',bg='#020810',fg='#1a3a5a',
+        tk.Frame(tb2,bg='#1a2450',width=1).pack(side='left',fill='y',padx=8,pady=3)
+        tk.Label(tb2,text='BLOCK CC',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,6))
         self._block_cc_var=tk.StringVar()
         self._block_cc_entry=tk.Entry(tb2,textvariable=self._block_cc_var,width=5,
-                 bg='#0a1220',fg='#ff4444',insertbackground='#ff4444',
+                 bg='#0a1028',fg='#ff4444',insertbackground='#ff4444',
                  relief='flat',font=(_NM_MONO, 9,'bold'),
                  highlightthickness=1,highlightcolor='#ff4444',
-                 highlightbackground='#1a3a5a')
+                 highlightbackground='#28356e')
         self._block_cc_entry.pack(side='left',padx=(0,4),ipady=3)
         self._block_cc_entry.bind('<Return>', lambda e: self._block_country())
-        self._block_cc_btn=tk.Button(tb2,text='⛔ BLOCK',bg='#0a1220',fg='#ff4444',
+        self._block_cc_btn=tk.Button(tb2,text='⛔ BLOCK',bg='#0a1028',fg='#ff4444',
                   relief='flat',font=(_NM_MONO, 7,'bold'),cursor='hand2',padx=6,pady=3,
                   activebackground='#ff4444',activeforeground='white',
                   command=self._block_country)
         self._block_cc_btn.pack(side='left',padx=(0,4))
-        self._block_cc_lbl=tk.Label(tb2,text='',bg='#020810',fg='#ff4444',
+        self._block_cc_lbl=tk.Label(tb2,text='',bg='#080d24',fg='#ff4444',
                                      font=(_NM_MONO, 7,'bold'))
         self._block_cc_lbl.pack(side='left',padx=(0,4))
         # ── Block IP Range (CIDR) ─────────────────────────────────────────────
-        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
-        tk.Label(tb2,text='BLOCK RANGE',bg='#020810',fg='#1a3a5a',
+        tk.Frame(tb2,bg='#1a2450',width=1).pack(side='left',fill='y',padx=8,pady=3)
+        tk.Label(tb2,text='BLOCK RANGE',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,4))
         self._block_range_var=tk.StringVar()
         self._block_range_entry=tk.Entry(tb2,textvariable=self._block_range_var,width=16,
-                 bg='#0a1220',fg='#ff4444',insertbackground='#ff4444',
+                 bg='#0a1028',fg='#ff4444',insertbackground='#ff4444',
                  relief='flat',font=(_NM_MONO, 9,'bold'),
                  highlightthickness=1,highlightcolor='#ff2244',
                  highlightbackground='#3a0a0a')
@@ -26010,30 +26096,30 @@ class EtherApeWindow:
         self._block_range_entry.insert(0,'e.g. 185.220.0.0/16')
         self._block_range_entry.bind('<FocusIn>', lambda e: (self._block_range_entry.delete(0,'end') if self._block_range_var.get().startswith('e.g') else None))
         self._block_range_entry.bind('<Return>', lambda e: self._block_ip_range())
-        self._block_range_btn=tk.Button(tb2,text='⛔ BLOCK',bg='#0a1220',fg='#ff4444',
+        self._block_range_btn=tk.Button(tb2,text='⛔ BLOCK',bg='#0a1028',fg='#ff4444',
                   relief='flat',font=(_NM_MONO, 8,'bold'),cursor='hand2',
                   activebackground='#1a0000',activeforeground='#ff6666',
                   command=self._block_ip_range)
         self._block_range_btn.pack(side='left',padx=(0,4))
-        self._block_range_lbl=tk.Label(tb2,text='',bg='#020810',fg='#ff4444',
+        self._block_range_lbl=tk.Label(tb2,text='',bg='#080d24',fg='#ff4444',
                                        font=(_NM_MONO, 7,'bold'))
         self._block_range_lbl.pack(side='left',padx=(0,4))
         # Font controls
-        tk.Frame(tb2,bg='#0d2030',width=1).pack(side='left',fill='y',padx=8,pady=3)
+        tk.Frame(tb2,bg='#1a2450',width=1).pack(side='left',fill='y',padx=8,pady=3)
         FONT_FAMILIES=list(_NM_MONO_PREFS)+['Arial','Helvetica']
         self._font_family_var=tk.StringVar(value=_NM_MONO)
         self._font_size_var=tk.IntVar(value=9)
-        tk.Label(tb2,text='FONT',bg='#020810',fg='#1a3a5a',
+        tk.Label(tb2,text='FONT',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,2))
         ff_cb=ttk.Combobox(tb2,textvariable=self._font_family_var,values=FONT_FAMILIES,
                             width=14,state='readonly',font=(_NM_MONO, 8))
         ff_cb.pack(side='left',padx=(0,6),ipady=1)
         ff_cb.bind('<<ComboboxSelected>>',lambda e:self._apply_font())
-        tk.Label(tb2,text='SIZE',bg='#020810',fg='#1a3a5a',
+        tk.Label(tb2,text='SIZE',bg='#080d24',fg='#28356e',
                  font=(_NM_MONO, 7,'bold')).pack(side='left',padx=(0,2))
         fs_spin=tk.Spinbox(tb2,from_=6,to=24,textvariable=self._font_size_var,width=3,
-                           bg='#0a1220',fg='#38b8f0',insertbackground='#38b8f0',
-                           relief='flat',font=(_NM_MONO, 9),buttonbackground='#0a1220',
+                           bg='#0a1028',fg='#5ef0ff',insertbackground='#5ef0ff',
+                           relief='flat',font=(_NM_MONO, 9),buttonbackground='#0a1028',
                            command=self._apply_font)
         fs_spin.pack(side='left',padx=(0,2),ipady=2)
         fs_spin.bind('<Return>',lambda e:self._apply_font())
@@ -26042,13 +26128,13 @@ class EtherApeWindow:
         # starts collapsed (self._drawer_open = False, set above); drawer_body
         # is intentionally not packed here — _toggle_drawer() does that on click
 
-        tk.Frame(content,bg='#0d2030',height=1).pack(fill='x')
+        tk.Frame(content,bg='#1a2450',height=1).pack(fill='x')
 
         import matplotlib; matplotlib.use('TkAgg')
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.collections import LineCollection
 
-        pw=tk.PanedWindow(content,orient='horizontal',bg='#0a1828',sashwidth=10,sashrelief='raised',handlesize=24,sashpad=2)
+        pw=tk.PanedWindow(content,orient='horizontal',bg='#121a40',sashwidth=10,sashrelief='raised',handlesize=24,sashpad=2)
         pw.pack(fill='both',expand=True)
         canvas_frame=tk.Frame(pw,bg=self._BG); pw.add(canvas_frame,width=960)
         # Keep right panel at a sensible fixed width when window is resized
@@ -26087,7 +26173,7 @@ class EtherApeWindow:
         # Faint dotted grid — the backdrop that gives the reference its depth
         _gx,_gy=np.meshgrid(np.linspace(0.06,0.94,22),np.linspace(0.06,0.94,14))
         self._grid_sc=self._ax.scatter(_gx.ravel(),_gy.ravel(),s=1.6,
-                                       c='#16324a',zorder=0,alpha=0.55,marker='x',
+                                       c='#28356e',zorder=0,alpha=0.55,marker='x',
                                        linewidths=0.5)
         self._grid_sc.set_visible(False)
         self._col_hdrs=[
@@ -26147,20 +26233,22 @@ class EtherApeWindow:
             except Exception:
                 self._jpeg_saving = False
         self._canvas.mpl_connect('draw_event', _on_draw)
-        zoom_bar=tk.Frame(canvas_frame,bg='#040c1a')
+        zoom_bar=tk.Frame(canvas_frame,bg='#080d24')
         zoom_bar.place(relx=0.0,rely=1.0,anchor='sw',x=6,y=-6)
-        self._zoom_lbl=tk.Label(zoom_bar,text='100%',bg='#040c1a',fg=self._TICK,font=(_NM_MONO, 8))
+        self._zoom_lbl=tk.Label(zoom_bar,text='100%',bg='#080d24',fg=self._TICK,font=(_NM_MONO, 8))
         self._zoom_lbl.pack(side='left',padx=2)
-        tk.Button(zoom_bar,text='⊟ Reset View',command=self._zoom_reset,bg='#040c1a',fg=self._TICK,
+        tk.Button(zoom_bar,text='⊟ Reset View',command=self._zoom_reset,bg='#080d24',fg=self._TICK,
                   relief='flat',font=(_NM_MONO, 8),cursor='hand2',
-                  activebackground='#0a1828',activeforeground=self._ACC).pack(side='left',padx=4)
+                  activebackground='#121a40',activeforeground=self._ACC).pack(side='left',padx=4)
 
         right=tk.Frame(pw,bg=self._PANEL); pw.add(right,width=460,minsize=320)
-        right_pw=tk.PanedWindow(right,orient='vertical',bg='#0a1828',sashwidth=8,sashrelief='raised',handlesize=20,sashpad=2)
+        right_pw=tk.PanedWindow(right,orient='vertical',bg=self._BG,sashwidth=10,sashrelief='flat',handlesize=20,sashpad=2)
         right_pw.pack(fill='both',expand=True)
-        hf=tk.Frame(right_pw,bg=self._PANEL); right_pw.add(hf,height=260,minsize=80)
-        tk.Label(hf,text='  Active Hosts',bg='#040c1a',fg=self._ACC,font=(_NM_MONO, 9,'bold')).pack(fill='x',pady=(2,0))
-        hcols=('ip','name','pkts','bytes','proto'); hhdrs=('IP / Host','Name','Pkts','Bytes','Proto'); hwids=(140,110,55,75,58)
+        hf=tk.Frame(right_pw,bg=self._PANEL,highlightthickness=1,highlightbackground='#1a2450'); right_pw.add(hf,height=260,minsize=80)
+        _hd=tk.Frame(hf,bg=self._PANEL); _hd.pack(fill='x',padx=10,pady=(8,2))
+        tk.Label(_hd,text='Active hosts',bg=self._PANEL,fg=self._TEXT,font=(_nm_disp_font(), 10,'bold')).pack(side='left')
+        tk.Label(_hd,text='sorted by bytes',bg=self._PANEL,fg='#56628a',font=(_NM_MONO, 8)).pack(side='right')
+        hcols=('ip','name','pkts','bytes','proto'); hhdrs=('IP / Host','Name','Pkts','Bytes','Proto'); hwids=(118,120,52,72,74)
         self._host_tree=ttk.Treeview(hf,columns=hcols,show='headings',style='EA.Treeview',selectmode='browse')
         for c,h,w in zip(hcols,hhdrs,hwids):
             self._host_tree.heading(c,text=h,anchor='w',command=lambda cc=c:self._sort_hosts(cc))
@@ -26168,14 +26256,16 @@ class EtherApeWindow:
         for proto,col in self.PROTO_COLORS.items(): self._host_tree.tag_configure(proto,foreground=col)
         hvsb=ttk.Scrollbar(hf,orient='vertical',command=self._host_tree.yview)
         self._host_tree.configure(yscrollcommand=hvsb.set); hvsb.pack(side='right',fill='y')
-        self._host_tree.pack(fill='both',expand=True,padx=(4,0),pady=(0,4))
+        self._host_tree.pack(fill='both',expand=True,padx=(8,0),pady=(0,6))
         self._host_tree.bind('<ButtonRelease-1>', self._host_ctx_menu)
         self._host_tree.bind('<Button-3>', self._host_ctx_menu)
-        flow_outer=tk.PanedWindow(right_pw,orient='vertical',bg='#0a1828',sashwidth=6,sashrelief='raised',handlesize=10)
+        flow_outer=tk.PanedWindow(right_pw,orient='vertical',bg=self._BG,sashwidth=10,sashrelief='flat',handlesize=10)
         right_pw.add(flow_outer,minsize=80)
-        ff=tk.Frame(flow_outer,bg=self._PANEL); flow_outer.add(ff,height=200,minsize=60)
-        tk.Label(ff,text='  Active Flows',bg='#040c1a',fg=self._ACC,font=(_NM_MONO, 9,'bold')).pack(fill='x',pady=(2,0))
-        fcols=('src','dst','proto','pkts','bytes'); fhdrs=('Source','Destination','Proto','Pkts','Bytes'); fwids=(160,160,58,50,68)
+        ff=tk.Frame(flow_outer,bg=self._PANEL,highlightthickness=1,highlightbackground='#1a2450'); flow_outer.add(ff,height=200,minsize=60)
+        _hd=tk.Frame(ff,bg=self._PANEL); _hd.pack(fill='x',padx=10,pady=(8,2))
+        tk.Label(_hd,text='Active flows',bg=self._PANEL,fg=self._TEXT,font=(_nm_disp_font(), 10,'bold')).pack(side='left')
+        tk.Label(_hd,text='click one for details',bg=self._PANEL,fg='#56628a',font=(_NM_MONO, 8)).pack(side='right')
+        fcols=('src','dst','proto','pkts','bytes'); fhdrs=('Source','Destination','Proto','Pkts','Bytes'); fwids=(128,128,74,48,66)
         self._flow_tree=ttk.Treeview(ff,columns=fcols,show='headings',style='EA.Treeview',selectmode='browse')
         for c,h,w in zip(fcols,fhdrs,fwids):
             self._flow_tree.heading(c,text=h,anchor='w')
@@ -26183,10 +26273,12 @@ class EtherApeWindow:
         for proto,col in self.PROTO_COLORS.items(): self._flow_tree.tag_configure(proto,foreground=col)
         fvsb=ttk.Scrollbar(ff,orient='vertical',command=self._flow_tree.yview)
         self._flow_tree.configure(yscrollcommand=fvsb.set); fvsb.pack(side='right',fill='y')
-        self._flow_tree.pack(fill='both',expand=True,padx=(4,0),pady=(0,4))
-        df=tk.Frame(flow_outer,bg=self._PANEL); flow_outer.add(df,height=200,minsize=60)
-        tk.Label(df,text='  Flow Detail',bg='#040c1a',fg=self._ACC,font=(_NM_MONO, 9,'bold')).pack(fill='x',pady=(2,0))
-        self._flow_detail=tk.Text(df,bg='#04080e',fg=self._TEXT,font=(_NM_MONO, 9),relief='flat',
+        self._flow_tree.pack(fill='both',expand=True,padx=(8,0),pady=(0,6))
+        df=tk.Frame(flow_outer,bg=self._PANEL,highlightthickness=1,highlightbackground='#1a2450'); flow_outer.add(df,height=200,minsize=60)
+        _hd=tk.Frame(df,bg=self._PANEL); _hd.pack(fill='x',padx=10,pady=(8,2))
+        tk.Label(_hd,text='Flow detail',bg=self._PANEL,fg=self._TEXT,font=(_nm_disp_font(), 10,'bold')).pack(side='left')
+        tk.Label(_hd,text='AI answers below',bg=self._PANEL,fg='#56628a',font=(_NM_MONO, 8)).pack(side='right')
+        self._flow_detail=tk.Text(df,bg=self._PANEL,fg=self._TEXT,padx=8,pady=4,font=(_NM_MONO, 9),relief='flat',
                                    state='disabled',wrap='word',selectbackground='#0a3060',height=5)
         dvsb=ttk.Scrollbar(df,orient='vertical',command=self._flow_detail.yview)
         self._flow_detail.configure(yscrollcommand=dvsb.set); dvsb.pack(side='right',fill='y')
@@ -26222,17 +26314,17 @@ class EtherApeWindow:
             self._flow_ai_apply_provider_ui()
         _prov_menu=tk.OptionMenu(ai_ctrl,self._flow_ai_provider_disp,
                                  'Ollama (local)','Anthropic',command=_on_prov)
-        _prov_menu.config(bg='#0d2235',fg='#c084fc',relief='flat',
+        _prov_menu.config(bg='#14204c',fg='#c084fc',relief='flat',
                           font=(_NM_MONO, 8),highlightthickness=0,
                           activebackground='#1a0a2e',width=12)
-        try: _prov_menu['menu'].config(bg='#0d2235',fg=self._TEXT)
+        try: _prov_menu['menu'].config(bg='#14204c',fg=self._TEXT)
         except Exception: _exc('_encode')
         _prov_menu.pack(side='left',padx=(2,0))
         self._flow_ai_io_label=tk.Label(ai_ctrl,text='model:',bg=self._PANEL,
                                         fg=self._TICK,font=(_NM_MONO, 8))
         self._flow_ai_io_label.pack(side='left',padx=(8,2))
         # Model box (Ollama) — e.g. deepseek-r1:7b / llama3.2 / qwen3:8b / phi4-mini
-        self._flow_ai_model_entry=tk.Entry(ai_ctrl,bg='#0d2235',fg=self._TEXT,
+        self._flow_ai_model_entry=tk.Entry(ai_ctrl,bg='#14204c',fg=self._TEXT,
                                            insertbackground=self._TEXT,relief='flat',
                                            font=(_NM_MONO, 9),width=20)
         self._flow_ai_model_entry.insert(0,_ai_rf('.nm_ai_model','deepseek-r1:7b') or 'deepseek-r1:7b')
@@ -26242,7 +26334,7 @@ class EtherApeWindow:
         self._flow_ai_model_entry.bind('<FocusOut>',
             lambda e:_ai_wf('.nm_ai_model',self._flow_ai_model_entry.get()))
         # Anthropic key box (only shown when the Anthropic provider is selected)
-        self._flow_ai_key_entry=tk.Entry(ai_ctrl,bg='#0d2235',fg=self._TEXT,
+        self._flow_ai_key_entry=tk.Entry(ai_ctrl,bg='#14204c',fg=self._TEXT,
                                          insertbackground=self._TEXT,relief='flat',
                                          font=(_NM_MONO, 9),width=24,show='*')
         self._flow_ai_key_entry.insert(0,'sk-ant-... API key')
@@ -26258,7 +26350,7 @@ class EtherApeWindow:
         self._flow_ai_apply_provider_ui()
         # ── AI query row: question + Ask ───────────────────────────────────
         ai_bar=tk.Frame(df,bg=self._PANEL); ai_bar.pack(fill='x',padx=4,pady=(2,2))
-        self._flow_ai_entry=tk.Entry(ai_bar,bg='#0d2235',fg=self._TEXT,
+        self._flow_ai_entry=tk.Entry(ai_bar,bg='#14204c',fg=self._TEXT,
                                      insertbackground=self._TEXT,relief='flat',
                                      font=(_NM_MONO, 9),width=40)
         self._flow_ai_entry.pack(side='left',fill='x',expand=True,ipady=3)
@@ -26283,7 +26375,7 @@ class EtherApeWindow:
         self._flow_detail.config(state='disabled')
         self._flow_tree.bind('<<TreeviewSelect>>',self._on_flow_select)
         self._flow_tree.bind('<Button-3>', self._flow_ctx_menu)
-        sb=tk.Frame(r,bg='#020810',height=22); sb.pack(fill='x',side='bottom'); sb.pack_propagate(False)
+        sb=tk.Frame(r,bg='#080d24',height=22); sb.pack(fill='x',side='bottom'); sb.pack_propagate(False)
         self._build_replay_bar(r)   # timeline scrubber sits above the status bar
         # Now that the bottom status bar and replay bar have claimed their fixed-
         # height parcels at the bottom of `r`, pack body_row to fill what's left.
@@ -26298,7 +26390,7 @@ class EtherApeWindow:
         # squeeze instead.)
         body_row.pack(fill='both', expand=True)
         self._status=tk.StringVar(value='Ready — select an interface and click ▶ Start')
-        tk.Label(sb,textvariable=self._status,bg='#020810',fg=self._TICK,font=(_NM_MONO, 8),anchor='w').pack(side='left',padx=8,pady=2)
+        tk.Label(sb,textvariable=self._status,bg='#080d24',fg=self._TICK,font=(_NM_MONO, 8),anchor='w').pack(side='left',padx=8,pady=2)
 
     # Wireshark ships "extcap" helper plugins that appear in `tshark -D` exactly
     # like real adapters, but they are not capturable without extra parameters
@@ -26526,7 +26618,7 @@ class EtherApeWindow:
         sc = getattr(self, '_tl_scale', None)
         if sc is not None:
             try:
-                sc.config(bg='#38b8f0' if self._tl_live else '#ffb000')
+                sc.config(bg='#5ef0ff' if self._tl_live else '#ffb000')
             except Exception:
                 _exc_debug('_tl_btn_update')
         if b is None:
@@ -26602,7 +26694,7 @@ class EtherApeWindow:
 
     def _build_replay_bar(self, parent):
         tk = self._tk
-        bar = tk.Frame(parent, bg='#06101e', height=30)
+        bar = tk.Frame(parent, bg='#0c1330', height=30)
         bar.pack(fill='x', side='bottom')
         bar.pack_propagate(False)
 
@@ -26611,22 +26703,22 @@ class EtherApeWindow:
 
         self._replay_btn = tk.Button(
             bar, text='⏱ REPLAY', command=self._toggle_replay,
-            bg='#0a1828', fg=self._TICK, activebackground='#16324a',
+            bg='#121a40', fg=self._TICK, activebackground='#28356e',
             activeforeground='white', relief='flat', font=(_NM_MONO, 8),
             cursor='hand2', padx=8, pady=1, bd=0, highlightthickness=1,
-            highlightbackground='#1a3a5a')
+            highlightbackground='#28356e')
         self._replay_btn.pack(side='left', padx=(8, 8), pady=3)
 
         self._replay_scale = tk.Scale(
             bar, from_=0, to=100, orient='horizontal', showvalue=False,
-            command=self._on_scrub, bg='#06101e', fg=self._TEXT,
-            troughcolor='#0a1828', activebackground=self._ACC,
+            command=self._on_scrub, bg='#0c1330', fg=self._TEXT,
+            troughcolor='#121a40', activebackground=self._ACC,
             highlightthickness=0, bd=0, sliderrelief='flat', length=400,
             state='disabled')
         self._replay_scale.pack(side='left', fill='x', expand=True, padx=(0, 8))
 
         self._replay_lbl = tk.Label(
-            bar, text='LIVE', bg='#06101e', fg='#39ff14',
+            bar, text='LIVE', bg='#0c1330', fg='#39ff14',
             font=(_NM_MONO, 8, 'bold'), width=22, anchor='w')
         self._replay_lbl.pack(side='left', padx=(0, 8))
         return bar
@@ -26658,7 +26750,7 @@ class EtherApeWindow:
         try:
             self._replay_scale.config(state='disabled')
             self._replay_btn.config(text='⏱ REPLAY', fg=self._TICK,
-                                    highlightbackground='#1a3a5a')
+                                    highlightbackground='#28356e')
             self._replay_lbl.config(text='LIVE', fg='#39ff14')
         except Exception:
             _exc_debug('_go_live')
@@ -26715,7 +26807,7 @@ class EtherApeWindow:
         self._replay = (nodes, flows)
         self._replay_lbl.config(
             text=f'{t0:%d %b %H:%M}' + ('  (no data)' if not rows else ''),
-            fg='#f7cc73' if rows else '#6a9ab8')
+            fg='#f7cc73' if rows else '#8b99c4')
 
     def _proto_tag(self,protos):
         if not protos: return 'other'
@@ -26883,7 +26975,7 @@ class EtherApeWindow:
         tk.Label(win,text=f'  \u26a0  {title}',bg='#200808',fg='#ff6b6b',font=(_NM_MONO, 11,'bold')).pack(fill='x')
         tk.Frame(win,bg='#3a0808',height=1).pack(fill='x')
         fc=tk.Frame(win,bg=self._PANEL); fc.pack(fill='both',expand=True,padx=8,pady=8)
-        txt=tk.Text(fc,bg='#04080e',fg=self._TEXT,font=(_NM_MONO, 9),relief='flat',wrap='word',state='normal')
+        txt=tk.Text(fc,bg='#080d24',fg=self._TEXT,font=(_NM_MONO, 9),relief='flat',wrap='word',state='normal')
         vsb=self._ttk.Scrollbar(fc,orient='vertical',command=txt.yview)
         txt.configure(yscrollcommand=vsb.set); vsb.pack(side='right',fill='y'); txt.pack(fill='both',expand=True)
         txt.insert('end',message); txt.config(state='disabled')
@@ -27006,9 +27098,11 @@ class EtherApeWindow:
         for i,(_,iid) in enumerate(items): self._host_tree.move(iid,'',i)
         self._host_sort_rev=not rev
 
-    def _schedule_render(self):
+    def _schedule_render(self, spent_ms=0.0):
         if self._closed: return
-        try: self.root.after(self.RENDER_MS,self._render_tick)
+        # Wait only what is left of the frame: waiting a full RENDER_MS after a frame that took 12 ms made it
+        # 62 ms per frame instead of 50, and uneven.
+        try: self.root.after(max(1, int(self.RENDER_MS - spent_ms)), self._render_tick)
         except Exception: _exc('_schedule_render')
 
     def _schedule_table_update(self):
@@ -27018,6 +27112,7 @@ class EtherApeWindow:
 
     def _render_tick(self):
         if self._closed: return
+        _t0 = time.perf_counter()
         try:
             mode = self._render_mode()
             self._render_mode_last = mode
@@ -27039,7 +27134,7 @@ class EtherApeWindow:
                 self._last_render_t = now
                 self._render_tick_inner()
         except Exception: _exc('_render_tick')
-        self._schedule_render()
+        self._schedule_render((time.perf_counter() - _t0) * 1000.0)
 
     def _render_mode(self):
         """'full' when this window has the keyboard focus, 'slow' when it is on screen but another window is in
@@ -27077,7 +27172,7 @@ class EtherApeWindow:
             need = (force or self._bg is None
                     or self._bg_sig != self._ribbon_sig
                     or self._bg_view != view
-                    or (now - self._bg_t) > 0.40)
+                    or (now - self._bg_t) > self.BG_REFRESH_S)
         else:   # another window is in use: repaint the whole scene at most every 2 s
             need = force or self._bg is None or (now - self._bg_t) > 2.0
         try:
@@ -27107,15 +27202,18 @@ class EtherApeWindow:
             except Exception:
                 _exc_debug('_blit_frame')
 
+    def _paint_layout_seg(self):
+        """Light up the active half of the SANKEY | RADIAL switch."""
+        for _m, _b in getattr(self, '_layout_seg', {}).items():
+            on = (_m == self._layout_mode)
+            _b.config(bg='#14204c' if on else '#0a1028', fg='#5ef0ff' if on else '#8b99c4')
+
     def _toggle_layout(self):
         """Flip between the original radial topology and the Sankey flow view."""
         self._layout_mode = 'sankey' if self._layout_mode == 'radial' else 'radial'
         sankey = (self._layout_mode == 'sankey')
         try:
-            self._layout_btn.config(
-                text='⇉ SANKEY' if sankey else '◎ RADIAL',
-                fg='#f7cc73' if sankey else '#38b8f0',
-                highlightbackground='#5a4a1a' if sankey else '#1a3a5a')
+            self._paint_layout_seg()
         except Exception:
             _exc('_toggle_layout')
         # Reset view so the columns are framed correctly, and clear stale slots
@@ -27529,7 +27627,7 @@ class EtherApeWindow:
         if _sankey and nodes:
             nodes = {ip: dict(nd) for ip, nd in nodes.items()}
             self._sankey_layout(nodes, flows)
-        _ribbon_specs=[]; _ribbon_cols=[]; _arrow_pts=[]
+        _ribbon_specs=[]; _ribbon_cols=[]; _ribbon_edges=[]; _arrow_pts=[]
         # Keep the total particle count sane. With ~40 flows the old 10-per-flow
         # budget put 400 scatter points on screen every frame: cluttered to look
         # at and slow enough to drop frames.
@@ -27593,7 +27691,8 @@ class EtherApeWindow:
                 # Defer the polygon build — geometry rarely changes between
                 # frames, so we fingerprint it and rebuild only when it does.
                 _ribbon_specs.append((x0, y0, x1, y1, _w, _bow, _bulge))
-                _ribbon_cols.append(to_rgba(_rc, 0.14 + 0.62 * _act))
+                _ribbon_cols.append(to_rgba(_rc, 0.10 + 0.26 * _act))   # soft see-through ribbons
+                _ribbon_edges.append(to_rgba(_rc, 0.30 + 0.45 * _act))  # with a fine edge in the same colour
             segs.append([(x0,y0),(x1,y1)]); lws.append(lw); colors_e.append(col)
             segs_glow.append([(x0,y0),(x1,y1)]); lws_glow.append(lw*6); colors_e.append(col)
             flow_seg_map.append((x0,y0,x1,y1,src,dst,proto,
@@ -27654,13 +27753,25 @@ class EtherApeWindow:
             _sig = tuple((round(a,3), round(b,3), round(c,3), round(d,3),
                           round(e,3), round(f,3), round(g,3))
                          for (a,b,c,d,e,f,g) in _ribbon_specs)
-            if _sig != self._ribbon_sig:
+            # With traffic flowing, a ribbon's WIDTH (its share of bytes) changes a little on almost every frame, and
+            # every change forced a full redraw of the scene (~40 ms) instead of the cheap packet-only repaint: that is
+            # what made the motion jerky. Where the ribbons run (ends, bow) still updates at once; a width-only change
+            # waits until the background is due its regular refresh (BG_REFRESH_S), so it costs no extra full redraw.
+            _psig = tuple(x[:4] + x[5:] for x in _sig)
+            _pos_changed = (_psig != getattr(self, '_ribbon_psig', None))
+            _bg_due = (time.time() - getattr(self, '_bg_t', 0.0)) > self.BG_REFRESH_S
+            if _sig != self._ribbon_sig and (_pos_changed or _bg_due or self._ribbon_sig is None):
+                self._ribbon_psig = _psig
                 self._ribbon_cache = [self._ribbon_poly(a,b,c,d,e,bow=f,bulge=g)
                                       for (a,b,c,d,e,f,g) in _ribbon_specs]
                 self._ribbon_sig = _sig
                 self._ribbon_col.set_verts(self._ribbon_cache)
             # Colours DO change every frame (the activity fade) — but that's cheap.
             self._ribbon_col.set_facecolors(_ribbon_cols)
+            try:
+                self._ribbon_col.set_edgecolors(_ribbon_edges); self._ribbon_col.set_linewidths(0.7)
+            except Exception:
+                _exc_debug('ribbon edges')
             self._ribbon_col.set_alpha(None)   # per-face RGBA carries the fade
         else:
             self._ribbon_col.set_verts([])
@@ -27814,7 +27925,7 @@ class EtherApeWindow:
                           ha='center',va='top',fontfamily=self._label_fontfamily,
                           fontweight='bold',zorder=11,
                           bbox=dict(boxstyle='round,pad=0.08',
-                                    facecolor='#1a0000' if blk else '#020810',
+                                    facecolor='#1a0000' if blk else '#080d24',
                                     edgecolor=_bbox_ec,alpha=0.85 if blk else 0.60))
                 self._label_artists[ip] = a
         # BLOCKED markers, one per blocked host (small set, ok to recreate)
@@ -27952,7 +28063,7 @@ class EtherApeWindow:
             for ip,nd in sorted(nodes.items(),key=lambda x:x[1]['bytes'],reverse=True)[:60]:
                 b=nd['bytes']; unit='KB' if b<1e6 else 'MB'; div=1e3 if b<1e6 else 1e6
                 name=self._dns_cache.get(ip,'')
-                host_rows.append((ip, (ip,name,f"{nd['pkts']:,}",f"{b/div:.1f}{unit}",nd['proto'].upper()), nd['proto']))
+                host_rows.append((ip, (ip,name,f"{nd['pkts']:,}",f"{b/div:.1f} {unit}",'\u25cf '+nd['proto'].upper()), nd['proto']))
             # Efficient update: delete only if count changed significantly, else update in-place
             existing = self._host_tree.get_children()
             if len(existing) != len(host_rows):
@@ -27968,7 +28079,7 @@ class EtherApeWindow:
             for (src,dst,proto),fl in sorted(flows.items(),key=lambda x:x[1]['bytes'],reverse=True)[:80]:
                 b=fl['bytes']; unit='KB' if b<1e6 else 'MB'; div=1e3 if b<1e6 else 1e6
                 self._flow_tree.insert('','end',
-                    values=(src[:22],dst[:22],proto.upper(),f"{fl['pkts']:,}",f"{b/div:.1f}{unit}"),tags=(proto,))
+                    values=(src[:22],dst[:22],'\u25cf '+proto.upper(),f"{fl['pkts']:,}",f"{b/div:.1f} {unit}"),tags=(proto,))
         except Exception: _exc('_table_tick_inner')
 
     def _apply_view(self):
@@ -28146,12 +28257,12 @@ class EtherApeWindow:
         import tkinter as tk
         win = tk.Toplevel()
         win.title('Blocked Countries')
-        win.configure(bg='#050d1a')
+        win.configure(bg='#060a1c')
         win.geometry('460x420')
         win.minsize(340, 200)
 
-        BG='#050d1a'; PNL='#06101e'; ACC='#ff4444'; TICK='#6a9ab8'; GRN='#2ea043'
-        TXT='#c8dff0'
+        BG='#060a1c'; PNL='#0c1330'; ACC='#ff4444'; TICK='#8b99c4'; GRN='#2ea043'
+        TXT='#e4ebff'
 
         tk.Label(win, text='⛔  BLOCKED COUNTRIES',
                  bg=BG, fg=ACC, font=(_NM_MONO, 11,'bold')).pack(pady=(14,4))
@@ -28190,7 +28301,7 @@ class EtherApeWindow:
                 def _unblock(c=cc):
                     self._unblock_country(c)
                     _refresh()
-                tk.Button(row, text='Unblock', bg='#0a1828', fg=GRN,
+                tk.Button(row, text='Unblock', bg='#121a40', fg=GRN,
                           relief='flat', font=(_NM_MONO, 8,'bold'),
                           cursor='hand2', padx=8, pady=2,
                           activebackground=GRN, activeforeground='white',
@@ -28205,10 +28316,10 @@ class EtherApeWindow:
                  bg=BG, fg=TICK, font=(_NM_MONO, 8)).pack(side='left')
         add_var = tk.StringVar()
         add_ent = tk.Entry(add_frame, textvariable=add_var, width=6,
-                           bg='#0a1220', fg=ACC, insertbackground=ACC,
+                           bg='#0a1028', fg=ACC, insertbackground=ACC,
                            relief='flat', font=(_NM_MONO, 9,'bold'),
                            highlightthickness=1, highlightcolor=ACC,
-                           highlightbackground='#1a3a5a')
+                           highlightbackground='#28356e')
         add_ent.pack(side='left', padx=8, ipady=3)
         def _add():
             c = add_var.get().strip().upper()
@@ -28221,7 +28332,7 @@ class EtherApeWindow:
             self._block_cc_var.set(c) if hasattr(self,'_block_cc_var') else None
             threading.Thread(target=lambda: self._auto_block_country_ips(), daemon=True).start()
         add_ent.bind('<Return>', lambda e: _add())
-        tk.Button(add_frame, text='+ Block', bg='#0a1220', fg=ACC,
+        tk.Button(add_frame, text='+ Block', bg='#0a1028', fg=ACC,
                   relief='flat', font=(_NM_MONO, 8,'bold'), cursor='hand2',
                   padx=8, pady=3, activebackground=ACC, activeforeground='white',
                   command=_add).pack(side='left')
@@ -28559,7 +28670,7 @@ class EtherApeWindow:
         label = f'  {total_findings} finding{"s" if total_findings != 1 else ""}  across {len(sections)} categor{"ies" if len(sections) != 1 else "y"}'
         tk.Label(tf, text=label, bg='#0a1020', fg=count_col,
                  font=(_NM_MONO, 9, 'bold')).pack(side='left', padx=10)
-        tk.Button(tf, text='Export TXT', bg='#0d2235', fg='#38b8f0', relief='flat',
+        tk.Button(tf, text='Export TXT', bg='#14204c', fg='#5ef0ff', relief='flat',
                   font=(_NM_MONO, 8), cursor='hand2', padx=8,
                   command=lambda: self._export_analysis(title, sections, win)
                   ).pack(side='right', padx=8)
@@ -28567,7 +28678,7 @@ class EtherApeWindow:
         # Scrollable text
         fc = tk.Frame(win, bg=self._PANEL)
         fc.pack(fill='both', expand=True, padx=6, pady=6)
-        txt = tk.Text(fc, bg='#04080e', fg=self._TEXT, font=(_NM_MONO, 9),
+        txt = tk.Text(fc, bg='#080d24', fg=self._TEXT, font=(_NM_MONO, 9),
                       relief='flat', wrap='word', state='normal',
                       selectbackground='#0a3060', padx=12, pady=10)
         vsb = ttk.Scrollbar(fc, orient='vertical', command=txt.yview)
@@ -28583,8 +28694,8 @@ class EtherApeWindow:
                           font=(_NM_MONO, 9, 'bold'))
         txt.tag_configure('crit',    foreground='#ff6b6b',
                           font=(_NM_MONO, 9, 'bold'))
-        txt.tag_configure('ip',      foreground='#38b8f0')
-        txt.tag_configure('label',   foreground='#6a9ab8')
+        txt.tag_configure('ip',      foreground='#5ef0ff')
+        txt.tag_configure('label',   foreground='#8b99c4')
         txt.tag_configure('dim',     foreground='#2a4a6a')
 
         for sec_title, findings in sections:
@@ -29024,9 +29135,9 @@ class EtherApeWindow:
             bstr = ('%.1fMB'%(total_b/1e6)) if total_b>=1e6 else ('%.1fKB'%(total_b/1e3))
 
             # Build HTML
-            sev_col = {'critical':'#ff4444','high':'#ff9f43','medium':'#ffd93d','low':'#38b8f0'}
+            sev_col = {'critical':'#ff4444','high':'#ff9f43','medium':'#ffd93d','low':'#5ef0ff'}
             def badge(sev):
-                c=sev_col.get(sev,'#c8dff0')
+                c=sev_col.get(sev,'#e4ebff')
                 return ('<span style="background:'+c+'22;color:'+c+';border:1px solid '+c+'55;'
                         'display:inline-block;padding:2px 8px;border-radius:4px;'
                         'font-size:10px;font-weight:bold">'+sev.upper()+'</span>')
@@ -29065,7 +29176,7 @@ class EtherApeWindow:
                 b2 = nd2.get('bytes',0); p2 = nd2.get('pkts',0)
                 bstr2 = ('%.1fMB'%(b2/1e6)) if b2>=1e6 else ('%.1fKB'%(b2/1e3))
                 susp = ip2 in self._ids_suspicious
-                col2 = '#ff4444' if susp else '#38b8f0'
+                col2 = '#ff4444' if susp else '#5ef0ff'
                 flag = '  \u26a0' if susp else ''
                 talker_rows += ('<tr><td style="color:'+col2+'" class="mono">'+n2+flag+'</td>'
                                +'<td style="text-align:right;color:#c8dff0">'+bstr2+'</td>'
@@ -29081,10 +29192,10 @@ class EtherApeWindow:
             top_p = sorted(proto_counts.items(),key=lambda x:-x[1])[:8]
             pl = _json.dumps([p for p,_ in top_p])
             pd_ = _json.dumps([c for _,c in top_p])
-            pc = _json.dumps(['#38b8f0','#a371f7','#ff9f43','#38f0a8','#ffd93d','#ff6b6b','#00d4aa','#c8dff0'])
+            pc = _json.dumps(['#5ef0ff','#a371f7','#ff9f43','#38f0a8','#ffd93d','#ff6b6b','#00d4aa','#e4ebff'])
             tl = _json.dumps(list(tls_ver.keys()) or ['No TLS data'])
             td_ = _json.dumps(list(tls_ver.values()) or [1])
-            tc = _json.dumps(['#38f0a8','#38b8f0','#a371f7','#6a9ab8'])
+            tc = _json.dumps(['#38f0a8','#5ef0ff','#a371f7','#8b99c4'])
 
             ts_str = now.strftime('%Y-%m-%d %H:%M:%S')
             no_data_row = '<tr><td colspan="7" style="text-align:center;color:#2a4060;padding:20px">No alerts detected - traffic looks clean</td></tr>'
@@ -29239,24 +29350,24 @@ class EtherApeWindow:
         # ── Window ─────────────────────────────────────────────────────────
         win = tk.Toplevel(self.root)
         win.title('Node: ' + ip)
-        win.configure(bg='#050d1a')
+        win.configure(bg='#060a1c')
         win.geometry('520x560')
         win.resizable(False, False)
         win.lift(); win.focus_force()
 
-        ACC = '#38b8f0'; RED = '#ff4444'; GRN = '#38f0a8'
-        BG = '#050d1a'; PNL = '#060f1c'; TICK = '#6a9ab8'; TEXT = '#c8dff0'
+        ACC = '#5ef0ff'; RED = '#ff4444'; GRN = '#38f0a8'
+        BG = '#060a1c'; PNL = '#0c1330'; TICK = '#8b99c4'; TEXT = '#e4ebff'
 
         # Header
-        hdr = tk.Frame(win, bg='#020810', height=48)
+        hdr = tk.Frame(win, bg='#080d24', height=48)
         hdr.pack(fill='x'); hdr.pack_propagate(False)
         tk.Frame(win, bg=ACC, height=2).pack(fill='x')
         hostname = self._dns_cache.get(ip, '')
         title = hostname if hostname and hostname != ip else ip
-        tk.Label(hdr, text='  ⊙  ' + title, bg='#020810', fg=ACC,
+        tk.Label(hdr, text='  ⊙  ' + title, bg='#080d24', fg=ACC,
                  font=(_NM_MONO, 11, 'bold')).pack(side='left', padx=14, pady=12)
         if hostname and hostname != ip:
-            tk.Label(hdr, text=ip, bg='#020810', fg=TICK,
+            tk.Label(hdr, text=ip, bg='#080d24', fg=TICK,
                      font=(_NM_MONO, 9)).pack(side='left', pady=14)
 
         # ── Firewall section ───────────────────────────────────────────────
@@ -29339,13 +29450,13 @@ class EtherApeWindow:
         if _is_private(ip):
             status_var.set('Private/local IP — firewall blocking not recommended')
             block_btn = tk.Button(fw_frame, text='⛔ Block', state='disabled',
-                                   bg='#0a1828', fg='#2a4060',
+                                   bg='#121a40', fg='#2a4060',
                                    relief='flat', font=(_NM_MONO, 9, 'bold'),
                                    padx=16, pady=6, bd=0,
                                    highlightthickness=1, highlightbackground='#1a3050')
         else:
             block_btn = tk.Button(fw_frame, text='⛔ Block', command=_toggle_firewall,
-                                   bg='#0a1828', fg=RED,
+                                   bg='#121a40', fg=RED,
                                    activebackground=RED, activeforeground='#000',
                                    relief='flat', font=(_NM_MONO, 9, 'bold'),
                                    cursor='hand2', padx=16, pady=6, bd=0,
@@ -29457,7 +29568,7 @@ class EtherApeWindow:
 
         # Close button
         tk.Button(win, text='  Close  ', command=win.destroy,
-                  bg='#0a1828', fg=TICK, relief='flat',
+                  bg='#121a40', fg=TICK, relief='flat',
                   font=(_NM_MONO, 9), cursor='hand2',
                   padx=12, pady=6).pack(pady=10)
 
@@ -29508,23 +29619,23 @@ class EtherApeWindow:
         tk = self._tk
         win = tk.Toplevel(self.root)
         win.title('Honeypot')
-        win.configure(bg='#050d1a')
+        win.configure(bg='#060a1c')
         win.geometry('760x560')
 
-        hdr = tk.Frame(win, bg='#0a1828', height=42); hdr.pack(fill='x')
+        hdr = tk.Frame(win, bg='#121a40', height=42); hdr.pack(fill='x')
         hdr.pack_propagate(False)
-        tk.Label(hdr, text='  \U0001f36f  HONEYPOT', bg='#0a1828', fg='#38f0a8',
+        tk.Label(hdr, text='  \U0001f36f  HONEYPOT', bg='#121a40', fg='#38f0a8',
                  font=(_NM_MONO, 11, 'bold')).pack(side='left', padx=8, pady=8)
         state = tk.StringVar(value='stopped')
-        tk.Label(hdr, textvariable=state, bg='#0a1828', fg='#6a9ab8',
+        tk.Label(hdr, textvariable=state, bg='#121a40', fg='#8b99c4',
                  font=(_NM_MONO, 9)).pack(side='left', padx=8)
         tk.Frame(win, bg='#38f0a8', height=2).pack(fill='x')
 
-        opts = tk.Frame(win, bg='#050d1a'); opts.pack(fill='x', padx=10, pady=8)
+        opts = tk.Frame(win, bg='#060a1c'); opts.pack(fill='x', padx=10, pady=8)
         autoblock = tk.BooleanVar(value=False)
         tk.Checkbutton(opts, text='Auto-block after 2 hits',
-                       variable=autoblock, bg='#050d1a', fg='#ff9f43',
-                       selectcolor='#0a1828', activebackground='#050d1a',
+                       variable=autoblock, bg='#060a1c', fg='#ff9f43',
+                       selectcolor='#121a40', activebackground='#060a1c',
                        activeforeground='white', font=(_NM_MONO, 8),
                        bd=0, highlightthickness=0).pack(side='left')
         tarpit_var = tk.BooleanVar(value=_NM_HP_TARPIT['on'])
@@ -29536,13 +29647,13 @@ class EtherApeWindow:
                 hp._tarpit_enabled = _NM_HP_TARPIT['on']
         tk.Checkbutton(opts, text='Tarpit (stall connections)',
                        variable=tarpit_var, command=_toggle_tarpit,
-                       bg='#050d1a', fg='#38f0a8',
-                       selectcolor='#0a1828', activebackground='#050d1a',
+                       bg='#060a1c', fg='#38f0a8',
+                       selectcolor='#121a40', activebackground='#060a1c',
                        activeforeground='white', font=(_NM_MONO, 8),
                        bd=0, highlightthickness=0).pack(side='left', padx=(14, 0))
         # Show what is actually bound, both protocols, with the service names -
         # a truncated list of bare TCP numbers hid the UDP decoys entirely.
-        _ports_lbl = tk.Label(opts, text='', bg='#050d1a', fg='#6a9ab8',
+        _ports_lbl = tk.Label(opts, text='', bg='#060a1c', fg='#8b99c4',
                               font=(_NM_MONO, 8), justify='left', anchor='w')
         _ports_lbl.pack(side='left', padx=12, fill='x', expand=True)
 
@@ -29563,7 +29674,7 @@ class EtherApeWindow:
         _ports_lbl.config(text=_fmt_ports())
 
         # Table on the left, threat radar on the right (toggleable).
-        mid = tk.Frame(win, bg='#050d1a')
+        mid = tk.Frame(win, bg='#060a1c')
         mid.pack(fill='both', expand=True)
 
         cols = ('time', 'ip', 'kind', 'port', 'service', 'tool', 'hits', 'sample')
@@ -29581,23 +29692,23 @@ class EtherApeWindow:
                           highlightbackground='#12283e')
         # packed only when toggled on, so the table keeps the full width by default
 
-        info = tk.Label(win, text='', bg='#050d1a', fg='#6a9ab8', anchor='w',
+        info = tk.Label(win, text='', bg='#060a1c', fg='#8b99c4', anchor='w',
                         font=(_NM_MONO, 8))
         info.pack(fill='x', padx=10)
 
         # AI assessment pane (collapsed until used)
-        ai_frame = tk.Frame(win, bg='#0a1828', highlightthickness=1,
+        ai_frame = tk.Frame(win, bg='#121a40', highlightthickness=1,
                             highlightbackground='#1f4a6a')
-        ai_head = tk.Frame(ai_frame, bg='#0a1828'); ai_head.pack(fill='x')
-        tk.Label(ai_head, text='\u2726 AI ASSESSMENT', bg='#0a1828', fg='#b388ff',
+        ai_head = tk.Frame(ai_frame, bg='#121a40'); ai_head.pack(fill='x')
+        tk.Label(ai_head, text='\u2726 AI ASSESSMENT', bg='#121a40', fg='#b388ff',
                  font=(_NM_MONO, 8, 'bold')).pack(side='left', padx=8, pady=3)
-        ai_txt = tk.Text(ai_frame, bg='#0a1828', fg='#c8dff0', font=(_NM_MONO, 8),
+        ai_txt = tk.Text(ai_frame, bg='#121a40', fg='#e4ebff', font=(_NM_MONO, 8),
                          relief='flat', wrap='word', height=7, padx=8, pady=6,
                          highlightthickness=0)
         ai_txt.pack(fill='both', expand=True)
         ai_txt.configure(state='disabled')
 
-        def show_ai(msg, colour='#c8dff0'):
+        def show_ai(msg, colour='#e4ebff'):
             ai_frame.pack(fill='x', padx=10, pady=(6, 0))
             ai_txt.configure(state='normal', fg=colour)
             ai_txt.delete('1.0', 'end'); ai_txt.insert('1.0', msg)
@@ -29611,7 +29722,7 @@ class EtherApeWindow:
                 return
             show_ai('Analysing %d hit(s)\u2026 this uses your configured AI '
                     'provider (local Ollama by default).' % hp.summary()['total'],
-                    '#6a9ab8')
+                    '#8b99c4')
             # The worker thread must not touch Tk directly (after() from a
             # non-main thread is unreliable). It drops the result into a holder
             # that the periodic tick() renders on the GUI thread.
@@ -29796,7 +29907,7 @@ class EtherApeWindow:
                               cx + _m.cos(a) * (R + 12), cy + _m.sin(a) * (R + 12),
                               fill=G, tags='static')
             c.create_oval(cx - 4, cy - 4, cx + 4, cy + 4,
-                          fill='#38b8f0', outline='', tags='static')
+                          fill='#5ef0ff', outline='', tags='static')
             c.create_oval(cx - 9, cy - 9, cx + 9, cy + 9,
                           outline='#1c5f80', tags='static')
 
@@ -29824,11 +29935,11 @@ class EtherApeWindow:
                 c.create_oval(bx - sz / 2, by - sz / 2, bx + sz / 2, by + sz / 2,
                               fill=col, outline='', tags='blip')
                 self._hp_radar_blips.append((bx, by, sz + 4, t))
-            c.create_text(8, 10, anchor='w', fill='#6a9ab8', font=(_NM_MONO, 8),
+            c.create_text(8, 10, anchor='w', fill='#8b99c4', font=(_NM_MONO, 8),
                           text='honeypot sources: %d' % feed.get('total', 0),
                           tags='blip')
             if nolocated:
-                c.create_text(8, 24, anchor='w', fill='#6a9ab8', font=(_NM_MONO, 8),
+                c.create_text(8, 24, anchor='w', fill='#8b99c4', font=(_NM_MONO, 8),
                               text='%d awaiting geo' % nolocated, tags='blip')
 
         def _radar_sweep(cx, cy, R):
@@ -29983,17 +30094,17 @@ class EtherApeWindow:
                         except Exception:
                             pass
 
-        bar = tk.Frame(win, bg='#050d1a'); bar.pack(fill='x', padx=8, pady=8)
+        bar = tk.Frame(win, bg='#060a1c'); bar.pack(fill='x', padx=8, pady=8)
         for txt, cmd, col in (('\u25b6  START', start, '#38f0a8'),
                               ('\u25a0  STOP', stop, '#ff9f43'),
                               ('\U0001f9ea TEST', run_test, '#ff6bff'),
-                              ('\u27f3  REFRESH', refresh, '#38b8f0'),
+                              ('\u27f3  REFRESH', refresh, '#5ef0ff'),
                               ('\u26d4  BLOCK SELECTED', block_sel, '#ff4444'),
-                              ('\u25c9  RADAR', toggle_radar, '#38b8f0'),
+                              ('\u25c9  RADAR', toggle_radar, '#5ef0ff'),
                               ('\u2726  AI ANALYSIS', run_ai, '#b388ff'),
-                              ('\u2715  CLOSE', win.destroy, '#6a9ab8')):
-            tk.Button(bar, text=txt, command=cmd, bg='#0a1828', fg=col,
-                      activebackground='#16324a', activeforeground='white',
+                              ('\u2715  CLOSE', win.destroy, '#8b99c4')):
+            tk.Button(bar, text=txt, command=cmd, bg='#121a40', fg=col,
+                      activebackground='#28356e', activeforeground='white',
                       relief='flat', font=(_NM_MONO, 8, 'bold'), cursor='hand2',
                       bd=0, highlightthickness=1, highlightbackground=col,
                       padx=9, pady=4).pack(side='left', padx=(0, 6))
@@ -30007,7 +30118,7 @@ class EtherApeWindow:
                 self._hp_ai_pending = None
                 _txt, _err = pend
                 show_ai(_txt if _txt else (_err or 'AI analysis failed.'),
-                        '#c8dff0' if _txt else '#ff9f43')
+                        '#e4ebff' if _txt else '#ff9f43')
             refresh()
             win.after(2500, tick)
         win.after(2500, tick)
@@ -30023,31 +30134,31 @@ class EtherApeWindow:
         tk = self._tk
         win = tk.Toplevel(self.root)
         win.title('Firewall rules')
-        win.configure(bg='#050d1a')
+        win.configure(bg='#060a1c')
         win.geometry('720x520')
 
-        hdr = tk.Frame(win, bg='#0a1828', height=42); hdr.pack(fill='x')
+        hdr = tk.Frame(win, bg='#121a40', height=42); hdr.pack(fill='x')
         hdr.pack_propagate(False)
-        tk.Label(hdr, text='  \u26d4  FIREWALL RULES', bg='#0a1828', fg='#ff9f43',
+        tk.Label(hdr, text='  \u26d4  FIREWALL RULES', bg='#121a40', fg='#ff9f43',
                  font=(_NM_MONO, 11, 'bold')).pack(side='left', padx=8, pady=8)
         sub = tk.StringVar(value='reading\u2026')
-        tk.Label(hdr, textvariable=sub, bg='#0a1828', fg='#6a9ab8',
+        tk.Label(hdr, textvariable=sub, bg='#121a40', fg='#8b99c4',
                  font=(_NM_MONO, 8)).pack(side='left', padx=8)
         tk.Frame(win, bg='#ff9f43', height=2).pack(fill='x')
 
-        search_bar = tk.Frame(win, bg='#050d1a'); search_bar.pack(fill='x', padx=8, pady=(8, 0))
-        tk.Label(search_bar, text='\U0001f50d', bg='#050d1a', fg='#6a9ab8',
+        search_bar = tk.Frame(win, bg='#060a1c'); search_bar.pack(fill='x', padx=8, pady=(8, 0))
+        tk.Label(search_bar, text='\U0001f50d', bg='#060a1c', fg='#8b99c4',
                  font=(_NM_MONO, 9)).pack(side='left', padx=(0, 4))
         search_var = tk.StringVar(value='')
-        search_entry = tk.Entry(search_bar, textvariable=search_var, bg='#0a1828',
-                                 fg='#c8dff0', insertbackground='#c8dff0', relief='flat',
+        search_entry = tk.Entry(search_bar, textvariable=search_var, bg='#121a40',
+                                 fg='#e4ebff', insertbackground='#e4ebff', relief='flat',
                                  font=(_NM_MONO, 9))
         search_entry.pack(side='left', fill='x', expand=True, ipady=3)
         match_var = tk.StringVar(value='')
-        tk.Label(search_bar, textvariable=match_var, bg='#050d1a', fg='#6a9ab8',
+        tk.Label(search_bar, textvariable=match_var, bg='#060a1c', fg='#8b99c4',
                  font=(_NM_MONO, 8)).pack(side='left', padx=(6, 0))
 
-        body = tk.Frame(win, bg='#050d1a'); body.pack(fill='both', expand=True)
+        body = tk.Frame(win, bg='#060a1c'); body.pack(fill='both', expand=True)
         cols = ('ip', 'name', 'rule', 'state')
         tree = self._ttk.Treeview(body, columns=cols, show='headings', height=16,
                                   style='EA.Treeview') \
@@ -30063,7 +30174,7 @@ class EtherApeWindow:
         tree.configure(yscrollcommand=sb.set)
         sb.pack(side='right', fill='y'); tree.pack(fill='both', expand=True, padx=8, pady=8)
 
-        info = tk.Label(win, text='', bg='#050d1a', fg='#6a9ab8', anchor='w',
+        info = tk.Label(win, text='', bg='#060a1c', fg='#8b99c4', anchor='w',
                         justify='left', font=(_NM_MONO, 8), wraplength=690)
         info.pack(fill='x', padx=10, pady=(0, 6))
 
@@ -30132,7 +30243,7 @@ class EtherApeWindow:
                                else 'Restart with sudo.'))
             if not ips and not rules:
                 msgs.append('This app has not written any firewall rules.')
-            info.config(text='\n'.join(msgs), fg='#ff9f43' if msgs else '#6a9ab8')
+            info.config(text='\n'.join(msgs), fg='#ff9f43' if msgs else '#8b99c4')
             # keep the toolbar counter honest with what the firewall reports
             try:
                 self._blocked_ips = set(ips)
@@ -30150,12 +30261,12 @@ class EtherApeWindow:
                     _nm_firewall_unblock(vals[0])
             load()
 
-        bar = tk.Frame(win, bg='#050d1a'); bar.pack(fill='x', padx=8, pady=(0, 10))
-        for txt, cmd, col in (('\u27f3  REFRESH', load, '#38b8f0'),
+        bar = tk.Frame(win, bg='#060a1c'); bar.pack(fill='x', padx=8, pady=(0, 10))
+        for txt, cmd, col in (('\u27f3  REFRESH', load, '#5ef0ff'),
                               ('\u2717  UNBLOCK SELECTED', unblock, '#ff4444'),
-                              ('\u2715  CLOSE', win.destroy, '#6a9ab8')):
-            tk.Button(bar, text=txt, command=cmd, bg='#0a1828', fg=col,
-                      activebackground='#16324a', activeforeground='white',
+                              ('\u2715  CLOSE', win.destroy, '#8b99c4')):
+            tk.Button(bar, text=txt, command=cmd, bg='#121a40', fg=col,
+                      activebackground='#28356e', activeforeground='white',
                       relief='flat', font=(_NM_MONO, 8, 'bold'), cursor='hand2',
                       bd=0, highlightthickness=1, highlightbackground=col,
                       padx=10, pady=4).pack(side='left', padx=(0, 6))
@@ -30740,8 +30851,8 @@ class EtherApeWindow:
         win.title('WHOIS ' + ip)
         win.configure(bg=self._PANEL)
         win.geometry('580x480')
-        txt = tk.Text(win, bg='#04101a', fg='#c8dff0', font=(_NM_MONO, 9),
-                      wrap='word', borderwidth=0, insertbackground='#c8dff0')
+        txt = tk.Text(win, bg='#04101a', fg='#e4ebff', font=(_NM_MONO, 9),
+                      wrap='word', borderwidth=0, insertbackground='#e4ebff')
         vsb = ttk.Scrollbar(win, orient='vertical', command=txt.yview)
         txt.configure(yscrollcommand=vsb.set)
         vsb.pack(side='right', fill='y')
@@ -31248,6 +31359,22 @@ class _EtherApeGeoWindow:
                            bg='#010810', fg=TICK, selectcolor='#0a1828',
                            activebackground='#010810', font=(_NM_MONO, 8),
                            relief='flat').pack(side='left', padx=6)
+        # How many flows to draw: the busiest N by bytes. 300 (the far right) means all of them.
+        self._geo_topn = tk.IntVar(value=300)
+        self._geo_topn_lbl = tk.StringVar(value='ALL')
+        tk.Label(tb, text='  Flows', bg='#010810', fg=TICK, font=(_NM_MONO, 8)).pack(side='left', padx=(10, 2))
+
+        def _topn_moved(_v=None):
+            n = int(self._geo_topn.get())
+            self._geo_topn_lbl.set('ALL' if n >= 300 else 'top %d' % n)
+            self._redraw_map()
+        self._geo_topn_scale = tk.Scale(tb, from_=5, to=300, resolution=5, orient='horizontal', showvalue=False,
+                                        variable=self._geo_topn, command=_topn_moved, length=140, sliderlength=14,
+                                        width=10, bd=0, highlightthickness=0, bg='#010810', troughcolor='#0a1828',
+                                        activebackground=ACC, fg=TICK)
+        self._geo_topn_scale.pack(side='left', padx=2)
+        tk.Label(tb, textvariable=self._geo_topn_lbl, bg='#010810', fg=ACC, width=7, anchor='w',
+                 font=(_NM_MONO, 8, 'bold')).pack(side='left')
 
         # Alert frame packed FIRST (side='bottom') so it doesn't steal space from map
         self._geo_alert_frame = tk.Frame(self.root, bg='#1a0000', height=0)
@@ -31741,7 +31868,15 @@ class _EtherApeGeoWindow:
         max_fb = max((fl.get('bytes', 1) for fl in flows.values()), default=1) or 1
 
         if self._arcs_var.get():
-            for (fsrc, fdst, proto), fl in flows.items():
+            _items = list(flows.items())
+            try:
+                _n = int(self._geo_topn.get())
+            except Exception:
+                _n = 300
+            if _n < 300:                        # the Flows slider: only the busiest N
+                _items.sort(key=lambda kv: kv[1].get('bytes', 0), reverse=True)
+                _items = _items[:_n]
+            for (fsrc, fdst, proto), fl in _items:
                 if fsrc not in ip_pos or fdst not in ip_pos:
                     continue
                 x1, y1 = ip_pos[fsrc]; x2, y2 = ip_pos[fdst]
@@ -37041,7 +37176,7 @@ class UserGuideWindow:
                    '⏻ RE-ENABLE CONNECTION — to restore the connection.'),
             ('h2', 'Where to find it'),
             ('bullet', 'EtherApe window — on the toolbar, to the right of the timeline scrubber'),
-            ('bullet', 'Web 3D view — bottom right, immediately right of the protocol legend'),
+            ('bullet', 'Web 3D view — KILL CONNECTION, at the right-hand end of the dock along the bottom'),
             ('h2', 'How it works'),
             ('p',  'It adds a pair of Windows Firewall block rules named NM_KILLSWITCH (one '
                    'inbound, one outbound, all profiles). Restoring the connection deletes them. '
@@ -37283,7 +37418,7 @@ class UserGuideWindow:
 
         'world': [
             ('h1', 'World View'),
-            ('p',  'Press \U0001f310 WORLD VIEW in the 3D view (bottom right, beside ATTACK SIM '
+            ('p',  'Press \U0001f310 WORLD VIEW in the 3D view (in the dock along the bottom, with ATTACK SIM '
                    'and KILL CONNECTION) to wrap the network around a globe. Every host sits on '
                    'the planet at its real location, with traffic arcing between them.'),
             ('h2', 'What you are looking at'),
@@ -37316,7 +37451,7 @@ class UserGuideWindow:
                    'one by one \u2014 so you can see exactly what a real attack would look '
                    'like across every view.'),
             ('h2', 'Where to start it'),
-            ('bullet', '3D view \u2014 \u2620 ATTACK SIM, bottom right'),
+            ('bullet', '3D view \u2014 \u2620 ATTACK SIM, in the dock along the bottom'),
             ('bullet', 'Top Flow Talkers page \u2014 \u2620 ATTACK SIM in the toolbar'),
             ('bullet', 'EtherApe window \u2014 \u2620 ATTACK SIM on the toolbar'),
             ('p',  'All three drive the same drill, so starting it in one place shows it '
@@ -37726,7 +37861,7 @@ class UserGuideWindow:
             ('bullet', 'Layers: your connection, each access point, or 2.4 vs 5 GHz of your network side by side; '
                        'tick "3D view" for a point cloud across floors; "Export PNG…" saves the picture.'),
             ('h2', 'Wi-Fi in the 3D view'),
-            ('p',  'The 3D page has a ≈ WI-FI button in its toolbar. AIR mode puts you at the centre and every access '
+            ('p',  'The 3D page has a ≈ WI-FI button in the dock along its bottom edge. AIR mode puts you at the centre and every access '
                    'point around you as an orb: distance is signal strength, height is band, colour is dBm; '
                    'amber rings are disturbed paths, red rings new or suspicious networks. SURVEY mode shows your '
                    'walk-around samples as a coloured volume, floor by floor. Drag to orbit, scroll to zoom, hover '
@@ -38344,7 +38479,18 @@ def _nm_guide_strip_boards(items):
 _wn2 = UserGuideWindow.CONTENT.get('whatsnew') or []
 for _i, _it in enumerate(_wn2):
     if _it[0] == 'h2':
-        _wn2[_i:_i] = [('h2', 'Devices: Rescan network'),
+        _wn2[_i:_i] = [('h2', '3D view: new look'),
+                       ('bullet', 'The 3D view (3D VIEW in the Topology window, or /3d) has been redrawn. This PC sits in the middle with a glowing core. '
+                                  'Every other host is on an orbit around it: the busier the host, the closer in; devices on your own network take the inner ring. '
+                                  'Each host has a line down to a ring-shaped floor so you can judge depth, and keeps its place while it stays on screen.'),
+                       ('bullet', 'Labels are now small pills beside the host with its traffic. Only the busiest hosts, anything blocked or suspicious, this PC, '
+                                  'and the host under the mouse or selected get one, and labels never sit on top of each other.'),
+                       ('bullet', 'Left: Protocol mix, a ring chart and a list of the protocols in use. Click a protocol to hide its flows and hosts, click again to bring them back. '
+                                  'Right: a card for the host under the mouse (or the one you clicked), the six busiest hosts (click one to select it) and Visited hosts.'),
+                       ('bullet', 'Top bar: host, flow and packet counts, VPN state, and the view switches (TOP slider, LABELS, GRID, BLOCKED, Bloom, SPREAD, RESET, fullscreen). '
+                                  'BLOCKED now really hides or shows blocked hosts. Bottom dock: FIREWALL, WORLD VIEW, TOP TALKERS, WI-FI, ATTACK SIM and KILL CONNECTION. '
+                                  'The AI QUERY button is bottom right. Nothing was removed.'),
+                       ('h2', 'Devices: Rescan network'),
                        ('bullet', 'Monitor \u2192 Devices has a new Rescan network button. It pings every address on your network, waits for '
                                   'Windows to confirm who really answered, adds anything new (a new Apple TV, say) and marks what no longer answers '
                                   'as offline (an Xbox that was switched off). The map also refreshes by itself every few seconds, but that only reads '
@@ -46273,6 +46419,8 @@ class _ThreeDServer:
             _vpn0 = _nm_vpn_status()   # VPN state is independent of capture
             handler._json(200, {'nodes': _an, 'flows': _af, 'tick': 0,
                                 'open': bool(_an),
+                                'self_ip': _nm_self_ip_cached(),
+                                'self_ips': _nm_self_ips_cached(),
                                 'home': _nm_home_geo(),
                                 'block_events': _nm_block_events_geo({}),
                                 'attack_sim': _NM_ATTACK_ON,
@@ -46549,6 +46697,8 @@ class _ThreeDServer:
             'vpn_active': vpn_active,
             'vpn': _vpn,          # provider / iface / reason / rx_rate
             'home': _nm_home_geo(),   # this PC's real location (LAN hosts sit here)
+            'self_ip': _nm_self_ip_cached(),   # this PC's own address: the 3D page puts it in the middle
+            'self_ips': _nm_self_ips_cached(), # all of them (Wi-Fi and Ethernet are both this PC)
 
             'visited_urls': visited_urls[:120],
             'dns_map': dns_map,
@@ -46668,7 +46818,7 @@ class _ThreeDServer:
 <html>
 <head>
 <meta charset="utf-8">
-<title>EtherApe 3D</title>
+<title>NetSentinel 3D Topology</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:@@3DBG@@;color:@@3DTEXT2@@;font-family:monospace;overflow:hidden}
@@ -46783,6 +46933,158 @@ html,body{max-width:100%;overflow-x:hidden}
   #worldbtn{bottom:52px;right:8px}
   #atkbtn{right:112px}
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   NS skin (glass chrome). Layered AFTER the original rules above on purpose:
+   every id the script uses is still there, only its look and place changed.
+   ══════════════════════════════════════════════════════════════════════════ */
+:root{
+  --ns-acc:@@3DACCENT@@; --ns-ink:#e4ebff; --ns-ink2:#8b99c4; --ns-ink3:#56628a;
+  --ns-line:rgba(150,178,255,.15); --ns-line2:rgba(150,178,255,.28);
+  --ns-glass:rgba(11,16,38,.78);
+  --ns-amber:#ffb454; --ns-red:#ff5a6e; --ns-blue:#5aa2ff; --ns-violet:#a98bff;
+  --ns-disp:Bahnschrift,"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+  --ns-mono:"Cascadia Mono",Consolas,"DejaVu Sans Mono",monospace;
+  --ns-ptop:70px;
+}
+body{background:#050812;color:var(--ns-ink2);font-family:var(--ns-mono)}
+/* No backdrop blur on purpose: the 3D canvas behind these panels repaints every frame, so a blur would be
+   recomputed every frame too. A more opaque panel gives the same read for no GPU cost. */
+.ns-glass{background:var(--ns-glass);border:1px solid var(--ns-line);border-radius:14px;
+  box-shadow:0 10px 36px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.05)}
+.ns-cap{font:600 10px var(--ns-disp);letter-spacing:.2em;text-transform:uppercase;color:var(--ns-ink3)}
+.ns-vig{position:fixed;inset:0;pointer-events:none;z-index:1;
+  background:radial-gradient(ellipse at center,transparent 58%,rgba(2,4,12,.62) 100%)}
+
+/* ── top bar ── */
+#nsTop{position:fixed;top:12px;left:14px;right:14px;z-index:9;display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;pointer-events:none}
+#nsTop > *{pointer-events:auto}
+.ns-brand{display:flex;align-items:center;gap:11px;padding:7px 15px 7px 9px;white-space:nowrap}
+.ns-back{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;color:var(--ns-acc);text-decoration:none;
+  border:1px solid var(--ns-line2);background:rgba(255,255,255,.04);font-size:15px;font-family:var(--ns-disp)}
+.ns-back:hover{background:rgba(255,255,255,.10)}
+.ns-brand h1{font:600 14px var(--ns-disp);letter-spacing:.07em;color:var(--ns-ink)}
+.ns-brand h1 span{color:var(--ns-ink2);font-weight:400}
+#bldid{font:400 9px var(--ns-mono);color:var(--ns-ink3);opacity:1}
+@media (max-width:1700px){#bldid{display:none}}
+#hud{position:static;padding:9px 14px;background:var(--ns-glass);border:1px solid var(--ns-line);border-radius:14px;
+  display:flex;align-items:center;gap:9px;font-size:11px;color:var(--ns-ink2);white-space:nowrap;pointer-events:auto}
+#hud b{color:var(--ns-ink);font-weight:600}
+#hud .warn{color:var(--ns-red)} #hud .warn b{color:var(--ns-red)}
+.ns-pulse{width:8px;height:8px;border-radius:50%;background:var(--ns-acc);animation:nspl 2s infinite}
+@keyframes nspl{0%{box-shadow:0 0 0 0 rgba(120,255,200,.5)}70%{box-shadow:0 0 0 9px rgba(120,255,200,0)}100%{box-shadow:0 0 0 0 rgba(120,255,200,0)}}
+.ns-dotsep{color:var(--ns-ink3)}
+#vpnbanner{position:static !important;transform:none !important;padding:9px 14px !important;border-radius:14px !important;
+  font:600 10px var(--ns-disp) !important;letter-spacing:.14em !important;opacity:1 !important;pointer-events:auto !important;}
+#toolbar{position:static;margin-left:auto;padding:4px;background:var(--ns-glass);border:1px solid var(--ns-line);border-radius:14px;
+  display:flex;flex-wrap:wrap;align-items:center;gap:2px;}
+.tbtn{appearance:none;border:0;background:transparent;color:var(--ns-ink2);font:600 10px var(--ns-disp);letter-spacing:.13em;
+  text-transform:uppercase;padding:8px 10px;border-radius:9px;cursor:pointer;white-space:nowrap;pointer-events:all}
+.tbtn:hover{color:var(--ns-ink);background:rgba(255,255,255,.06)}
+.tbtn.active{color:var(--ns-acc);background:rgba(255,255,255,.07);border:0;box-shadow:inset 0 0 0 1px var(--ns-line2)}
+.tbtn:focus-visible,#nsDock button:focus-visible,.ns-back:focus-visible,.ns-pr:focus-visible,.ns-tk:focus-visible{outline:2px solid var(--ns-acc);outline-offset:2px}
+.ns-tsep{width:1px;height:20px;background:var(--ns-line);margin:0 4px}
+.ns-topn{display:flex;align-items:center;gap:8px;padding:0 10px;font:600 10px var(--ns-disp);letter-spacing:.16em;color:var(--ns-ink3)}
+#topN-sl{width:84px;accent-color:var(--ns-acc);cursor:pointer}
+#topN-val{color:var(--ns-ink) !important;font:600 10px var(--ns-disp) !important;min-width:28px !important}
+#spread-row{gap:8px;padding:0 8px}
+#spread-row label{font:600 10px var(--ns-disp);letter-spacing:.14em;color:var(--ns-ink3);text-transform:uppercase}
+#spread-sl{width:84px;accent-color:var(--ns-acc)}
+#spread-val{color:var(--ns-ink);font:600 10px var(--ns-disp)}
+
+/* ── left: protocol mix ── */
+#nsMix{position:fixed;left:14px;top:var(--ns-ptop);width:284px;z-index:9;padding:15px 14px 12px;
+  max-height:calc(100vh - var(--ns-ptop) - 96px);overflow:hidden auto;scrollbar-width:thin;scrollbar-color:#2a3a6a transparent}
+.ns-donutwrap{display:flex;align-items:center;gap:14px;margin:11px 2px 9px}
+#nsDonut{width:96px;height:96px;flex:none}
+.ns-big{font:600 23px var(--ns-disp);letter-spacing:.02em;color:var(--ns-ink)}
+.ns-big small{display:block;font:400 10px var(--ns-mono);color:var(--ns-ink2);margin-top:2px}
+#legend{position:static;display:flex;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:2px;padding:0;border:0;border-radius:0;
+  background:none;max-height:none;overflow:visible;-webkit-backdrop-filter:none;backdrop-filter:none;font-size:11px;color:var(--ns-ink2)}
+.ns-pr{display:grid;grid-template-columns:10px 1fr auto;align-items:center;gap:9px;padding:6px 8px;border-radius:8px;cursor:pointer;
+  border:0;background:none;text-align:left;font:inherit;color:inherit;width:100%}
+.ns-pr:hover{background:rgba(255,255,255,.05)}
+.ns-pr.off{opacity:.36}
+.ns-pr i{width:8px;height:8px;border-radius:50%;box-shadow:0 0 9px currentColor;background:currentColor}
+.ns-pr .n{font:600 11px var(--ns-disp);letter-spacing:.1em;color:var(--ns-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.ns-pr .n em{font:400 10px var(--ns-mono);color:var(--ns-ink3);letter-spacing:0;margin-left:7px;font-style:normal}
+.ns-pr .p{color:var(--ns-ink2);font-size:11px;font-variant-numeric:tabular-nums}
+.ns-pr .p s{text-decoration:none;color:var(--ns-ink3);margin-left:5px}
+.ns-idle{padding:8px 8px 2px;color:var(--ns-ink3);font-size:10px;line-height:1.6}
+
+/* ── right column: host card, busiest hosts, visited hosts ── */
+#nsSide{position:fixed;right:14px;top:var(--ns-ptop);width:292px;z-index:10;display:flex;flex-direction:column;gap:10px;
+  max-height:calc(100vh - var(--ns-ptop) - 84px);pointer-events:none}
+#nsSide > *{pointer-events:auto}
+#info{position:static;width:auto;padding:14px 15px;background:var(--ns-glass);border:1px solid var(--ns-line);border-radius:14px;
+  font-size:11px;color:var(--ns-ink2);pointer-events:none;flex:none;box-shadow:0 10px 36px rgba(0,0,0,.42)}
+.ns-hh{display:flex;align-items:center;gap:11px;margin-top:9px}
+.ns-flag{font-size:27px;line-height:1;flex:none}
+.ns-name{font:600 16px var(--ns-disp);letter-spacing:.03em;color:var(--ns-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:210px}
+#info .ip{color:var(--ns-ink2);font-size:11px;font-weight:400;margin:2px 0 0}
+.ns-tags{display:flex;gap:6px;margin:11px 0 9px;flex-wrap:wrap}
+.ns-tag,#info .blocked-badge,#info .susp-badge{font:600 9px var(--ns-disp);letter-spacing:.13em;padding:4px 8px;border-radius:99px;
+  border:1px solid currentColor;text-transform:uppercase;margin:0}
+#info .blocked-badge{color:var(--ns-red)} #info .susp-badge{color:var(--ns-amber)}
+#info .row{margin:4px 0} #info .key{color:var(--ns-ink3)} #info .val{color:var(--ns-ink);max-width:180px}
+.ns-bar{height:5px;border-radius:3px;background:rgba(255,255,255,.07);margin:11px 0 3px;overflow:hidden}
+.ns-bar i{display:block;height:100%;width:0;border-radius:3px;background:var(--ns-acc);transition:width .4s}
+.ns-flowcap{border-top:1px solid var(--ns-line);margin-top:10px;padding-top:9px}
+#iFlows{font-size:10px;max-height:104px;overflow:hidden;margin-top:5px}
+#nsTalk{padding:13px 15px 9px;flex:none}
+.ns-tk{display:grid;grid-template-columns:20px 1fr auto;align-items:center;gap:3px 8px;padding:5px 0;font-size:11px;cursor:pointer;
+  border:0;background:none;width:100%;text-align:left;font-family:inherit;color:var(--ns-ink)}
+.ns-tk:hover .nm{color:var(--ns-acc)}
+.ns-tk .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ns-tk .nm span{color:var(--ns-ink3)}
+.ns-tk .b{color:var(--ns-ink2);font-variant-numeric:tabular-nums}
+.ns-tk .mini{grid-column:2/4;height:3px;border-radius:2px;background:rgba(255,255,255,.07);overflow:hidden}
+.ns-tk .mini i{display:block;height:100%;border-radius:2px}
+#urlboard{position:static !important;width:auto !important;max-height:none !important;flex:1 1 auto;min-height:44px;
+  background:var(--ns-glass) !important;border:1px solid var(--ns-line) !important;border-radius:14px;padding:12px 14px !important;scrollbar-color:#2a3a6a transparent !important}
+
+/* ── bottom dock ── */
+#nsDock{position:fixed;left:14px;right:14px;bottom:16px;margin:0 auto;width:fit-content;z-index:11;display:flex;align-items:center;gap:4px;padding:6px;
+  max-width:calc(100vw - 28px);flex-wrap:wrap;justify-content:center}
+#nsDock button,#nsDock .tbtn{position:static;width:auto;appearance:none;border:0;background:transparent;color:var(--ns-ink);
+  font:600 10px var(--ns-disp);letter-spacing:.15em;text-transform:uppercase;padding:11px 15px;border-radius:10px;cursor:pointer;
+  box-shadow:none;white-space:nowrap;transition:background .15s;filter:none}
+#nsDock button:hover{background:rgba(255,255,255,.08);filter:none}
+#fwbtn{color:#ffd9a3 !important} #worldbtn{color:#bcd7ff !important} #atkbtn{color:#d8c9ff !important}
+#worldbtn.on,#atkbtn.on,#nsDock .tbtn.active{background:rgba(255,255,255,.10) !important;box-shadow:inset 0 0 0 1px var(--ns-line2) !important;color:var(--ns-acc) !important;border:0}
+#atkbtn.on{color:var(--ns-red) !important;box-shadow:inset 0 0 0 1px rgba(255,90,110,.55) !important}
+#killbtn{color:#ffd9de !important;background:linear-gradient(180deg,rgba(255,90,110,.28),rgba(255,90,110,.12)) !important;
+  box-shadow:inset 0 0 0 1px rgba(255,90,110,.5) !important}
+#killbtn:hover{background:linear-gradient(180deg,rgba(255,90,110,.42),rgba(255,90,110,.18)) !important}
+#killbtn.on{color:#c9ffe0 !important;background:linear-gradient(180deg,rgba(60,220,140,.30),rgba(60,220,140,.12)) !important;
+  box-shadow:inset 0 0 0 1px rgba(60,220,140,.55) !important}
+.ns-dsep{width:1px;height:24px;background:var(--ns-line);margin:0 4px}
+.ns-hint{position:fixed;left:16px;bottom:18px;z-index:8;color:var(--ns-ink3);font-size:10px;letter-spacing:.03em;pointer-events:none}
+#nmAiBtn{top:auto !important;bottom:20px !important;right:16px !important;transform:none !important}
+#crosshair{border-color:var(--ns-acc)}
+#wait{background:rgba(5,8,18,.80) !important}
+
+/* an overlay (Top Talkers / Wi-Fi) is open: the top bar becomes the thin strip those overlays sit under */
+body.ns-ovl #nsTop{top:0;left:0;right:0;height:36px;padding:0 10px;gap:8px;flex-wrap:nowrap;overflow:hidden;background:#060a1c;z-index:42}
+body.ns-ovl #nsTop .ns-glass,body.ns-ovl #hud{background:none;border:0;box-shadow:none;padding:0 6px;-webkit-backdrop-filter:none;backdrop-filter:none}
+body.ns-ovl #toolbar,body.ns-ovl #vpnbanner,body.ns-ovl .ns-hint,body.ns-ovl #nsDock,body.ns-ovl #nsSide,body.ns-ovl #nsMix{display:none !important}
+body.ns-ovl .ns-back{width:24px;height:24px}
+
+@media (max-width:1640px){.ns-hint{display:none}}
+@media (max-width:1180px){#nsMix{display:none}}
+@media (max-width:900px){
+  #nsTalk,#urlboard{display:none !important}
+  #nsSide{width:240px}
+  #legend{display:flex}
+  .ns-brand h1 span,#bldid,.ns-topn{display:none}
+  #nsDock button,#nsDock .tbtn{padding:9px 10px;letter-spacing:.08em;font-size:9px;min-width:0}
+  #nmAiBtn{bottom:132px !important}
+}
+@media (max-width:560px){
+  #nsSide{left:14px;right:14px;width:auto;top:auto;bottom:128px}
+  #hud .ns-opt{display:none}
+}
+@media (prefers-reduced-motion:reduce){.ns-pulse{animation:none}}
 </style>
 </head>
 <body>
@@ -46842,72 +47144,58 @@ html,body{max-width:100%;overflow-x:hidden}
      1920px wide with a fake active-Tailscale status. 76px clears both
      rows (toolbar's own bottom edge is 67px) regardless of window width
      or how long the provider name is. -->
-<div id="vpnbanner" title="" style="position:fixed;top:76px;left:50%;
-  transform:translateX(-50%);z-index:30;padding:2px 9px;border-radius:5px;
-  font-family:monospace;font-size:9px;font-weight:bold;letter-spacing:.8px;
-  pointer-events:none;background:rgba(0,0,0,0);color:#6a9ab8;border:1px solid transparent;
-  transition:background .4s,color .4s;white-space:nowrap;opacity:.92">
-  ○ VPN
-</div>
 
 <!-- Visited hosts overlay -->
-<div id="urlboard" style="position:fixed;top:46px;right:0;width:220px;
-  max-height:calc(100vh - 56px);overflow-y:auto;overflow-x:hidden;z-index:25;
-  background:rgba(4,12,28,0.88);padding:8px;
-  font-family:monospace;border-left:1px solid #0d2a44;
-  pointer-events:auto;backdrop-filter:blur(2px);
-  scrollbar-width:thin;scrollbar-color:#1a4a7a #030b16">
-</div>
 
 <div id="wait" style="position:fixed;inset:0;display:flex;flex-direction:column;
      align-items:center;justify-content:center;z-index:20;pointer-events:none;
      background:rgba(6,13,26,.82)">
   <div style="font-size:28px;margin-bottom:16px">⬡</div>
-  <div style="font-size:14px;color:#38b8f0;font-weight:bold;margin-bottom:8px">EtherApe 3D</div>
+  <div style="font-size:14px;color:#38b8f0;font-weight:bold;margin-bottom:8px">NetSentinel 3D</div>
   <div id="wait-msg" style="font-size:12px;color:#74c7ec;margin-bottom:20px">Connecting…</div>
   <div style="font-size:10px;color:#2a5a7a;max-width:340px;text-align:center;line-height:1.8;border:1px solid #0d2030;padding:10px 14px;border-radius:4px">
     Open <b style="color:#a371f7">◎ TOPOLOGY</b> in the main dashboard and start a capture.<br>
     Nodes appear automatically as traffic is detected.
   </div>
 </div>
-<div id="hud">
-  <a href="/" style="text-decoration:none;color:#39ff14;font-weight:bold;font-size:12px;padding:4px 11px;margin-right:8px;border:1px solid #1a4a2a;border-radius:6px;background:rgba(57,255,20,0.10);white-space:nowrap;pointer-events:auto;-webkit-tap-highlight-color:transparent" title="Back to dashboard">&#8592; Back</a>
-  <button id="bloomBtn" onclick="_cycleBloom(1)" oncontextmenu="_cycleBloom(-1);return false;" style="color:#3ec6ff;font-weight:bold;font-size:12px;padding:4px 11px;margin-right:8px;border:1px solid #1d5b80;border-radius:6px;background:rgba(62,198,255,0.10);cursor:pointer;white-space:nowrap;pointer-events:auto;-webkit-tap-highlight-color:transparent" title="Click to cycle bloom intensity (right-click to go back)">&#10022; Bloom: Normal</button>
-  <span>EtherApe <b>3D</b> <b id="bldid" style="font-weight:400;opacity:.5;font-size:10px" title="Which build is serving this page">@@NMBUILD@@</b></span>
-  <span>nodes <b id="hn">0</b></span>
-  <span>flows <b id="hf">0</b></span>
-  <span>pkts/s <b id="hp">0</b></span>
-  <span id="hblocked" class="warn" style="display:none">⛔ <b id="hbn">0</b> blocked</span>
-  <span style="margin-left:auto;color:#1a3a5a;font-size:10px">drag·scroll·shift+drag pan · hover node for info</span>
-</div>
-<div id="toolbar">
-  <button class="tbtn" id="btnSpread" onclick="toggleSpread()">⊛ SPREAD</button>
-  <div id="spread-row" style="display:none">
-    <label>spread</label>
-    <input id="spread-sl" type="range" min="1" max="5" step="0.1" value="1"
-           oninput="onSpread(this.value)">
-    <span id="spread-val">1.0×</span>
+<div class="ns-vig"></div>
+<div id="nsTop">
+  <div class="ns-glass ns-brand">
+    <a class="ns-back" href="/" title="Back to the dashboard" aria-label="Back">&#8592;</a>
+    <h1>NETSENTINEL <span>/ 3D Topology</span></h1>
+    <b id="bldid" title="Which build is serving this page">@@NMBUILD@@</b>
   </div>
-  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
-  <button class="tbtn" id="btnBlocked" onclick="toggleShowBlocked()"
-          title="highlight blocked flows">⛔ BLOCKED</button>
-  <button class="tbtn" id="btnLabels" onclick="toggleLabels()">🏷 LABELS</button>
-  <button class="tbtn active" id="btnGrid" onclick="toggleGrid()" title="Show/hide the wall reference grid">▦ GRID</button>
-  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
-  <button class="tbtn" onclick="resetCamera()">⌖ RESET</button>
-  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
-  <button class="tbtn" id="btnFS" onclick="toggleFullscreen()" title="fullscreen">⛶ FULLSCREEN</button>
-  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
-  <div style="display:flex;align-items:center;gap:6px;padding:0 4px" title="Limit visible nodes to top N by traffic">
-    <span style="font-family:monospace;font-size:9px;color:#1a3a5a;letter-spacing:1px">TOP</span>
-    <input id="topN-sl" type="range" min="5" max="500" step="5" value="500"
-           style="width:100px;accent-color:#39ff14;cursor:pointer"
-           oninput="onTopN(this.value)">
-    <span id="topN-val" style="font-family:monospace;font-size:10px;color:#39ff14;min-width:36px">ALL</span>
+  <div id="hud">
+    <i class="ns-pulse"></i>
+    <span><b id="hn">0</b> hosts</span><span class="ns-dotsep">&middot;</span>
+    <span><b id="hf">0</b> flows</span><span class="ns-dotsep ns-opt">&middot;</span>
+    <span class="ns-opt"><b id="hp">0</b> pkts/s</span><span class="ns-dotsep ns-opt">&middot;</span>
+    <span class="ns-opt" id="hfps" title="Frames per second the 3D view is drawing">&mdash; fps</span>
+    <span id="hblocked" class="warn" style="display:none">&#9940; <b id="hbn">0</b> blocked</span>
   </div>
-  <div style="width:1px;height:16px;background:#0d2030;margin:0 4px"></div>
-  <button class="tbtn" id="btnTalkers" onclick="toggleTalkers()">▦ TOP TALKERS</button>
-  <button class="tbtn" id="btnWifi" onclick="toggleWifi3D()" title="Access points and your signal survey in 3D">≈ WI-FI</button>
+  <div id="vpnbanner" title="" style="background:rgba(0,0,0,0);color:#6a9ab8;border:1px solid transparent;
+    transition:background .4s,color .4s;white-space:nowrap">&#9675; VPN</div>
+  <div id="toolbar" role="toolbar" aria-label="View options">
+    <div class="ns-topn" title="Limit visible hosts to the top N by traffic">
+      <span>TOP</span>
+      <input id="topN-sl" type="range" min="5" max="500" step="5" value="500" oninput="onTopN(this.value)" aria-label="Top N hosts">
+      <span id="topN-val">ALL</span>
+    </div>
+    <div class="ns-tsep"></div>
+    <button class="tbtn" id="btnLabels" onclick="toggleLabels()">LABELS</button>
+    <button class="tbtn active" id="btnGrid" onclick="toggleGrid()" title="Show/hide the floor and wall grids">GRID</button>
+    <button class="tbtn" id="btnBlocked" onclick="toggleShowBlocked()" title="highlight blocked flows">BLOCKED</button>
+    <button class="tbtn" id="bloomBtn" onclick="_cycleBloom(1)" oncontextmenu="_cycleBloom(-1);return false;" title="Glow strength. Click: stronger. Right-click: weaker.">&#10022; Bloom</button>
+    <button class="tbtn" id="btnSpread" onclick="toggleSpread()">SPREAD</button>
+    <div id="spread-row" style="display:none">
+      <label for="spread-sl">spread</label>
+      <input id="spread-sl" type="range" min="1" max="5" step="0.1" value="1" oninput="onSpread(this.value)">
+      <span id="spread-val">1.0&times;</span>
+    </div>
+    <div class="ns-tsep"></div>
+    <button class="tbtn" onclick="resetCamera()">RESET</button>
+    <button class="tbtn" id="btnFS" onclick="toggleFullscreen()" title="Fullscreen on / off" aria-label="Fullscreen">&#9974;</button>
+  </div>
 </div>
 
 <!-- Top Flow Talkers overlay -->
@@ -47016,40 +47304,53 @@ html,body{max-width:100%;overflow-x:hidden}
       font-size:12px;color:#8fa8cc;text-align:center;padding:0 30px;pointer-events:none"></div>
   </div>
 </div>
-<div id="info">
-  <div class="ip" id="iIP"></div>
-  <div id="iBlocked" class="blocked-badge" style="display:none">⛔ BLOCKED BY FIREWALL</div>
-  <div id="iSusp" class="susp-badge" style="display:none">⚠ IDS SUSPICIOUS</div>
-  <div class="row"><span class="key">rDNS</span><span class="val" id="iDNS">—</span></div>
-  <div class="row"><span class="key">location</span><span class="val" id="iGeo">—</span></div>
-  <div class="row"><span class="key">org</span><span class="val" id="iOrg">—</span></div>
-  <div class="row"><span class="key">proto</span><span class="val" id="iProto">—</span></div>
-  <div class="row"><span class="key">bytes</span><span class="val" id="iBytes">—</span></div>
-  <div class="row"><span class="key">packets</span><span class="val" id="iPkts">—</span></div>
-  <div style="border-top:1px solid #0d2030;margin-top:6px;padding-top:6px;font-size:10px;color:#1a4a6a">
-    Active flows:
+<aside id="nsMix" class="ns-glass" aria-label="Protocol mix">
+  <div class="ns-cap">Protocol mix</div>
+  <div class="ns-donutwrap">
+    <svg id="nsDonut" viewBox="0 0 96 96" aria-hidden="true"></svg>
+    <div class="ns-big"><span id="nsPk">0</span><small>packets / second</small></div>
   </div>
-  <div id="iFlows" style="font-size:10px;max-height:90px;overflow:hidden;margin-top:3px"></div>
+  <div id="legend"></div>
+</aside>
+<div id="nsSide">
+  <div id="info">
+    <div class="ns-cap" id="iCap">Host</div>
+    <div class="ns-hh"><div class="ns-flag" id="iFlag"></div>
+      <div style="min-width:0"><div class="ns-name" id="iName"></div><div class="ip" id="iIP"></div></div></div>
+    <div class="ns-tags">
+      <span class="ns-tag" id="iTagHub" style="display:none;color:#5ef0ff">This PC</span>
+      <span class="ns-tag" id="iTagLan" style="display:none;color:#3df5c0">LAN</span>
+      <span id="iBlocked" class="blocked-badge" style="display:none">&#9940; BLOCKED BY FIREWALL</span>
+      <span id="iSusp" class="susp-badge" style="display:none">&#9888; IDS SUSPICIOUS</span>
+      <span class="ns-tag" id="iTagProto"></span>
+    </div>
+    <div class="row"><span class="key">rDNS</span><span class="val" id="iDNS">&mdash;</span></div>
+    <div class="row"><span class="key">location</span><span class="val" id="iGeo">&mdash;</span></div>
+    <div class="row"><span class="key">org</span><span class="val" id="iOrg">&mdash;</span></div>
+    <div class="row"><span class="key">proto</span><span class="val" id="iProto">&mdash;</span></div>
+    <div class="row"><span class="key">traffic</span><span class="val" id="iBytes">&mdash;</span></div>
+    <div class="row"><span class="key">packets</span><span class="val" id="iPkts">&mdash;</span></div>
+    <div class="row"><span class="key">share</span><span class="val" id="iShare">&mdash;</span></div>
+    <div class="ns-bar"><i id="iBar"></i></div>
+    <div class="ns-flowcap ns-cap">Active flows</div>
+    <div id="iFlows"></div>
+  </div>
+  <section id="nsTalk" class="ns-glass" aria-label="Busiest hosts">
+    <div class="ns-cap" style="margin-bottom:5px">Busiest hosts</div>
+    <div id="nsTalkList"></div>
+  </section>
+  <div id="urlboard" style="overflow-y:auto;overflow-x:hidden;z-index:25;font-family:monospace;pointer-events:auto;scrollbar-width:thin;scrollbar-color:#1a4a7a #030b16"></div>
 </div>
-<button id="fwbtn" onclick="showFw()" title="Firewall rules written by this app">&#9940;&nbsp; FIREWALL</button>
-<button id="worldbtn" onclick="toggleWorld()" title="Place hosts on a rotating globe by real location">&#127760;&nbsp; WORLD VIEW</button>
-<button id="atkbtn" onclick="toggleAttackMain()">&#9760;&nbsp; ATTACK SIM</button>
-<button id="killbtn" onclick="toggleKill()">&#9211;&nbsp; KILL CONNECTION</button>
-<div id="legend">
-  <div><div class="dot" style="background:#2bff5c"></div>HTTP</div>
-  <div><div class="dot" style="background:#b4ff1a"></div>HTTP/2</div>
-  <div><div class="dot" style="background:#00ffa3"></div>TLS</div>
-  <div><div class="dot" style="background:#12d47a"></div>SSL</div>
-  <div><div class="dot" style="background:#ffb300"></div>DNS</div>
-  <div><div class="dot" style="background:#ff3ec8"></div>mDNS</div>
-  <div><div class="dot" style="background:#ffe600"></div>DHCP</div>
-  <div><div class="dot" style="background:#ff2d55"></div>ICMP</div>
-  <div><div class="dot" style="background:#00b3ff"></div>TCP</div>
-  <div><div class="dot" style="background:#9b4dff"></div>UDP</div>
-  <div><div class="dot" style="background:#00e5e0"></div>ARP</div>
-  <div><div class="dot" style="background:#ff1744"></div>BLOCKED</div>
-  <div><div class="dot" style="background:#7f9fbf"></div>other</div>
-</div>
+<div class="ns-hint">drag to orbit &middot; scroll to zoom &middot; shift+drag to pan &middot; click a host</div>
+<nav id="nsDock" class="ns-glass" aria-label="Views and actions">
+  <button id="fwbtn" onclick="showFw()" title="Firewall rules written by this app">&#9940;&nbsp; FIREWALL</button>
+  <button id="worldbtn" onclick="toggleWorld()" title="Place hosts on a rotating globe by real location">&#127760;&nbsp; WORLD VIEW</button>
+  <button class="tbtn" id="btnTalkers" onclick="toggleTalkers()">&#9638; TOP TALKERS</button>
+  <button class="tbtn" id="btnWifi" onclick="toggleWifi3D()" title="Access points and your signal survey in 3D">&#8776; WI-FI</button>
+  <button id="atkbtn" onclick="toggleAttackMain()">&#9760;&nbsp; ATTACK SIM</button>
+  <i class="ns-dsep"></i>
+  <button id="killbtn" onclick="toggleKill()">&#9211;&nbsp; KILL CONNECTION</button>
+</nav>
 <script src="/vendor/three.min.js"></script>
 <!-- post-processing addons (cached locally; page degrades gracefully if absent) -->
 <script src="/vendor/CopyShader.js"></script>
@@ -47112,8 +47413,24 @@ const scene=new THREE.Scene();
    fade job (FogExp2 is computed live per-pixel by the shader, not sampled
    from a texture, so it was never part of this bug and doesn't need to
    change). */
-const FOG_TINT=0x010103;
+const FOG_TINT=0x070c26;
 scene.fog=new THREE.FogExp2(FOG_TINT,0.0125);
+/* Backdrop: a soft navy pool of light, computed per pixel by a shader on one screen-sized quad. No texture
+   is involved, so there is nothing to band or alias (the two faults the old sky sphere had); a little
+   per-pixel noise hides the last 8-bit steps. */
+(function(){
+  try{
+    const m=new THREE.ShaderMaterial({depthTest:false,depthWrite:false,fog:false,
+      vertexShader:'varying vec2 v;void main(){v=uv;gl_Position=vec4(position.xy,1.0,1.0);}',
+      fragmentShader:'varying vec2 v;float h(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}'
+        +'void main(){vec2 p=(v-vec2(.5,.44))*vec2(1.3,1.0);float d=length(p);'
+        +'vec3 a=vec3(.060,.098,.280),b=vec3(.038,.062,.190),c=vec3(.018,.029,.068);'
+        +'vec3 col=mix(a,b,smoothstep(0.,.36,d));col=mix(col,c,smoothstep(.22,.85,d));'
+        +'col+=(h(gl_FragCoord.xy)-.5)*(1.5/255.);gl_FragColor=vec4(col,1.);}'});
+    const q=new THREE.Mesh(new THREE.PlaneGeometry(2,2),m);
+    q.frustumCulled=false;q.renderOrder=-1000;q.userData.isSky=true;scene.add(q);
+  }catch(e){}
+})();
 renderer.setClearColor(0x000000,1);
 
 /* ── Star sprite textures ─────────────────────────────────────────────────
@@ -47323,7 +47640,7 @@ const _wallGrids=[];
 // a close guess, it's the identical value) and darkening the grid lines to
 // match that same near-black family instead of the old floor tone.
 (function(){
-  const W=60,D=60,G=0x020204,G2=0x010102;   // near-black wall grid lines, matches the new deep-black backdrop (see FOG_TINT/SKY_* above), not the old removed floor
+  const W=60,D=60,G=0x0d1640,G2=0x0a1132;   // near-black wall grid lines, matches the new deep-black backdrop (see FOG_TINT/SKY_* above), not the old removed floor
   const cy=-6+(W/2); // centre Y so bottom aligns with where the floor used to be
   const GLASS_COLOR=FOG_TINT;   // same deep-black tone as the backdrop/fog -- no more mismatched seam against the sides
   const GLASS_OPACITY=0.16;     // translucent enough that the stars clearly read through
@@ -47337,6 +47654,7 @@ const _wallGrids=[];
     if(ry) pane.rotation.y=ry;
     pane.renderOrder=-1;
     pane.userData.isSky=true;   // decorative — excluded from picking
+    pane.visible=false;         // the backdrop is a gradient now: a flat pane in front of it would show as a rectangle
     scene.add(pane);
   }
 
@@ -47505,16 +47823,16 @@ function _getNodeMesh(r, cc, col, isBlocked, isLocal){
     mat.map   = flagTex;
     mat.color.set(0xffffff);
     mat.emissive.set(0x000000);
-    mat.specular.set(0x888888);
-    mat.shininess = 100;
+    mat.specular.set(0x3a3a3a);
+    mat.shininess = 50;
   } else {
     mat.map   = null;
     mat.color.setHex(hexCol);
-    mat.specular.set(0x88aaff);
-    mat.shininess = 180;
+    mat.specular.set(0x1a2238);
+    mat.shininess = 28;
     // Emissive glow matches colour at reduced intensity
     const ec = new THREE.Color(hexCol);
-    mat.emissive.setRGB(ec.r*0.2, ec.g*0.2, ec.b*0.2);
+    mat.emissive.setRGB(ec.r*0.26, ec.g*0.26, ec.b*0.26);
   }
   mat.needsUpdate = true;
 
@@ -47881,6 +48199,7 @@ function _makeCircuitCanvas(){
 }
 const _circuitCanvas=_makeCircuitCanvas();
 
+const _NS_FLOOR_BARS=false;   // the protocol bars on the floor are switched off; the Protocol mix panel shows the same numbers
 (function _buildProtoBars(){
   try{
     const n=PROTO_BARS.length;
@@ -47932,6 +48251,7 @@ const _circuitCanvas=_makeCircuitCanvas();
       omesh.scale.z=0.02;
       omesh.userData.isSky=true;         // decorative — excluded from picking
       scene.add(omesh);
+      if(!_NS_FLOOR_BARS){m.visible=false;pad.visible=false;lab.visible=false;omesh.visible=false;}
       protoBars.push({key:p,mesh:m,label:lab,target:0.02,cur:0.02,
                        liveN:0,pulseAmt:0,overlayMesh:omesh,overlayTex});
     });
@@ -47978,26 +48298,374 @@ const PROTO_DESC={
   arp:'MAC lookups',         other:'unclassified',      blocked:'firewall drops',
   suspicious:'AI-flagged'};
 
-function _refreshProtoLegend(){
-  const el=document.getElementById('legend'); if(!el) return;
-  let h='<div class="lgtitle">Protocol mix</div>';
-  PROTO_BARS.forEach(p=>{
-    const pct=(protoPct[p]||0)*100;
-    const n=protoCnt[p]||0;
-    const on=n>0;                       // "active" = has flows, not just volume
-    const hex='#'+(COLORS[p]||COLORS.other).toString(16).padStart(6,'0');
-    h+='<div class="row'+(on?' on':'')+'" style="opacity:'+(on?1:0.42)+'">'
-      +'<div class="dot" style="background:'+hex+(on?';box-shadow:0 0 6px '+hex:'')+'"></div>'
-      +'<span class="ptxt">'
-      +  '<span class="pname" style="color:'+(on?hex:'#54748e')+'">'+(BAR_LABEL[p]||p)+'</span>'
-      +  '<span class="pdesc">'+(PROTO_DESC[p]||'')+'</span>'
-      +'</span>'
-      +'<span class="ppct">'+(on?(pct>=0.1?pct.toFixed(1):pct.toFixed(2))+'%'
-                                 +' <span style="color:#4a6f8c">\u00d7'+n+'</span>':'—')+'</span>'
-      +'</div>';
-  });
-  el.innerHTML=h;
+function _refreshProtoLegend(){ try{ _nsRenderMix(); }catch(e){} }
+
+/* ══ NS skin: hosts on orbits around this machine, a core, halos, drop lines, a polar floor ══════════════
+   Everything here is decoration plus one layout step. Picking, flows, the globe, the wall panels and the
+   protocol bars are the same objects as before.                                                          */
+let _nsSelf='', _nsHubId=null, _nsHubIdx=-1, _nsSelIdx=-1, _nsSlotN=0, _nsFrame=0;
+let _nsAuto=!(window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches);
+const _nsSlot={};                 // host id -> its place on an orbit {ang,y,r}; kept so hosts do not jump between polls
+const _nsHidden=new Set();        // protocols switched off in the Protocol mix panel
+function _nsHash(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0)/4294967295;}
+function _nsK(v){v=+v||0;return v>=1e6?(v/1e6).toFixed(1)+'M':v>=1e4?Math.round(v/1e3)+'k':v>=1e3?(v/1e3).toFixed(1)+'k':String(Math.round(v));}
+function _nsFlowKey(f){let k=(f.proto||'other').toLowerCase();
+  if(f.blocked)k='blocked'; else if(f.suspicious)k='suspicious';
+  if(PROTO_BARS.indexOf(k)<0)k='other'; return k;}
+function _nsHex(n){return '#'+(n>>>0).toString(16).padStart(6,'0');}
+
+let _nsSelfSet=new Set();
+function _nsPickHub(nodes){
+  let hub=null;
+  /* This PC can have several addresses (Wi-Fi and Ethernet at once). All of them are this PC: the busiest one is
+     the centre, the others sit inside the core with it instead of orbiting as a second "terminator". */
+  if(_nsSelfSet.size){let best=-1;nodes.forEach(n=>{if(_nsSelfSet.has(n.id)&&(n.bytes||0)>best){best=n.bytes||0;hub=n;}});}
+  if(!hub&&_nsSelf) hub=nodes.find(n=>n.id===_nsSelf)||null;
+  if(!hub) hub=nodes.find(n=>n.id==='this-machine')||null;
+  if(!hub){let best=-1;nodes.forEach(n=>{if(n.local&&(n.bytes||0)>best){best=n.bytes||0;hub=n;}});}
+  return hub;
 }
+/* This machine sits in the middle. Other hosts go on orbits: the busier, the closer. Devices on the home
+   network take the inner ring. A host keeps its angle for as long as it is on screen.                     */
+function _nsLayout(nodes){
+  _nsHubId=null; _nsHubIdx=-1; _nsSelIdx=-1;
+  if(!nodes||!nodes.length) return;
+  const hub=_nsPickHub(nodes);
+  if(hub){_nsHubId=hub.id;_nsHubIdx=nodes.indexOf(hub);}
+  if(selectedNode){for(let i=0;i<nodes.length;i++){if(nodes[i].id===selectedNode.id){_nsSelIdx=i;break;}}}
+  if(WORLD_ON) return;                      // the globe places hosts itself
+  for(let i=0;i<nodes.length;i++){
+    const n=nodes[i];
+    if(n===hub||_nsSelfSet.has(n.id)){n.x=0;n.y=0;n.z=0;n._nsTwin=(n!==hub);continue;}
+    n._nsTwin=false;
+    const f=Math.max(0,Math.min(1,n.frac||0));
+    const target=n.local ? 3.5+_nsHash(n.id+'r')*1.3 : 5.6+(1-Math.sqrt(f))*9.2;
+    let s=_nsSlot[n.id];
+    if(!s){s=_nsSlot[n.id]={ang:(_nsSlotN++)*2.39996,y:(_nsHash(n.id+'y')-0.5)*3.4,r:target};}
+    else s.r+=(target-s.r)*0.18;
+    s.seen=_nsFrame;
+    n.x=Math.cos(s.ang)*s.r; n.y=s.y; n.z=Math.sin(s.ang)*s.r;
+  }
+  if(_nsSlotN>4000){                         // long sessions: forget hosts that are gone
+    const live={};nodes.forEach(n=>{live[n.id]=1;});
+    Object.keys(_nsSlot).forEach(k=>{if(!live[k])delete _nsSlot[k];});
+    _nsSlotN=Object.keys(_nsSlot).length;
+  }
+}
+
+/* soft round glow shared by the core and every halo */
+const _nsGlowTex=(function(){const s=128,c=document.createElement('canvas');c.width=c.height=s;const x=c.getContext('2d');
+  const g=x.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);
+  g.addColorStop(0,'rgba(255,255,255,1)');g.addColorStop(0.22,'rgba(255,255,255,.30)');g.addColorStop(1,'rgba(255,255,255,0)');
+  x.fillStyle=g;x.fillRect(0,0,s,s);return new THREE.CanvasTexture(c);})();
+
+/* polar floor: rings and spokes under the orbits, with a soft pool of light */
+const _NS_FLOOR_Y=-3.8;          // the orbit floor sits closer to the hosts than the old room floor (FLOOR_Y, still used by the bars)
+const _nsFloor=new THREE.Group(); _nsFloor.position.y=_NS_FLOOR_Y; scene.add(_nsFloor);
+(function(){
+  const lm=o=>new THREE.LineBasicMaterial({color:0x6f8cff,transparent:true,opacity:o,depthWrite:false});
+  [4.2,7.4,10.6,13.8,17.0].forEach((r,i)=>{
+    const pts=[];for(let a=0;a<=128;a++){const tt=a/128*6.28319;pts.push(new THREE.Vector3(Math.cos(tt)*r,0,Math.sin(tt)*r));}
+    const l=new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),lm(0.30-i*0.045));l.userData.isSky=true;_nsFloor.add(l);
+  });
+  const sp=[];for(let a=0;a<36;a++){const tt=a/36*6.28319;
+    sp.push(new THREE.Vector3(Math.cos(tt)*1.8,0,Math.sin(tt)*1.8),new THREE.Vector3(Math.cos(tt)*17,0,Math.sin(tt)*17));}
+  const sl=new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(sp),lm(0.07));sl.userData.isSky=true;_nsFloor.add(sl);
+  const pc=document.createElement('canvas');pc.width=pc.height=256;const px2=pc.getContext('2d');
+  const pg=px2.createRadialGradient(128,128,0,128,128,128);
+  pg.addColorStop(0,'rgba(80,110,255,.30)');pg.addColorStop(0.45,'rgba(50,80,220,.10)');pg.addColorStop(1,'rgba(40,70,200,0)');
+  px2.fillStyle=pg;px2.fillRect(0,0,256,256);
+  const disc=new THREE.Mesh(new THREE.CircleGeometry(19,64),
+    new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(pc),transparent:true,depthWrite:false,fog:false}));
+  disc.rotation.x=-Math.PI/2;disc.position.y=-0.03;disc.userData.isSky=true;_nsFloor.add(disc);
+})();
+
+/* core: drawn around this machine's own sphere */
+const _nsCore=new THREE.Group(); _nsCore.visible=false; scene.add(_nsCore);
+const _nsCoreWire=new THREE.Mesh(new THREE.IcosahedronGeometry(1.22,1),
+  new THREE.MeshBasicMaterial({color:0x5ef0ff,wireframe:true,transparent:true,opacity:0.5,depthWrite:false}));
+_nsCore.add(_nsCoreWire);
+const _nsCoreGlow=new THREE.Sprite(new THREE.SpriteMaterial({map:_nsGlowTex,color:0x5ef0ff,transparent:true,opacity:0.7,
+  blending:THREE.AdditiveBlending,depthWrite:false,fog:false}));
+_nsCoreGlow.scale.set(4.8,4.8,1); _nsCore.add(_nsCoreGlow);
+const _nsCoreRings=[1.75,2.25,2.85].map((r,i)=>{
+  const m=new THREE.Mesh(new THREE.TorusGeometry(r,0.013+i*0.004,6,96),
+    new THREE.MeshBasicMaterial({color:i===1?0x3df5c0:0x5ef0ff,transparent:true,opacity:0.6-i*0.14,depthWrite:false}));
+  m.rotation.set(1.2-i*0.5,i*0.9,0); _nsCore.add(m); return m;});
+_nsCore.traverse(o=>{o.userData.isSky=true;});
+
+/* halos (one soft glow behind each host) */
+const _nsHaloTex=(function(){const s=96,c=document.createElement('canvas');c.width=c.height=s;const x=c.getContext('2d');
+  const g=x.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);
+  g.addColorStop(0,'rgba(255,255,255,.55)');g.addColorStop(0.35,'rgba(255,255,255,.20)');g.addColorStop(1,'rgba(255,255,255,0)');
+  x.fillStyle=g;x.fillRect(0,0,s,s);return new THREE.CanvasTexture(c);})();
+const _nsHalos=[];
+function _nsHalo(i){
+  let h=_nsHalos[i];
+  if(!h){h=_nsHalos[i]=new THREE.Sprite(new THREE.SpriteMaterial({map:_nsHaloTex,transparent:true,opacity:0.30,
+      blending:THREE.AdditiveBlending,depthWrite:false}));
+    h.userData.isSky=true; h.visible=false; scene.add(h);}
+  return h;
+}
+/* drop lines to the floor, and a small ring where each one lands */
+const _nsDropPos=new Float32Array(MAX_NODES*2*3), _nsDropCol=new Float32Array(MAX_NODES*2*3);
+const _nsDropGeo=new THREE.BufferGeometry();
+_nsDropGeo.setAttribute('position',new THREE.BufferAttribute(_nsDropPos,3).setUsage(35048));
+_nsDropGeo.setAttribute('color',new THREE.BufferAttribute(_nsDropCol,3).setUsage(35048));
+const _nsDrops=new THREE.LineSegments(_nsDropGeo,new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.55,
+  blending:THREE.AdditiveBlending,depthWrite:false}));
+_nsDrops.frustumCulled=false; _nsDrops.userData.isSky=true; scene.add(_nsDrops);
+const _nsFootGeo=new THREE.RingGeometry(0.15,0.21,20); _nsFootGeo.rotateX(-Math.PI/2);
+const _nsFeet=new THREE.InstancedMesh(_nsFootGeo,new THREE.MeshBasicMaterial({transparent:true,opacity:0.5,side:THREE.DoubleSide,depthWrite:false}),MAX_NODES);
+_nsFeet.count=0; _nsFeet.instanceMatrix.setUsage(THREE.DynamicDrawUsage); _nsFeet.frustumCulled=false; _nsFeet.userData.isSky=true; scene.add(_nsFeet);
+/* ring around the selected host */
+const _nsSelRing=new THREE.Mesh(new THREE.RingGeometry(1.55,1.64,64),
+  new THREE.MeshBasicMaterial({color:0x5ef0ff,transparent:true,opacity:0.95,side:THREE.DoubleSide,depthWrite:false,depthTest:false}));
+_nsSelRing.visible=false; _nsSelRing.userData.isSky=true; scene.add(_nsSelRing);
+
+const _nsC=new THREE.Color(), _nsM=new THREE.Matrix4(), _nsRight=new THREE.Vector3(), _nsV=new THREE.Vector3();
+/* called at the end of rebuildGeometry(): colours and counts for the decoration */
+function _nsDecor(nodes,N){
+  const flat=!WORLD_ON;
+  _nsFloor.visible=flat&&_gridVisible;
+  _nsFloor.scale.set(spreadFactor,1,spreadFactor);
+  _nsDrops.visible=flat; _nsFeet.visible=flat;
+  _nsCore.visible=flat&&_nsHubIdx>=0&&_nsHubIdx<N;
+  for(let i=0;i<N;i++){
+    const nd=nodes[i], h=_nsHalo(i);
+    _nsC.setHex(nodeColor(nd));
+    h.material.color.copy(_nsC);
+    h.userData.k=(0.28+(nd.frac||0)*0.48)*4.0;
+    h.visible=flat&&i!==_nsHubIdx&&!nd._nsTwin;
+    _nsDropCol[i*6]=_nsC.r*0.55;_nsDropCol[i*6+1]=_nsC.g*0.55;_nsDropCol[i*6+2]=_nsC.b*0.55;
+    _nsDropCol[i*6+3]=_nsC.r*0.08;_nsDropCol[i*6+4]=_nsC.g*0.08;_nsDropCol[i*6+5]=_nsC.b*0.08;
+    _nsFeet.setColorAt(i,_nsC);
+  }
+  for(let i=N;i<_nsHalos.length;i++){if(_nsHalos[i])_nsHalos[i].visible=false;}
+  _nsDropGeo.getAttribute('color').needsUpdate=true;
+  _nsDropGeo.setDrawRange(0,N*2);
+  _nsFeet.count=N;
+  if(_nsFeet.instanceColor)_nsFeet.instanceColor.needsUpdate=true;
+  try{ _nsCullLabels(); }catch(e){}
+}
+/* called every frame from animate(), after the hosts have been moved */
+function _nsAnimate(){
+  _nsFrame++;
+  const N=_rayTargets.length, flat=!WORLD_ON;
+  if(flat){
+    for(let i=0;i<N;i++){
+      const p=_rayTargets[i].position, h=_nsHalos[i];
+      if(h&&h.visible){h.position.copy(p);const k=h.userData.k||2;h.scale.set(k,k,1);}
+      _nsDropPos[i*6]=p.x;_nsDropPos[i*6+1]=p.y;_nsDropPos[i*6+2]=p.z;
+      _nsDropPos[i*6+3]=p.x;_nsDropPos[i*6+4]=_NS_FLOOR_Y;_nsDropPos[i*6+5]=p.z;
+      _nsM.makeTranslation(p.x,_NS_FLOOR_Y+0.02,p.z); _nsFeet.setMatrixAt(i,_nsM);
+    }
+    _nsDropGeo.getAttribute('position').needsUpdate=true;
+    _nsFeet.instanceMatrix.needsUpdate=true;
+    if(_nsCore.visible&&_rayTargets[_nsHubIdx]){
+      _nsCore.position.copy(_rayTargets[_nsHubIdx].position);
+      _nsCoreWire.rotation.y-=0.006*_nsStep; _nsCoreWire.rotation.x+=0.0035*_nsStep;
+      _nsCoreGlow.material.opacity=0.46+Math.sin(t*2)*0.08;
+      for(let i=0;i<3;i++)_nsCoreRings[i].rotation.z+=(0.004+i*0.0025)*(i%2?-1:1)*_nsStep;
+    }
+  }
+  const sm=_nsSelIdx>=0?_rayTargets[_nsSelIdx]:null;
+  if(sm){_nsSelRing.visible=true;_nsSelRing.position.copy(sm.position);_nsSelRing.scale.setScalar(sm.scale.x);
+         _nsSelRing.quaternion.copy(camera.quaternion);_nsSelRing.material.opacity=0.75+Math.sin(t*3)*0.2;}
+  else _nsSelRing.visible=false;
+  if(_nsAuto&&flat&&!isDrag) rotY+=0.0009*_nsStep;
+  if((_nsFrame&1)===0) _nsCullLabels();
+}
+
+/* ── labels: a pill beside the host, the same size on screen at any distance ── */
+const _nsLblCache=new Map();
+function _nsLblTex(text,sub,kind){
+  const key=text+'\u0001'+sub+'\u0001'+kind;
+  let e=_nsLblCache.get(key);
+  if(e){e.used=_nsFrame;return e;}
+  if(_nsLblCache.size>200){                  // drop what has not been drawn for a while
+    _nsLblCache.forEach((v,k)=>{if(_nsFrame-v.used>120){v.tex.dispose();_nsLblCache.delete(k);}});
+  }
+  const S=2, H=26*S, cv=document.createElement('canvas'), x=cv.getContext('2d');
+  const f1='600 '+(12*S)+'px Bahnschrift,"Segoe UI",system-ui,sans-serif', f2='400 '+(10.5*S)+'px Consolas,"DejaVu Sans Mono",monospace';
+  x.font=f1; const w1=x.measureText(text).width; x.font=f2; const w2=sub?x.measureText(sub).width+7*S:0;
+  const W=Math.ceil(w1+w2+20*S); cv.width=W; cv.height=H;
+  const r=H/2-S;
+  x.beginPath();x.moveTo(S+r,S);x.lineTo(W-S-r,S);x.arc(W-S-r,S+r,r,-Math.PI/2,Math.PI/2);x.lineTo(S+r,H-S);x.arc(S+r,S+r,r,Math.PI/2,Math.PI*1.5);x.closePath();
+  x.fillStyle='rgba(8,13,32,0.80)';x.fill();
+  x.lineWidth=S;x.strokeStyle=kind==='b'?'rgba(255,90,110,.75)':kind==='s'?'rgba(255,180,84,.70)':'rgba(150,178,255,.34)';x.stroke();
+  x.textBaseline='middle';x.font=f1;
+  x.fillStyle=kind==='b'?'#ff8090':kind==='s'?'#ffc47a':'#e4ebff';x.fillText(text,10*S,H/2+S*0.5);
+  if(sub){x.font=f2;x.fillStyle='#7e8cb8';x.fillText(sub,10*S+w1+7*S,H/2+S*0.5);}
+  const tex=new THREE.CanvasTexture(cv);tex.minFilter=THREE.LinearFilter;tex.magFilter=THREE.LinearFilter;tex.generateMipmaps=false;
+  e={tex:tex,w:W/S,h:H/S,used:_nsFrame};_nsLblCache.set(key,e);return e;
+}
+function _nsSize2(b){b=+b||0;if(b<1024)return b+' B';const u=['KB','MB','GB','TB'];let i=-1;do{b/=1024;i++;}while(b>=1000&&i<u.length-1);
+  return (b>=10?Math.round(b):b.toFixed(1))+' '+u[i];}
+function _nsMakeLabel(nd){
+  const kind=nd.blocked?'b':nd.suspicious?'s':'n';
+  const e=_nsLblTex(String(nd.label||nd.id), _nsSize2(nd.bytes), kind);
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:e.tex,transparent:true,depthTest:false,sizeAttenuation:false}));
+  const k=2*Math.tan(camera.fov*Math.PI/360)/_getH();      // world units at distance 1 for one screen pixel
+  sp.scale.set(e.w*k,e.h*k,1);
+  sp.userData.pw=e.w; sp.userData.ph=e.h;
+  sp.visible=false;                          // shown by _nsCullLabels() once it is known not to overlap
+  return sp;
+}
+/* which hosts get a label: the busiest, anything flagged, this machine, and the one under the mouse or selected */
+function _nsLabelSet(nodes,N){
+  const want=new Set();
+  const idx=[];for(let i=0;i<N;i++)idx.push(i);
+  idx.sort((a,b)=>(nodes[b].bytes||0)-(nodes[a].bytes||0));
+  for(let k=0;k<idx.length&&k<12;k++){if(!nodes[idx[k]]._nsTwin)want.add(idx[k]);}
+  let fl=0;for(let i=0;i<N&&fl<14;i++){if(nodes[i].blocked||nodes[i].suspicious){want.add(i);fl++;}}
+  if(_nsHubIdx>=0)want.add(_nsHubIdx);
+  if(_nsSelIdx>=0)want.add(_nsSelIdx);
+  if(hoveredIdx>=0&&hoveredIdx<N)want.add(hoveredIdx);
+  return want;
+}
+function _nsLabelPos(sp,x,y,z,rad){
+  if(WORLD_ON){sp.center.set(0.5,0.5);_worldLabelPos(sp,x,y,z,rad);return;}
+  sp.center.set(0,0.5);
+  const o=(sp.userData.nodeIdx===_nsHubIdx)?1.5:rad+0.22;     // clear of the core's cage
+  sp.position.set(x+_nsRight.x*o,y+_nsRight.y*o,z+_nsRight.z*o);
+}
+function _nsEnsureLabel(i){               // the host under the mouse gets its label at once
+  if(!showLabels||_labelByNode[i]||!nodeData[i]||!_rayTargets[i])return;
+  const sp=_nsMakeLabel(nodeData[i]), p=_rayTargets[i].position;
+  _nsLabelPos(sp,p.x,p.y,p.z,_rayTargets[i].scale.x);
+  sp.userData.nodeIdx=i;_labelByNode[i]=sp;scene.add(sp);labelSprites.push(sp);sp.visible=true;
+}
+let _nsRects=null,_nsRectsAt=-999;
+function _nsPanelRects(){
+  if(_nsFrame-_nsRectsAt<45&&_nsRects)return _nsRects;
+  _nsRectsAt=_nsFrame;_nsRects=[];
+  ['nsTop','nsMix','nsSide','nsDock'].forEach(id=>{const el=document.getElementById(id);if(!el)return;
+    if(id==='nsSide'){Array.prototype.forEach.call(el.children,c=>{const r=c.getBoundingClientRect();if(r.width>0&&r.height>0)_nsRects.push(r);});return;}
+    const r=el.getBoundingClientRect();if(r.width>0&&r.height>0)_nsRects.push(r);});
+  return _nsRects;
+}
+/* hide labels that would sit on top of one another or under a panel; selected and hovered always win */
+function _nsCullLabels(){
+  if(!labelSprites.length)return;
+  _nsRight.setFromMatrixColumn(camera.matrixWorld,0);
+  const W=_getW(),H=_getH(),placed=[],panels=_nsPanelRects();
+  const list=labelSprites.slice();
+  const pri=s=>{const i=s.userData.nodeIdx,nd=nodeData[i]||{};
+    return (i===_nsSelIdx?1000:0)+(i===hoveredIdx?900:0)+(i===_nsHubIdx?300:0)+((nd.blocked||nd.suspicious)?40:0)+(nd.frac||0)*30;};
+  list.sort((a,b)=>pri(b)-pri(a));
+  for(let n=0;n<list.length;n++){
+    const s=list[n],i=s.userData.nodeIdx;
+    _nsV.copy(s.position).project(camera);
+    if(_nsV.z>1||_nsV.z<-1){s.visible=false;continue;}
+    const cx=(_nsV.x*0.5+0.5)*W, cy=(-_nsV.y*0.5+0.5)*H, pw=s.userData.pw||100, ph=s.userData.ph||26;
+    const x0=WORLD_ON?cx-pw/2:cx, r={x0:x0-3,x1:x0+pw+3,y0:cy-ph/2-2,y1:cy+ph/2+2};
+    const force=(i===_nsSelIdx||i===hoveredIdx);
+    let bad=r.x1<0||r.x0>W||r.y1<0||r.y0>H;
+    if(!bad&&!force){
+      for(let k=0;k<panels.length&&!bad;k++){const q=panels[k];bad=r.x0<q.right&&r.x1>q.left&&r.y0<q.bottom&&r.y1>q.top;}
+      for(let k=0;k<placed.length&&!bad;k++){const q=placed[k];bad=r.x0<q.x1&&r.x1>q.x0&&r.y0<q.y1&&r.y1>q.y0;}
+    }
+    s.visible=!bad;
+    if(!bad)placed.push(r);
+  }
+}
+
+/* ── panels: protocol mix (donut + list), busiest hosts, the host card ── */
+let _nsMixHtml='', _nsTalkHtml='';
+function _nsRenderMix(){
+  const el=document.getElementById('legend'); if(!el) return;
+  const act=PROTO_BARS.filter(p=>(protoCnt[p]||0)>0).sort((a,b)=>(protoPct[b]||0)-(protoPct[a]||0));
+  const svg=document.getElementById('nsDonut');
+  if(svg){
+    const R=38,C=2*Math.PI*R;let off=0,h='<circle cx="48" cy="48" r="38" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="10"/>';
+    act.forEach(p=>{const pct=protoPct[p]||0;if(pct<=0||_nsHidden.has(p))return;
+      const len=Math.max(1.5,pct*C-2.5),col=_nsHex(COLORS[p]||COLORS.other);
+      h+='<circle cx="48" cy="48" r="38" fill="none" stroke="'+col+'" stroke-width="10" stroke-dasharray="'+len.toFixed(2)+' '+(C-len).toFixed(2)
+        +'" stroke-dashoffset="'+(-off).toFixed(2)+'" transform="rotate(-90 48 48)"/>';off+=pct*C;});
+    svg.innerHTML=h;
+  }
+  let h='';
+  act.forEach(p=>{
+    const pct=(protoPct[p]||0)*100,n=protoCnt[p]||0,col=_nsHex(COLORS[p]||COLORS.other),off=_nsHidden.has(p);
+    h+='<button class="ns-pr'+(off?' off':'')+'" data-k="'+p+'" title="'+(off?'Show':'Hide')+' '+(BAR_LABEL[p]||p)+' in the view">'
+      +'<i style="color:'+col+'"></i><span class="n">'+(BAR_LABEL[p]||p)+'<em>'+(PROTO_DESC[p]||'')+'</em></span>'
+      +'<span class="p">'+(pct>=0.1?pct.toFixed(1):pct.toFixed(2))+'%<s>×'+n+'</s></span></button>';
+  });
+  if(!act.length)h='<div class="ns-idle">Waiting for traffic. Protocols appear here as soon as flows are seen.</div>';
+  if(h!==_nsMixHtml){_nsMixHtml=h;el.innerHTML=h;}       // leave the rows alone when nothing changed
+}
+/* These two lists are redrawn whenever new data arrives, so a row can be replaced between the press and the
+   release of a click. Acting on the press (and on keyboard activation) means a click is never lost to that. */
+function _nsListPress(e){
+  if(e.type==='pointerdown'&&e.button!==0)return;
+  if(e.type==='click'&&e.detail!==0)return;            // mouse clicks were already handled on the press
+  const b=e.target&&e.target.closest?e.target.closest('.ns-pr'):null;
+  if(b){const k=b.getAttribute('data-k');if(_nsHidden.has(k))_nsHidden.delete(k);else _nsHidden.add(k);_nsMixHtml='';_nsRenderMix();return;}
+  const tk=e.target&&e.target.closest?e.target.closest('.ns-tk'):null;
+  if(tk){const id=tk.getAttribute('data-id'),nd=nodeData.find(n=>n.id===id);if(nd){_nsAuto=false;selectNode(nd);_nsCard();}}
+}
+document.addEventListener('pointerdown',_nsListPress);
+document.addEventListener('click',_nsListPress);
+function _nsEsc(s){const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function _nsRenderTalk(){
+  const el=document.getElementById('nsTalkList'); if(!el) return;
+  const top=nodeData.slice().sort((a,b)=>(b.bytes||0)-(a.bytes||0)).slice(0,6);
+  const max=(top[0]&&top[0].bytes)||1;
+  const h=top.map(n=>{const col=_nsHex(nodeColor(n));
+    return '<button class="ns-tk" data-id="'+_nsEsc(n.id)+'"><span>'+_nsEsc(n.flag||(n.local?'⌂':'●'))+'</span>'
+      +'<span class="nm">'+_nsEsc(n.label||n.id)+' <span>'+_nsEsc(n.local?'LAN':(n.city||n.country||''))+'</span></span>'
+      +'<span class="b">'+_nsSize2(n.bytes)+'</span><div class="mini"><i style="width:'+Math.max(3,(n.bytes||0)/max*100).toFixed(1)+'%;background:'+col+'"></i></div></button>';
+  }).join('')||'<div class="ns-idle">No hosts yet.</div>';
+  if(h!==_nsTalkHtml){_nsTalkHtml=h;el.innerHTML=h;}
+}
+/* the host card shows the host under the mouse; with nothing under the mouse it shows the selected host */
+let _nsCardKey='';
+function _nsCard(){
+  const cur=(hoveredIdx>=0&&nodeData[hoveredIdx])?nodeData[hoveredIdx]:(selectedNode?nodeData.find(n=>n.id===selectedNode.id):null);
+  if(!cur){if(infoDiv.style.display!=='none'){infoDiv.style.display='none';_nsRectsAt=-999;}_nsCardKey='';return;}
+  const key=cur.id+'|'+(cur.bytes||0)+'|'+(hoveredIdx>=0?'h':'s')+'|'+flowData.length;
+  if(key===_nsCardKey&&infoDiv.style.display==='block')return;
+  if(infoDiv.style.display!=='block')_nsRectsAt=-999;      // the card is about to appear: re-measure the panels
+  _nsCardKey=key; showInfo(cur);
+}
+function _nsCardExtras(nd){
+  const g=id=>document.getElementById(id);
+  const total=nodeData.reduce((a,n)=>a+(n.bytes||0),0)||1, max=nodeData.reduce((a,n)=>Math.max(a,n.bytes||0),0)||1;
+  if(g('iCap'))g('iCap').textContent=(hoveredIdx>=0&&nodeData[hoveredIdx]===nd)?'Host under the mouse':'Selected host';
+  if(g('iFlag'))g('iFlag').textContent=nd.flag||(nd.local?'⌂':'●');
+  if(g('iName'))g('iName').textContent=nd.label||nd.id;
+  if(g('iTagLan'))g('iTagLan').style.display=nd.local?'':'none';
+  if(g('iTagHub'))g('iTagHub').style.display=(nd.id===_nsHubId)?'':'none';
+  const col=_nsHex(nodeColor(nd));
+  if(g('iTagProto')){g('iTagProto').textContent=(BAR_LABEL[(nd.proto||'').toLowerCase()]||nd.proto||'other');g('iTagProto').style.color=_nsHex(COLORS[nd.proto]||COLORS.other);}
+  if(g('iShare'))g('iShare').textContent=((nd.bytes||0)/total*100).toFixed(1)+'%';
+  if(g('iBar')){g('iBar').style.width=Math.max(3,(nd.bytes||0)/max*100).toFixed(1)+'%';g('iBar').style.background=col;}
+}
+/* keep the side panels below the top bar, however many rows it wraps to; follow the overlays */
+function _nsSyncChrome(){
+  const top=document.getElementById('nsTop');
+  if(top&&!document.body.classList.contains('ns-ovl')){
+    document.documentElement.style.setProperty('--ns-ptop',(top.offsetTop+top.offsetHeight+12)+'px');}
+  _nsRectsAt=-999;
+}
+function _nsSyncOverlay(){
+  const a=document.getElementById('talkersOverlay'),b=document.getElementById('wifiOverlay');
+  const on=!!((a&&a.style.display&&a.style.display!=='none')||(b&&b.style.display&&b.style.display!=='none'));
+  document.body.classList.toggle('ns-ovl',on);
+  if(!on)setTimeout(_nsSyncChrome,0);
+}
+(function(){
+  try{
+    const mo=new MutationObserver(_nsSyncOverlay);
+    ['talkersOverlay','wifiOverlay'].forEach(id=>{const el=document.getElementById(id);if(el)mo.observe(el,{attributes:true,attributeFilter:['style']});});
+    if(window.ResizeObserver){const ro=new ResizeObserver(_nsSyncChrome);const tp2=document.getElementById('nsTop');if(tp2)ro.observe(tp2);}
+  }catch(e){}
+  window.addEventListener('resize',_nsSyncChrome);
+  _nsSyncChrome();
+  ['mousedown','wheel','touchstart'].forEach(ev=>canvas.addEventListener(ev,()=>{_nsAuto=false;},{passive:true}));
+  canvas.addEventListener('mouseleave',()=>{try{hideInfo();}catch(e){}});   // off the canvas (onto a panel): nothing is under the mouse any more
+})();
 
 // ── state ─────────────────────────────────────────────────────────────────
 let nodeData=[], flowData=[], lastTick=-1, flowCurves=[];
@@ -48254,10 +48922,11 @@ function toggleWorld(){
         b.innerHTML=WORLD_ON?'\ud83c\udf10&nbsp; WORLD: ON':'\ud83c\udf10&nbsp; WORLD VIEW';}
   if(WORLD_ON){
     _worldBuild(); WORLD_SPIN=true;
-    zoom=Math.max(zoom,17); rotX=0.42;          // pull back so the globe fits
+    zoom=Math.max(Math.min(zoom,24),17); rotX=0.42; panX=0; panY=0; panZ=0;   // pull back so the globe fits, centred
     if(typeof _fitToNodes==='function'){/* skip auto-fit: globe sets the frame */}
   }else{
     _worldDestroy();
+    rotX=0.40; zoom=30; panX=0; panY=0.3; panZ=0; _firstFit=true;
   }
   try{ rebuildGeometry(nodeData,flowData); }catch(e){ console.warn('world rebuild:',e); }
   _worldDepthFix();
@@ -48298,17 +48967,19 @@ function _worldLabelPos(sp,x,y,z,rad){
 }
 // ── rebuild geometry ───────────────────────────────────────────────────────
 function rebuildGeometry(nodes,flows){
+  _nsLayout(nodes);    // this machine in the middle, everything else on orbits
   _worldPlace(nodes);   // world view: rewrite x/y/z to real positions on the globe
   // Return old flag spheres to pool
   _returnNodeMeshes();
   _rayTargets=[];
 
   // Remove old label sprites
-  labelSprites.forEach(s=>scene.remove(s));
+  labelSprites.forEach(s=>{scene.remove(s);try{s.material.dispose();}catch(e){}});
   labelSprites.length=0; _labelByNode=[];
 
   const N=Math.min(nodes.length,MAX_NODES);
   let ringCount=0;
+  const _nsWant=showLabels?_nsLabelSet(nodes,N):null;
 
   for(let i=0;i<N;i++){
     const nd=nodes[i];
@@ -48331,15 +49002,12 @@ function rebuildGeometry(nodes,flows){
       ringIM.setMatrixAt(ringCount++,_mat);
     }
 
-    if(showLabels){
-      const threshold = nodes.length > 20 ? 0.02 : 0;
-      if(nd.local || nd.blocked || nd.frac > threshold){
-        const sp=makeSprite(nd.label||nd.id, col);
-        _worldLabelPos(sp,sx,sy,sz,rw);
-        sp.userData.nodeIdx=i; _labelByNode[i]=sp;
-        scene.add(sp); labelSprites.push(sp);
-        if(WORLD_ON)sp.material.depthTest=true;
-      }
+    if(_nsWant&&_nsWant.has(i)){
+      const sp=_nsMakeLabel(nd);
+      _nsLabelPos(sp,sx,sy,sz,rw);
+      sp.userData.nodeIdx=i; _labelByNode[i]=sp;
+      scene.add(sp); labelSprites.push(sp);
+      if(WORLD_ON)sp.material.depthTest=true;
     }
   }
 
@@ -48362,10 +49030,11 @@ function rebuildGeometry(nodes,flows){
                      src:fl.src,dst:fl.dst,proto:fl.proto,bytes:fl.bytes,pkts:fl.pkts});
     for(let p=0;p<CPS-1;p++){
       const a=pts[p],b=pts[p+1];
+      const ga=0.30+0.70*(p/(CPS-1)), gb=0.30+0.70*((p+1)/(CPS-1));   // brighter toward the far end
       fPos[vi*3]=a.x;fPos[vi*3+1]=a.y;fPos[vi*3+2]=a.z;vi++;
-      fCol[(vi-1)*3]=fc.r;fCol[(vi-1)*3+1]=fc.g;fCol[(vi-1)*3+2]=fc.b;
+      fCol[(vi-1)*3]=fc.r*ga;fCol[(vi-1)*3+1]=fc.g*ga;fCol[(vi-1)*3+2]=fc.b*ga;
       fPos[vi*3]=b.x;fPos[vi*3+1]=b.y;fPos[vi*3+2]=b.z;vi++;
-      fCol[(vi-1)*3]=fc.r;fCol[(vi-1)*3+1]=fc.g;fCol[(vi-1)*3+2]=fc.b;
+      fCol[(vi-1)*3]=fc.r*gb;fCol[(vi-1)*3+1]=fc.g*gb;fCol[(vi-1)*3+2]=fc.b*gb;
     }
   }
   for(let i=vi;i<MAX_FLOWS*CPS*2;i++){fPos[i*3]=0;fPos[i*3+1]=0;fPos[i*3+2]=0;}
@@ -48374,6 +49043,7 @@ function rebuildGeometry(nodes,flows){
   flowGeo.setDrawRange(0,vi);
   partGeo.setDrawRange(0,Math.min(F*PARTS_PER_FLOW,MAX_PARTS_TOTAL));
   _pktMesh.visible=!WORLD_ON;   // the console panel is floor-only, hidden in globe view
+  try{ _nsDecor(nodes,N); }catch(e){ console.warn('decor:',e); }
 }
 
 function arcPoints(s,d){
@@ -48440,10 +49110,11 @@ function showInfo(nd){
     const bTag=f.blocked?'<span style="color:#ff4444">⛔</span> ':'';
     return `<div style="color:#2a5a7a;margin:1px 0">${bTag}${dir} ${peer} <span style="color:#38b8f0">${f.proto}</span> <span style="color:#a371f7">${fmtBytes(f.bytes||0)}</span></div>`;
   }).join('');
+  try{ _nsCardExtras(nd); }catch(e){}
   infoDiv.style.display='block';
 }
 
-function hideInfo(){infoDiv.style.display='none';cross.style.display='none';hoveredIdx=-1;}
+function hideInfo(){cross.style.display='none';hoveredIdx=-1;_nsCard();}   // falls back to the selected host, if any
 
 // ── raycasting ─────────────────────────────────────────────────────────────
 const raycaster=new THREE.Raycaster();
@@ -48458,6 +49129,7 @@ function onMouseMove(e){
     if(idx!==undefined && idx<nodeData.length){
       hoveredIdx=idx;
       showInfo(nodeData[idx]);
+      try{ _nsEnsureLabel(idx); }catch(e){}
       cross.style.left=e.clientX+'px'; cross.style.top=e.clientY+'px';
       cross.style.display='block';
       return;
@@ -48806,6 +49478,7 @@ function _drawGraph(ip, color){
 
 function selectNode(nd){
   selectedNode = nd;
+  try{ _nsSelIdx = nd ? nodeData.findIndex(n=>n.id===nd.id) : -1; _nsCardKey=''; _nsCard(); }catch(e){}
   if(!nd){
     graphPlane.visible=false;
     aiPlane.visible=false;
@@ -48908,6 +49581,7 @@ function toggleGrid(){
   // ever controls the 4 wall grids.
   _gridVisible=!_gridVisible;
   _wallGrids.forEach(g=>{ g.visible=_gridVisible; });
+  _nsFloor.visible=_gridVisible&&!WORLD_ON;
   document.getElementById('btnGrid').classList.toggle('active',_gridVisible);
 }
 let _autoCentrePending=false;  // defined here, not duplicated elsewhere
@@ -48932,13 +49606,13 @@ function _fitToNodes(){
   const aspect=_getW()/_getH();
   const hFovRad=Math.atan(Math.tan(fovRad)*aspect);
   // Use narrower of the two FOVs to guarantee everything fits
-  const fitZoom=extent/Math.tan(Math.min(fovRad,hFovRad))*1.4;
+  const fitZoom=extent/Math.tan(Math.min(fovRad,hFovRad))*1.05;
   zoom=Math.max(14,Math.min(80,fitZoom));
-  rotX=0.22; rotY=0; panY=0;
+  rotX=0.40; rotY=0; panY=0.3;
 }
 
 function resetCamera(){
-  rotX=0.22;rotY=0;zoom=22;panX=0;panY=0;panZ=0;
+  rotX=0.40;rotY=0;zoom=30;panX=0;panY=0.3;panZ=0;
   _firstFit=true;
 }
 // ── Top Flow Talkers Sankey ──────────────────────────────────────────────────
@@ -50409,23 +51083,23 @@ function toggleFullscreen(){
       const el2=document.documentElement;
       (el2.requestFullscreen||el2.webkitRequestFullscreen).call(el2);
     }
-    btn.textContent='⛶ EXIT FULL';
+    btn.textContent='⛶ EXIT';
     setTimeout(()=>{ _onResize(); resetCamera(); }, 300);
   } else {
     const fn=topDoc.exitFullscreen||topDoc.webkitExitFullscreen||document.exitFullscreen;
     if(fn) fn.call(topDoc.exitFullscreen?topDoc:document);
-    btn.textContent='⛶ FULLSCREEN';
+    btn.textContent='⛶';
     setTimeout(()=>{ _onResize(); resetCamera(); }, 300);
   }
 }
 document.addEventListener('fullscreenchange',()=>{
   const isFS=!!(document.fullscreenElement||document.webkitFullscreenElement);
-  if(!isFS) document.getElementById('btnFS').textContent='⛶ FULLSCREEN';
+  if(!isFS) document.getElementById('btnFS').textContent='⛶';
   setTimeout(_onResize,150);
 });
 
 // ── orbit controls ─────────────────────────────────────────────────────────
-let rotX=0.22,rotY=0,zoom=22,panX=0,panY=0,panZ=0;
+let rotX=0.40,rotY=0,zoom=30,panX=0,panY=0.3,panZ=0;
 let isDrag=false,px=0,py=0;
 addEventListener('mouseup',()=>{isDrag=false;canvas.classList.remove('drag');});
 addEventListener('mousemove',e=>{
@@ -50847,9 +51521,21 @@ function sampleCurve(pts,u){
   return{x:pts[i].x+(pts[i+1].x-pts[i].x)*tf,y:pts[i].y+(pts[i+1].y-pts[i].y)*tf,z:pts[i].z+(pts[i+1].z-pts[i].z)*tf};
 }
 
+let _nsLastNow=0, _nsStep=1, _nsFpsN=0, _nsFpsAt=0;
 function animate(){
   requestAnimationFrame(animate);
-  t+=0.016;
+  /* Motion follows the real time between frames, not the frame count: a fixed step per frame made everything
+     speed up on a fast screen and stall on every late frame. Capped so a frame after a long pause does not jump. */
+  const _now=performance.now();
+  const _dt=_nsLastNow?Math.min(0.05,Math.max(0,(_now-_nsLastNow)/1000)):0.016;
+  _nsLastNow=_now; _nsStep=_dt/0.016; t+=_dt;
+  _nsFpsN++;
+  if(_now-_nsFpsAt>=1000){                       // frames per second, shown in the top bar
+    const _fe=document.getElementById('hfps');
+    if(_fe&&_nsFpsAt)_fe.textContent=Math.round(_nsFpsN*1000/(_now-_nsFpsAt))+' fps';
+    _nsFpsN=0;_nsFpsAt=_now;
+  }
+  _nsRight.setFromMatrixColumn(camera.matrixWorld,0);   // camera's right: labels sit beside their host
 
   // ── Node sinusoidal drift + breathing ─────────────────────────────────────
   for(let i=0;i<_rayTargets.length;i++){
@@ -50872,8 +51558,10 @@ function animate(){
     const sx=nd.x*spreadFactor, sy=nd.y*spreadFactor, sz=nd.z*spreadFactor;
     mesh.position.set(sx+ox, sy+oy, sz+oz);
     // Sync label sprite to drifted position
-    if(_labelByNode[i]) _worldLabelPos(_labelByNode[i], sx+ox, sy+oy, sz+oz, breath*_wk);
+    if(_labelByNode[i]) _nsLabelPos(_labelByNode[i], sx+ox, sy+oy, sz+oz, breath*_wk);
   }
+
+  try{ _nsAnimate(); }catch(e){}
 
   // ── Flow line shimmer ─────────────────────────────────────────────────────
   flowLines.material.opacity = 0.45 + Math.sin(t*0.8)*0.15;
@@ -50920,7 +51608,7 @@ function animate(){
   });
 
   // ── World view: slow spin until the user clicks ──────────────────────────
-  if(WORLD_ON&&WORLD_SPIN){ rotY += 0.0016; }   // ~1 revolution / 65s
+  if(WORLD_ON&&WORLD_SPIN){ rotY += 0.0016*_nsStep; }   // ~1 revolution / 65s
   if(WORLD_ON&&worldMesh&&worldMesh.material.uniforms){
     const sd=_worldSunDir();
     worldMesh.material.uniforms.sunDir.value.set(sd.x,sd.y,sd.z);
@@ -50931,7 +51619,7 @@ function animate(){
   camera.position.y=panY+Math.sin(rotX)*(zoom+camBreath)*0.7+1.5;
   camera.position.z=panZ+Math.cos(rotY)*Math.cos(rotX)*(zoom+camBreath);
   camera.lookAt(panX,panY,panZ);
-  if(protoBars.length){                // protocol bars ease toward their share
+  if(_NS_FLOOR_BARS&&protoBars.length){   // protocol bars ease toward their share
     for(let i=0;i<protoBars.length;i++){
       const b=protoBars[i];
       b.cur += (b.target-b.cur)*0.10;    // smooth approach, no popping
@@ -51000,6 +51688,16 @@ async function poll(){
       const _kept=new Set(_sorted.map(n=>n.ip||n.id));
       nodeData=_sorted; flowData=_allFlows.filter(f=>_kept.has(f.src)&&_kept.has(f.dst));
     } else { nodeData=_allNodes; flowData=_allFlows; }
+    _nsSelf=d.self_ip||'';
+    _nsSelfSet=new Set((d.self_ips||[]).concat(_nsSelf?[_nsSelf]:[]));
+    if(!showBlocked){                       // BLOCKED off: blocked hosts and their flows are left out
+      nodeData=nodeData.filter(n=>!n.blocked); flowData=flowData.filter(f=>!f.blocked);
+    }
+    if(_nsHidden.size){                     // protocols switched off in the Protocol mix panel
+      flowData=flowData.filter(f=>!_nsHidden.has(_nsFlowKey(f)));
+      const _keep=new Set(); flowData.forEach(f=>{_keep.add(f.src);_keep.add(f.dst);});
+      nodeData=nodeData.filter(n=>_keep.has(n.id));
+    }
     try{ updateProtoBars(_allFlows); }catch(e){}   // bars reflect ALL traffic
     try{ _pktEmit(_allFlows); }catch(e){}          // console: new rows from real traffic
     if(d.dns_map) Object.assign(_dnsMap, d.dns_map);
@@ -51007,6 +51705,7 @@ async function poll(){
     // Also extract rdns from nodeData — this is the most reliable source
     if(d.nodes) d.nodes.forEach(n=>{ if(n.rdns && n.rdns !== n.id) _dnsMap[n.id]=n.rdns; });
     try{ rebuildGeometry(nodeData,flowData); }catch(rge){ console.warn('rebuildGeometry error:',rge); }
+    try{ _nsRenderTalk(); _nsCard(); }catch(e){}
     // Top Flow Talkers (ribbons AND radar) is built from a snapshot. Without a
     // rebuild here it stays frozen at whatever the capture looked like when the
     // overlay was opened, so it drifts out of step with the live view.
@@ -51022,15 +51721,15 @@ async function poll(){
       const v = d.vpn || {};
       const who = v.provider || 'VPN';
       if(_vpnActive){
-        _vpnEl.textContent = '\ud83d\udd12 ' + who.toUpperCase();
+        _vpnEl.textContent = '\ud83d\udd12 ' + who.toUpperCase() + ' ACTIVE';
         _vpnEl.style.color = '#39ff14';
         _vpnEl.style.background = 'rgba(10,60,20,0.5)';
-        _vpnEl.style.borderColor = '#1a4a2a';
+        _vpnEl.style.borderColor = 'rgba(61,245,192,.30)';
       }else{
         _vpnEl.textContent = '\u26a0 NO VPN';
         _vpnEl.style.color = '#ff9f43';
         _vpnEl.style.background = 'rgba(90,45,10,0.5)';
-        _vpnEl.style.borderColor = '#5a3a10';
+        _vpnEl.style.borderColor = 'rgba(255,180,84,.35)';
       }
       _vpnEl.title = (v.iface ? v.iface + ' \u2014 ' : '') + (v.reason || '');
     }
@@ -51047,7 +51746,8 @@ async function poll(){
     document.getElementById('hn').textContent=nodeData.length;
     document.getElementById('hf').textContent=flowData.length;
     const bps=flowData.reduce((a,f)=>a+(f.bytes||0),0);
-    document.getElementById('hp').textContent=(bps/1400).toFixed(0);
+    document.getElementById('hp').textContent=_nsK(bps/1400);
+    { const _pk=document.getElementById('nsPk'); if(_pk)_pk.textContent=_nsK(bps/1400); }
     const nb=d.total_blocked||0;
     const hb=document.getElementById('hblocked');
     hb.style.display=nb>0?'inline':'none';
@@ -51065,7 +51765,7 @@ async function poll(){
       waitDiv.style.display='none';
       // Debug: show how many nodes have country codes
       const withCC=nodeData.filter(n=>n.cc).length;
-      document.getElementById('hp').textContent=`${(bps/1400).toFixed(0)} | ${withCC}/${nodeData.length} geo`;
+      document.getElementById('hp').title=`${withCC} of ${nodeData.length} hosts have a location`;
     }
   }catch(e){
     waitMsg.textContent='Cannot reach localhost:8765 — is the app running?';
@@ -51120,9 +51820,10 @@ poll();
                             ('@@3DBORDER@@', _ui['border']), ('@@3DTEXT2@@', _ui['text2']),
                             ('@@3DACCENT@@', _ui['accent']), ('@@NMBUILD@@', _NM_BUILD_ID)):
             html = html.replace(_tok, _val)
-        # 'mr' (middle-right) not 'br' -- this page's own bottom row is
-        # already wall-to-wall with #legend/#info/#killbtn/#atkbtn/
-        # #worldbtn/#fwbtn (see their CSS above), see _nm_ai_widget_html.
+        # 'mr' is kept as the widget's position argument, but this page's own
+        # CSS (#nmAiBtn in the NS skin block) now parks the button bottom-right:
+        # the dock is centred and the right column ends above it, so that corner
+        # is free. See _nm_ai_widget_html.
         html = html.replace('</body>', self._nm_ai_widget_html('mr') + '</body>', 1)
         return html.encode('utf-8')
 
@@ -57872,16 +58573,48 @@ class _NmSpeedGaugeWindow:
             _exc_debug('_NmSpeedGaugeWindow.close')
 
 
+_NM_DISP = {'fam': None}
+
+
+def _nm_disp_font():
+    """Family for titles and big numbers in the main window: Bahnschrift where Windows has it, else the mono face."""
+    if _NM_DISP['fam'] is None:
+        fam = _NM_MONO
+        try:
+            import tkinter.font as _tkf
+            have = set(_tkf.families())
+            for cand in ('Bahnschrift', 'Segoe UI Semibold', 'Segoe UI'):
+                if cand in have:
+                    fam = cand
+                    break
+        except Exception:
+            _exc_debug('_nm_disp_font')
+        _NM_DISP['fam'] = fam
+    return _NM_DISP['fam']
+
+
+def _nm_blend(c1, c2, t):
+    """Mix two '#rrggbb' colours: t=0 gives c1, t=1 gives c2. Tk has no see-through fills, so soft fills are mixed."""
+    try:
+        a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]; b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+        return '#%02x%02x%02x' % tuple(int(round(a[k] + (b[k] - a[k]) * t)) for k in range(3))
+    except Exception:
+        return c1
+
+
 class ModernWindow:
     """Alternative modern sidebar-based UI."""
 
-    BG     = '#050d1a'
-    PANEL  = '#060f1c'
-    PANEL2 = '#030810'
-    SPIN   = '#0a1828'
-    TEXT   = '#c8dff0'
-    TICK   = '#6a9ab8'
-    ACC    = '#38b8f0'
+    BG     = '#060a1c'      # window
+    PANEL  = '#0c1330'      # cards and chart panels
+    PANEL2 = '#080d24'      # top bar, rail, status bar
+    SPIN   = '#1a2450'      # card borders and dividers
+    TEXT   = '#e4ebff'
+    TICK   = '#8b99c4'      # secondary text
+    ACC    = '#5ef0ff'
+    DIM    = '#56628a'      # captions
+    WELL   = '#0a1028'      # the track behind a group of buttons
+    SEL    = '#14204c'      # the selected button in a group
 
     def __init__(self, monitor):
         import tkinter as tk
@@ -57968,53 +58701,63 @@ class ModernWindow:
     # ── Top bar ───────────────────────────────────────────────────────────────
     def _build_topbar(self):
         tk = self._tk; r = self.root
-        top = tk.Frame(r, bg=self.PANEL2, height=46)
+        disp = _nm_disp_font()
+        top = tk.Frame(r, bg=self.PANEL2, height=52)
         top.pack(fill='x'); top.pack_propagate(False)
-        tk.Label(top, text='  ◈  NETWORK MONITOR', bg=self.PANEL2, fg=self.ACC,
-                 font=(_NM_MONO, 11, 'bold')).pack(side='left', pady=10)
-        tk.Frame(top, bg=self.SPIN, width=1, height=28).pack(side='left', padx=6)
+        logo = tk.Canvas(top, width=26, height=26, bg=self.PANEL2, highlightthickness=0)
+        logo.create_rectangle(1, 1, 25, 25, fill='#0d1b3f', outline='#28356e')
+        logo.create_polygon(13, 6, 20, 13, 13, 20, 6, 13, fill=self.ACC, outline='')
+        logo.pack(side='left', padx=(14, 10))
+        tk.Label(top, text='NETSENTINEL', bg=self.PANEL2, fg=self.TEXT,
+                 font=(disp, 12, 'bold')).pack(side='left')
+        tk.Label(top, text='/ Network Monitor', bg=self.PANEL2, fg=self.TICK,
+                 font=(disp, 11)).pack(side='left', padx=(6, 14))
+        seg = tk.Frame(top, bg=self.WELL, highlightthickness=1, highlightbackground=self.SPIN)
+        seg.pack(side='left', pady=9)
         self._nav_btns = {}
         for label, cmd in [
             ('Dashboard',  None),
             ('System',     self._open_system_monitor),
             ('Pen Test',   self._open_pen_test),
         ]:
-            b = tk.Button(top, text=label, bg=self.PANEL2,
-                         fg=self.ACC if label=='Dashboard' else '#2a4a6a',
-                         activebackground='#0a1828', activeforeground=self.ACC,
-                         relief='flat', font=(_NM_MONO, 8), padx=10,
+            on = (label == 'Dashboard')
+            b = tk.Button(seg, text=label, bg=self.SEL if on else self.WELL,
+                         fg=self.ACC if on else self.TICK,
+                         activebackground=self.SEL, activeforeground=self.ACC,
+                         relief='flat', bd=0, highlightthickness=0, font=(disp, 9, 'bold'), padx=13,
                          cursor='hand2' if cmd else 'arrow',
                          command=cmd if cmd else lambda: None)
-            b.pack(side='left', pady=0, ipady=14)
+            b.pack(side='left', padx=2, pady=2, ipady=3)
             self._nav_btns[label] = b
-        tk.Frame(top, bg=self.SPIN, width=1, height=28).pack(side='left', padx=6)
         # BLOOM toggle -- glow/bloom effect on every chart on the main
         # dashboard (Download, Upload, Latency, DNS history, Live traffic).
         # Reuses each series' own theme color for its glow (see _glow_line),
         # so it looks right under all eleven themes with no per-theme code:
         # whatever color a line already is, that's the color it blooms in.
         self._bloom_btn = tk.Button(
-            top, text='✦ BLOOM', bg=self.PANEL2,
-            fg=self.ACC if self._bloom_enabled else '#2a4a6a',
-            activebackground='#0a1828', activeforeground=self.ACC,
-            relief='flat', font=(_NM_MONO, 8), padx=10, cursor='hand2',
+            top, text='\u2726 BLOOM', bg=self.WELL,
+            fg=self.ACC if self._bloom_enabled else self.DIM,
+            activebackground=self.SEL, activeforeground=self.ACC,
+            relief='flat', bd=0, font=(disp, 8, 'bold'), padx=12, cursor='hand2',
+            highlightthickness=1, highlightbackground=self.SPIN,
             command=self._toggle_bloom)
-        self._bloom_btn.pack(side='left', pady=0, ipady=14)
+        self._bloom_btn.pack(side='left', padx=(12, 0), pady=11, ipady=3)
         # CUBE: the app's windows on the faces of a rotating cube you can spin (see _NmCube).
         self._cube = None
-        tk.Button(top, text='\u2b22 CUBE', bg=self.PANEL2, fg='#a371f7',
-                  activebackground='#0a1828', activeforeground=self.ACC,
-                  relief='flat', font=(_NM_MONO, 8), padx=10, cursor='hand2',
-                  command=self._open_cube).pack(side='left', pady=0, ipady=14)
+        tk.Button(top, text='\u2b22 CUBE', bg=self.WELL, fg='#a98bff',
+                  activebackground=self.SEL, activeforeground=self.ACC,
+                  relief='flat', bd=0, font=(disp, 8, 'bold'), padx=12, cursor='hand2',
+                  highlightthickness=1, highlightbackground=self.SPIN,
+                  command=self._open_cube).pack(side='left', padx=(8, 0), pady=11, ipady=3)
         tk.Frame(top, bg=self.PANEL2).pack(side='left', fill='x', expand=True)
         self._live_var = tk.StringVar(value='LIVE')
         self._live_lbl = tk.Label(top, textvariable=self._live_var,
-                                   bg='#0a2a18', fg='#38f0a8',
-                                   font=(_NM_MONO, 8, 'bold'), padx=8, pady=3)
-        self._live_lbl.pack(side='right', padx=12)
+                                   bg='#0a2a22', fg='#7dffb0',
+                                   font=(disp, 8, 'bold'), padx=12, pady=4)
+        self._live_lbl.pack(side='right', padx=14)
         self._clock_var = tk.StringVar()
         tk.Label(top, textvariable=self._clock_var, bg=self.PANEL2,
-                 fg='#2a4060', font=(_NM_MONO, 8)).pack(side='right', padx=4)
+                 fg=self.TICK, font=(_NM_MONO, 10)).pack(side='right', padx=4)
         tk.Frame(r, bg=self.SPIN, height=1).pack(fill='x')
 
     def _open_cube(self):
@@ -58031,7 +58774,7 @@ class ModernWindow:
 
     def _toggle_bloom(self):
         self._bloom_enabled = not self._bloom_enabled
-        self._bloom_btn.config(fg=self.ACC if self._bloom_enabled else '#2a4a6a')
+        self._bloom_btn.config(fg=self.ACC if self._bloom_enabled else self.DIM)
         # Redraw immediately rather than waiting out the next 2-second
         # refresh tick, so the toggle feels instant. _do_refresh() is
         # already what runs on every tick, so this is the same cost the app
@@ -58044,7 +58787,7 @@ class ModernWindow:
     # ── Sidebar ───────────────────────────────────────────────────────────────
     def _build_sidebar(self):
         tk = self._tk
-        sb = tk.Frame(self._main, bg=self.PANEL2, width=54)
+        sb = tk.Frame(self._main, bg=self.PANEL2, width=60)
         sb.pack(side='left', fill='y'); sb.pack_propagate(False)
         tk.Frame(sb, bg=self.SPIN, width=1).pack(side='right', fill='y')
 
@@ -58056,9 +58799,9 @@ class ModernWindow:
             f.pack(fill='x'); f.pack_propagate(False)
             frames.append(f)
             b = tk.Button(f, text=f'{icon}\n{label}', bg=self.PANEL2, fg=fg,
-                         activebackground='#0a1828', activeforeground=self.ACC,
-                         relief='flat', font=(_NM_MONO, 7), cursor='hand2',
-                         command=cmd, justify='center', wraplength=50)
+                         activebackground=self.SEL, activeforeground=self.ACC,
+                         relief='flat', bd=0, highlightthickness=0, font=(_nm_disp_font(), 7, 'bold'), cursor='hand2',
+                         command=cmd, justify='center', wraplength=56)
             b.place(relx=0.5, rely=0.5, anchor='center', relwidth=1, relheight=1)
             return b
 
@@ -58116,15 +58859,14 @@ class ModernWindow:
     # ── Gauge strip ───────────────────────────────────────────────────────────
     def _build_gauges(self, parent):
         tk = self._tk
+        disp = _nm_disp_font()
         gs = tk.Frame(parent, bg=self.BG)
-        gs.pack(fill='x', padx=10, pady=(10, 0))
+        gs.pack(fill='x', padx=14, pady=(12, 0))
 
         # All four gauge colours -- Download/Upload/Ping/DNS -- come from
         # the active colour theme (Settings -> Colour Theme), same as the
-        # historical charts below. DNS used to be a fixed accent here
-        # because THEMES didn't carry a dns colour at all; every preset
-        # has one now, so fallback_col below only matters for a pre-
-        # existing custom override saved before 'dns' existed.
+        # historical charts below. fallback_col only matters for a custom
+        # override saved before the theme carried that colour.
         theme_c = self._monitor.colors
         for key, label, unit, theme_key, fallback_col in [
             ('dl',  'Download', 'Mbps', 'download', '#00d4aa'),
@@ -58135,53 +58877,63 @@ class ModernWindow:
             col = (theme_c.get(theme_key, fallback_col) if theme_key
                    else fallback_col)
             card = tk.Frame(gs, bg=self.PANEL, bd=0,
-                           highlightthickness=1, highlightbackground=self.SPIN,
-                           padx=12, pady=8)
-            card.pack(side='left', fill='x', expand=True, padx=(0, 8))
+                           highlightthickness=1, highlightbackground=self.SPIN)
+            _gi = len(self._gauge_refs)               # equal-width cards whatever the numbers in them
+            gs.columnconfigure(_gi, weight=1, uniform='nmg')
+            card.grid(row=0, column=_gi, sticky='nsew', padx=(0, 10))
+            strip = tk.Frame(card, bg=col, width=3)          # the series colour down the card's left edge
+            strip.pack(side='left', fill='y')
+            inner = tk.Frame(card, bg=self.PANEL, padx=12, pady=9)
+            inner.pack(side='left', fill='both', expand=True)
 
             # Label row
-            lf = tk.Frame(card, bg=self.PANEL); lf.pack(fill='x')
+            lf = tk.Frame(inner, bg=self.PANEL); lf.pack(fill='x')
             dot = tk.Canvas(lf, width=7, height=7, bg=self.PANEL,
                            highlightthickness=0)
             dot_item = dot.create_oval(1, 1, 6, 6, fill=col, outline='')
-            dot.pack(side='left', pady=3, padx=(0, 4))
-            tk.Label(lf, text=label.upper(), bg=self.PANEL, fg=self.TICK,
-                    font=(_NM_MONO, 8)).pack(side='left')
+            dot.pack(side='left', pady=3, padx=(0, 6))
+            tk.Label(lf, text=' '.join(label.upper()), bg=self.PANEL, fg=self.DIM,
+                    font=(disp, 8, 'bold')).pack(side='left')
 
-            # Value
-            val_v = tk.StringVar(value='—')
-            val_lbl = tk.Label(card, textvariable=val_v, bg=self.PANEL, fg=col,
-                    font=(_NM_MONO, 21, 'bold'), anchor='w')
-            val_lbl.pack(fill='x')
-            tk.Label(card, text=unit, bg=self.PANEL, fg=self.TICK,
-                    font=(_NM_MONO, 8), anchor='w').pack(fill='x')
+            # Value + unit on the left, sparkline filling the rest of the row
+            vrow = tk.Frame(inner, bg=self.PANEL); vrow.pack(fill='x')
+            left = tk.Frame(vrow, bg=self.PANEL); left.pack(side='left')
+            vl = tk.Frame(left, bg=self.PANEL); vl.pack(anchor='w')
+            val_v = tk.StringVar(value='\u2014')
+            val_lbl = tk.Label(vl, textvariable=val_v, bg=self.PANEL, fg=col,
+                    font=(disp, 22, 'bold'), anchor='w')
+            val_lbl.pack(side='left')
+            tk.Label(vl, text=unit, bg=self.PANEL, fg=self.TICK,
+                    font=(_NM_MONO, 9)).pack(side='left', anchor='s', padx=(5, 0), pady=(0, 7))
+            sub_v = tk.StringVar(value='')
+            tk.Label(left, textvariable=sub_v, bg=self.PANEL, fg=self.DIM,
+                    font=(_NM_MONO, 8), anchor='w').pack(anchor='w')
+            spk = tk.Canvas(vrow, height=46, width=8, bg=self.PANEL,
+                           highlightthickness=0)
+            spk.pack(side='left', fill='both', expand=True, padx=(12, 0))
 
             # Bar
-            bar_bg = tk.Canvas(card, height=2, bg=self.SPIN,
+            bar_bg = tk.Canvas(inner, height=4, bg='#131c44',
                               highlightthickness=0)
-            bar_bg.pack(fill='x', pady=(5, 4))
-            bar_fill = bar_bg.create_rectangle(0, 0, 0, 2, fill=col, outline='')
-
-            # Sparkline
-            spk = tk.Canvas(card, height=30, bg=self.PANEL,
-                           highlightthickness=0)
-            spk.pack(fill='x')
+            bar_bg.pack(fill='x', pady=(7, 0))
+            bar_fill = bar_bg.create_rectangle(0, 0, 0, 4, fill=col, outline='')
 
             self._gauge_refs[key] = {
                 'val': val_v, 'bar_bg': bar_bg, 'bar_fill': bar_fill,
                 'spk': spk, 'col': col, 'max': 200.0,
                 'dot': dot, 'dot_item': dot_item, 'val_lbl': val_lbl,
-                'theme_key': theme_key,
+                'theme_key': theme_key, 'strip': strip, 'sub': sub_v,
             }
 
         # Stats mini card
-        sc = tk.Frame(gs, bg='#040c18', bd=0,
+        sc = tk.Frame(gs, bg=self.PANEL, bd=0,
                       highlightthickness=1, highlightbackground=self.SPIN,
-                      padx=12, pady=8)
-        sc.pack(side='left', fill='x', expand=True)
-        tk.Label(sc, text='TODAY', bg='#040c18', fg=self.TICK,
-                font=(_NM_MONO, 8)).pack(anchor='w', pady=(0, 5))
-        grid = tk.Frame(sc, bg='#040c18'); grid.pack(fill='x')
+                      padx=14, pady=9)
+        gs.columnconfigure(4, weight=1, uniform='nmg')
+        sc.grid(row=0, column=4, sticky='nsew')
+        tk.Label(sc, text='T O D A Y', bg=self.PANEL, fg=self.DIM,
+                font=(disp, 8, 'bold')).pack(anchor='w', pady=(0, 4))
+        grid = tk.Frame(sc, bg=self.PANEL); grid.pack(fill='x')
         grid.columnconfigure(0, weight=1); grid.columnconfigure(1, weight=1)
         for i, (skey, slbl, scol) in enumerate([
             ('tests',  'Tests',  self.ACC),
@@ -58190,48 +58942,50 @@ class ModernWindow:
             ('jitter', 'Jitter', '#f7cc73'),
         ]):
             r2, c2 = i // 2, i % 2
-            f2 = tk.Frame(grid, bg='#040c18', padx=4, pady=2)
+            f2 = tk.Frame(grid, bg=self.PANEL, padx=4, pady=1)
             f2.grid(row=r2, column=c2, sticky='w')
-            tk.Label(f2, text=slbl, bg='#040c18', fg='#2a4060',
+            tk.Label(f2, text=slbl, bg=self.PANEL, fg=self.DIM,
                     font=(_NM_MONO, 7)).pack(anchor='w')
-            v2 = tk.StringVar(value='—')
+            v2 = tk.StringVar(value='\u2014')
             self._stat_labels[skey] = v2
-            tk.Label(f2, textvariable=v2, bg='#040c18', fg=scol,
-                    font=(_NM_MONO, 13, 'bold')).pack(anchor='w')
+            tk.Label(f2, textvariable=v2, bg=self.PANEL, fg=scol,
+                    font=(disp, 13, 'bold')).pack(anchor='w')
 
     # ── Chart area ────────────────────────────────────────────────────────────
     def _build_viewbar(self, parent):
         tk = self._tk
-        vf = tk.Frame(parent, bg=self.BG, height=32)
-        vf.pack(fill='x', padx=10, pady=(6, 0))
+        disp = _nm_disp_font()
+        vf = tk.Frame(parent, bg=self.BG, height=36)
+        vf.pack(fill='x', padx=14, pady=(10, 0))
         vf.pack_propagate(False)
 
+        seg = tk.Frame(vf, bg=self.WELL, highlightthickness=1, highlightbackground=self.SPIN)
+        seg.pack(side='left')
         self._view_btns = {}
         for label, mode in [('Today','today'),('This Week','week'),
                              ('This Month','month'),('All Time','all')]:
-            b = tk.Button(vf, text=label,
-                         bg='#0a1828', fg=self.TICK,
-                         activebackground='#0d2235', activeforeground=self.ACC,
-                         relief='flat', font=(_NM_MONO, 8),
-                         padx=10, cursor='hand2',
-                         highlightthickness=1, highlightbackground=self.SPIN,
+            b = tk.Button(seg, text=label,
+                         bg=self.WELL, fg=self.TICK,
+                         activebackground=self.SEL, activeforeground=self.ACC,
+                         relief='flat', bd=0, highlightthickness=0, font=(disp, 9, 'bold'),
+                         padx=13, cursor='hand2',
                          command=lambda m=mode: self._set_view(m))
-            b.pack(side='left', padx=(0, 4), ipady=4)
+            b.pack(side='left', padx=2, pady=2, ipady=3)
             self._view_btns[mode] = b
 
-        tk.Frame(vf, bg=self.SPIN, width=1).pack(side='left', padx=6, fill='y')
-
-        tk.Button(vf, text='◄', bg='#0a1828', fg=self.ACC,
-                 relief='flat', font=(_NM_MONO, 9), padx=8, cursor='hand2',
-                 activebackground='#0d2235',
-                 command=lambda: self._nav_day(-1)).pack(side='left', padx=(0, 2), ipady=4)
+        tk.Button(vf, text='\u25c4', bg=self.WELL, fg=self.ACC,
+                 relief='flat', bd=0, font=(_NM_MONO, 9), padx=9, cursor='hand2',
+                 activebackground=self.SEL, activeforeground=self.ACC,
+                 highlightthickness=1, highlightbackground=self.SPIN,
+                 command=lambda: self._nav_day(-1)).pack(side='left', padx=(10, 2), ipady=4)
         self._day_label_var = self._tk.StringVar(value='')
         tk.Label(vf, textvariable=self._day_label_var,
-                bg=self.BG, fg='#2a4a6a',
-                font=(_NM_MONO, 8), width=14).pack(side='left')
-        tk.Button(vf, text='►', bg='#0a1828', fg=self.ACC,
-                 relief='flat', font=(_NM_MONO, 9), padx=8, cursor='hand2',
-                 activebackground='#0d2235',
+                bg=self.BG, fg=self.TEXT,
+                font=(disp, 9, 'bold'), width=12).pack(side='left')
+        tk.Button(vf, text='\u25ba', bg=self.WELL, fg=self.ACC,
+                 relief='flat', bd=0, font=(_NM_MONO, 9), padx=9, cursor='hand2',
+                 activebackground=self.SEL, activeforeground=self.ACC,
+                 highlightthickness=1, highlightbackground=self.SPIN,
                  command=lambda: self._nav_day(1)).pack(side='left', padx=(2, 0), ipady=4)
 
         self._update_view_buttons()
@@ -58253,13 +59007,12 @@ class ModernWindow:
         for mode, btn in self._view_btns.items():
             is_active = (mode == active_mode) or (mode == 'today' and active_mode == 'history' and self._hist_offset == 0)
             btn.config(fg=self.ACC if is_active else self.TICK,
-                       bg='#0d2235' if is_active else '#0a1828',
-                       highlightbackground='#1a3a5a' if is_active else self.SPIN)
+                       bg=self.SEL if is_active else self.WELL)
         if self._hist_offset > 0:
             d = (datetime.now() - timedelta(days=self._hist_offset)).strftime('%a %d %b')
-            self._day_label_var.set(d)
+            self._day_label_var.set(d.upper())
         else:
-            self._day_label_var.set('')
+            self._day_label_var.set('TODAY' if active_mode == 'today' else '')
 
     def _build_charts(self, parent):
         import matplotlib
@@ -58269,11 +59022,11 @@ class ModernWindow:
         import matplotlib.gridspec as gridspec
 
         cf = self._tk.Frame(parent, bg=self.BG)
-        cf.pack(fill='both', expand=True, padx=10, pady=8)
+        cf.pack(fill='both', expand=True, padx=14, pady=(8, 10))
 
         fig = _nm_new_figure(figsize=(14, 5), facecolor=self.BG)
-        fig.subplots_adjust(left=0.04, right=0.98, top=0.91,
-                           bottom=0.14, hspace=0.55, wspace=0.28)
+        fig.subplots_adjust(left=0.035, right=0.99, top=0.93,
+                           bottom=0.11, hspace=0.46, wspace=0.15)
         gs = gridspec.GridSpec(2, 3, figure=fig)
 
         for key, row, col, title, unit in [
@@ -58288,10 +59041,9 @@ class ModernWindow:
             ax.set_facecolor(self.PANEL)
             ax.tick_params(colors=self.TICK, labelsize=7, length=2)
             for sp in ax.spines.values(): sp.set_color(self.SPIN)
-            ax.yaxis.grid(True, color='#0a1828', linewidth=0.5, alpha=0.8)
-            lbl = f'{title}  {unit}'.strip()
-            ax.set_title(lbl, loc='left', color=self.TICK,
-                        fontsize=8, fontfamily=_NM_MONO, pad=4)
+            ax.yaxis.grid(True, color='#141d44', linewidth=0.6, alpha=1.0)
+            ax.set_title(title, loc='left', color=self.TEXT, fontweight='bold',
+                        fontsize=9, fontfamily=_nm_disp_font(), pad=6)
             self._axes[key] = ax
 
         self._mpl_canvas = FigureCanvasTkAgg(fig, master=cf)
@@ -58318,22 +59070,22 @@ class ModernWindow:
     def _build_statusbar(self):
         tk = self._tk; r = self.root
         tk.Frame(r, bg=self.SPIN, height=1).pack(fill='x')
-        sb = tk.Frame(r, bg=self.PANEL2, height=24)
+        sb = tk.Frame(r, bg=self.PANEL2, height=28)
         sb.pack(fill='x'); sb.pack_propagate(False)
         self._status_dots = {}
         for key, label in [('speedtest','speedtest.exe'),('tshark','tshark'),
                             ('web','web'),('db','SQLite')]:
             c2 = tk.Canvas(sb, width=7, height=7, bg=self.PANEL2,
                           highlightthickness=0)
-            c2.create_oval(1, 1, 6, 6, fill='#2a4060', outline='')
-            c2.pack(side='left', padx=(8, 2), pady=8)
+            c2.create_oval(1, 1, 6, 6, fill=self.DIM, outline='')
+            c2.pack(side='left', padx=(12, 4), pady=10)
             v = tk.StringVar(value=label)
             self._status_dots[key] = (c2, v)
-            tk.Label(sb, textvariable=v, bg=self.PANEL2, fg='#2a4060',
-                    font=(_NM_MONO, 8)).pack(side='left', padx=(0, 8))
+            tk.Label(sb, textvariable=v, bg=self.PANEL2, fg=self.TICK,
+                    font=(_NM_MONO, 8)).pack(side='left', padx=(0, 6))
         self._next_var = tk.StringVar(value='')
         tk.Label(sb, textvariable=self._next_var, bg=self.PANEL2,
-                fg='#2a4060', font=(_NM_MONO, 8)).pack(side='right', padx=12)
+                fg=self.TICK, font=(_NM_MONO, 8)).pack(side='right', padx=14)
 
     # ── Build all ─────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -58362,7 +59114,9 @@ class ModernWindow:
             y = h - 4 - int((v or 0) / mx * (h - 8))
             pts += [x, y]
         if len(pts) >= 4:
-            canvas.create_line(pts, fill=color, width=1.4, smooth=True)
+            # a soft fill under the line: the series colour mixed into the card colour (Tk has no see-through fills)
+            canvas.create_polygon(pts + [pts[-2], h, pts[0], h], fill=_nm_blend(self.PANEL, color, 0.16), outline='')
+            canvas.create_line(pts, fill=color, width=1.6)
 
     def _apply_gauge_colors(self):
         """Re-colour all four gauge cards -- Download/Upload/Ping/DNS (dot,
@@ -58391,6 +59145,11 @@ class ModernWindow:
                     ref['dot'].itemconfig(ref['dot_item'], fill=col)
                 except Exception:
                     _exc_debug('ModernWindow._apply_gauge_colors dot')
+                try:
+                    if ref.get('strip') is not None:
+                        ref['strip'].config(bg=col)
+                except Exception:
+                    _exc_debug('ModernWindow._apply_gauge_colors strip')
                 try:
                     ref['val_lbl'].config(fg=col)
                 except Exception:
@@ -58486,7 +59245,7 @@ class ModernWindow:
             w   = bg.winfo_width()
             if w > 1:
                 pct = min(1.0, v / ref['max'])
-                bg.coords(ref['bar_fill'], 0, 0, int(w * pct), 2)
+                bg.coords(ref['bar_fill'], 0, 0, int(w * pct), 4)
             self._draw_sparkline(ref['spk'], self._spk[key], ref['col'])
 
         # Today stats
@@ -58496,6 +59255,16 @@ class ModernWindow:
         td_dl = [dl_all[i] for i in ti_today if i < len(dl_all) and dl_all[i]]
         td_pg = [pg_all[i] for i in ti_today if i < len(pg_all) and pg_all[i]]
         dns_n = sum(1 for t in dns_ts if t.startswith(today))
+        try:
+            _di = [i for i, t in enumerate(dns_ts) if t.startswith(today)]
+            for _k, _arr, _idx, _hi in (('dl', dl_all, ti_today, _NM_MAX_SANE_MBPS), ('ul', ul_all, ti_today, _NM_MAX_SANE_MBPS),
+                                        ('pg', pg_all, ti_today, 600000.0), ('dns', dv_all, _di, 600000.0)):
+                _v = [float(_arr[i]) for i in _idx if i < len(_arr) and _arr[i] and 0.0 <= float(_arr[i]) <= _hi]
+                _sv = self._gauge_refs[_k].get('sub')
+                if _sv is not None:
+                    _sv.set('avg %.1f \u00b7 max %.1f' % (sum(_v) / len(_v), max(_v)) if _v else 'no tests today')
+        except Exception:
+            _exc_debug('gauge sub line')
         # Filtered indices for selected view
         ti = self._get_view_indices(ts_all)
         self._stat_labels['tests'].set(str(len(ti_today)))
@@ -58525,8 +59294,8 @@ class ModernWindow:
             self._live_lbl.config(bg='#3a0a0a', fg='#ff6b6b')
         else:
             self._live_var.set('TESTING' if rm else 'DNS CHECK' if rd else 'LIVE')
-            self._live_lbl.config(bg='#1a1400' if (rm or rd) else '#0a2a18',
-                                  fg='#ffd93d' if (rm or rd) else '#38f0a8')
+            self._live_lbl.config(bg='#2a2206' if (rm or rd) else '#0a2a22',
+                                  fg='#ffd93d' if (rm or rd) else '#7dffb0')
 
         # Status dots
         for key, path_attr, label in [
@@ -58635,7 +59404,22 @@ class ModernWindow:
             ax.set_facecolor(self.PANEL)
             ax.tick_params(colors=self.TICK, labelsize=7, length=2)
             for sp in ax.spines.values(): sp.set_color(self.SPIN)
-            ax.yaxis.grid(True, color='#0a1828', linewidth=0.5, alpha=0.8)
+            ax.yaxis.grid(True, color='#141d44', linewidth=0.6, alpha=1.0)
+
+        _disp = _nm_disp_font()
+
+        def head(ax, title, unit='', col=None, last=None):
+            # card heading: the name on the left, the latest value and its unit on the right in the series colour
+            ax.set_title(title, loc='left', color=self.TEXT, fontweight='bold',
+                        fontsize=9, fontfamily=_disp, pad=6)
+            try:
+                ok = last is not None and last == last
+                txt = ('%.1f %s' % (last, unit)) if ok else unit
+                if txt:
+                    ax.text(1.0, 1.025, txt, transform=ax.transAxes, ha='right', va='bottom',
+                            color=(col if ok and col else self.DIM), fontsize=8, fontweight='bold', fontfamily=_disp)
+            except Exception:
+                _exc_debug('chart head')
 
         def line(ax, xs, ys, col, title, unit=''):
             style(ax)
@@ -58644,17 +59428,20 @@ class ModernWindow:
                 # traffic" panel already uses, so the glow (drawn last) sits
                 # bright on top of the translucent area fill instead of
                 # being muted underneath it.
-                ax.fill_between(xs, 0, ys, color=col, alpha=0.12)
+                ax.fill_between(xs, 0, ys, color=col, alpha=0.16)
                 if self._bloom_enabled:
-                    self._glow_line(ax, xs, ys, col, lw=1.4)
+                    self._glow_line(ax, xs, ys, col, lw=1.5)
                 else:
-                    ax.plot(xs, ys, color=col, linewidth=1.4, alpha=0.95)
+                    ax.plot(xs, ys, color=col, linewidth=1.5, alpha=0.95)
                 ax.xaxis.set_major_formatter(DateFormatter('%H:%M'))
                 plt.setp(ax.get_xticklabels(), rotation=30, ha='right',
-                        color=self.TICK, fontsize=6)
-            lbl = f'{title}  {unit}'.strip()
-            ax.set_title(lbl, loc='left', color=self.TICK,
-                        fontsize=8, fontfamily=_NM_MONO, pad=4)
+                        color=self.DIM, fontsize=6)
+            _last = None
+            try:
+                _last = next((v for v in reversed(ys) if v == v), None) if ys else None
+            except Exception:
+                _last = None
+            head(ax, title, unit, col, _last)
 
         # Today's data for top row
         pairs = []
@@ -58688,18 +59475,17 @@ class ModernWindow:
             try:
                 dt = [datetime.fromisoformat(t) for t in dns_ts[-80:]]
                 dv = [v or 0 for v in dv_all[-80:]]
-                ax_dns.fill_between(dt, 0, dv, color=dns_c, alpha=0.12)
+                ax_dns.fill_between(dt, 0, dv, color=dns_c, alpha=0.16)
                 if self._bloom_enabled:
-                    self._glow_line(ax_dns, dt, dv, dns_c, lw=1.4)
+                    self._glow_line(ax_dns, dt, dv, dns_c, lw=1.5)
                 else:
-                    ax_dns.plot(dt, dv, color=dns_c, linewidth=1.4)
+                    ax_dns.plot(dt, dv, color=dns_c, linewidth=1.5)
                 ax_dns.xaxis.set_major_formatter(DateFormatter('%H:%M'))
                 plt.setp(ax_dns.get_xticklabels(), rotation=30, ha='right',
-                        color=self.TICK, fontsize=6)
+                        color=self.DIM, fontsize=6)
             except Exception:
                 _exc('line')
-        ax_dns.set_title('DNS history  ms', loc='left', color=self.TICK,
-                        fontsize=8, fontfamily=_NM_MONO, pad=4)
+        head(ax_dns, 'DNS history', 'ms', dns_c, (dv_all[-1] or 0) if (dns_ts and dv_all) else None)
 
         # Stats table
         ax_st = self._axes['stats']
@@ -58724,30 +59510,29 @@ class ModernWindow:
             sd   = (sum((x-avg_)**2 for x in vals)/len(vals))**0.5
             return f'{avg_:.1f}', f'{mx:.1f}', f'{mn:.1f}', f'{sd:.1f}'
         rows4 = [
-            ('\u2193 DL',  dl_c,     dl_t,  0.0, _NM_MAX_SANE_MBPS),
-            ('\u2191 UL',  ul_c,     ul_t,  0.0, _NM_MAX_SANE_MBPS),
-            ('\u25cb Ping',pg_c,     pg_t,  0.0, 600000.0),
-            ('\u2299 DNS', dns_c, [v or 0 for v in dv_all], 0.0, 600000.0),
+            ('\u25cf Download', dl_c,  dl_t,  0.0, _NM_MAX_SANE_MBPS),
+            ('\u25cf Upload',   ul_c,  ul_t,  0.0, _NM_MAX_SANE_MBPS),
+            ('\u25cf Ping',     pg_c,  pg_t,  0.0, 600000.0),
+            ('\u25cf DNS',      dns_c, [v or 0 for v in dv_all], 0.0, 600000.0),
         ]
-        cx = [0.02, 0.35, 0.54, 0.71, 0.88]
-        for ci, h in enumerate(['','Avg','Max','Min','σ']):
+        cx = [0.03, 0.40, 0.57, 0.73, 0.88]
+        for ci, h in enumerate(['','AVG','MAX','MIN','σ']):
             ax_st.text(cx[ci], 0.94, h, transform=ax_st.transAxes,
-                      color=self.TICK, fontsize=7, va='top', fontfamily=_NM_MONO)
+                      color=self.DIM, fontsize=7, fontweight='bold', va='top', fontfamily=_disp)
         ax_st.plot([0, 1], [0.89, 0.89], color=self.SPIN,
                    lw=0.8, transform=ax_st.transAxes)
         for ri, (name, rc, vals_, _lo, _hi) in enumerate(rows4):
             y = 0.77 - ri * 0.18
             avg_, mx, mn, sd = s4(vals_, _lo, _hi)
             ax_st.text(cx[0], y, name, transform=ax_st.transAxes, color=rc,
-                      fontsize=7, fontweight='bold', va='top', fontfamily=_NM_MONO)
+                      fontsize=8, fontweight='bold', va='top', fontfamily=_disp)
             for ci2, val in enumerate([avg_, mx, mn, sd], 1):
                 ax_st.text(cx[ci2], y, val, transform=ax_st.transAxes,
                           color=self.TEXT, fontsize=7, va='top', fontfamily=_NM_MONO)
-        ax_st.text(0.02, 0.04, f'{len(today_i)} tests today',
-                  transform=ax_st.transAxes, color='#2a4060',
-                  fontsize=7, fontfamily=_NM_MONO)
-        ax_st.set_title('Statistics', loc='left', color=self.TICK,
-                        fontsize=8, fontfamily=_NM_MONO, pad=4)
+        ax_st.text(0.03, 0.04, f'{len(today_i)} tests in this view',
+                  transform=ax_st.transAxes, color=self.DIM,
+                  fontsize=6.5, fontfamily=_NM_MONO)
+        head(ax_st, 'Statistics')
 
         self._mpl_canvas.draw_idle()
 
@@ -58788,8 +59573,8 @@ class ModernWindow:
         # redraw -- like every other panel already does -- means this panel
         # always has a title AND the readout, instead of one instead of the
         # other depending on whether data has landed yet.
-        ax.set_title('Live traffic  Mbps', loc='left', color=self.TICK,
-                    fontsize=8, fontfamily=_NM_MONO, pad=4)
+        ax.set_title('Live traffic', loc='left', color=self.TEXT, fontweight='bold',
+                    fontsize=9, fontfamily=_nm_disp_font(), pad=6)
         LIVE_ACC = '#39ff14'   # the app's established "this is live/active" green
         for sp in ax.spines.values():
             sp.set_color(LIVE_ACC); sp.set_linewidth(1.1); sp.set_alpha(0.55)
@@ -58841,14 +59626,14 @@ class ModernWindow:
                 # Colour-coded live readout up top, in place of a plain title
                 # -- mirrors a hardware monitor's "series name in its own
                 # colour" header instead of one neutral-coloured title.
-                ax.text(0.01, 1.14, f'● RX {rx[-1]:.1f}', transform=ax.transAxes,
+                ax.text(0.46, 1.025, f'● RX {rx[-1]:.1f}', transform=ax.transAxes,
                         color=dl_c, fontsize=8, fontweight='bold',
                         fontfamily=_NM_MONO, va='bottom')
-                ax.text(0.24, 1.14, f'● TX {tx[-1]:.1f}', transform=ax.transAxes,
+                ax.text(0.68, 1.025, f'● TX {tx[-1]:.1f}', transform=ax.transAxes,
                         color=ul_c, fontsize=8, fontweight='bold',
                         fontfamily=_NM_MONO, va='bottom')
-                ax.text(0.99, 1.14, 'Mbps', transform=ax.transAxes,
-                        color=self.TICK, fontsize=7, ha='right',
+                ax.text(1.0, 1.025, 'Mbps', transform=ax.transAxes,
+                        color=self.DIM, fontsize=7, ha='right',
                         fontfamily=_NM_MONO, va='bottom')
                 return
         except Exception:
