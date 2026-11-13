@@ -95,6 +95,22 @@ check('_nsSelfSet=new Set((d.self_ips||[])' in js and 'if(n===hub||_nsSelfSet.ha
       "all of this PC's addresses sit in the centre, the busiest is the hub")
 check('self_ips' in h.out[1] and isinstance(h.out[1]['self_ips'], list), 'the topology data lists all of this PC\'s addresses')
 
+# ── Flow Talkers overlay: steady layout, light drawing, 3D scene paused underneath ──
+fa = js[js.index('function _animateTalkers(){'):js.index('// \u2500\u2500 Helper: draw 3D server box') if '// \u2500\u2500 Helper: draw 3D server box' in js else js.index('function _animateTalkers(){') + 14000]
+check('if(_nsOvl) return;' in js and '_nsOvl=on;' in js, 'the 3D scene stops drawing while Flow Talkers or Wi-Fi covers it')
+ov = html[html.index('id="talkersOverlay"'):html.index('id="talkersOverlay"') + 220]
+check('backdrop-filter' not in ov and 'background:#060a1c' in ov, 'the overlay has a solid background and no blur')
+check('function _tkSticky(' in js and 'function _tkMembers(' in js and '_nowR-_tkRank.at>6000' in js, 'hosts keep their slot; the order is re-ranked at most every 6 s')
+check("const col=PC[f.proto]||TC[_tkHash(f.dst)%TC.length]" in js, 'a ribbon is coloured by protocol, not by its rank')
+check('const _ek=1-Math.exp(-_dt*7);' in js and "b._t=t;" in js, 'ribbons glide to a new layout instead of jumping')
+check('shadowBlur' not in fa[:9000] and 'hs*0.866' not in fa and 'ctx.drawImage(_tkBackdrop(W,H,dpr),0,0,W,H);' in fa, 'the draw loop has no per-frame blur or hex grid; the backdrop is cached')
+check('const dpr=Math.min(window.devicePixelRatio||1,1.5);' in js, 'the overlay canvas is capped at 1.5x pixel density')
+
+# ── metal floor ──
+check('new THREE.MeshStandardMaterial({map:tex,metalness:0.92' in js and 'THREE.PMREMGenerator(renderer)' in js and "console.warn('metal floor:'" in js,
+      'the floor is a metal plate, and the page still works if the plate cannot be built')
+check('_nsRefl.count=N; _nsRefl.visible=flat&&_gridVisible;' in js and '_nsRefl.setColorAt(i,_nsC)' in js, 'each host has a pool of its colour on the floor, hidden with the grid and in World View')
+
 # ── guide ──
 G = mod.UserGuideWindow
 wn = ' '.join(str(i[1]) for i in G.CONTENT.get('whatsnew', []))
